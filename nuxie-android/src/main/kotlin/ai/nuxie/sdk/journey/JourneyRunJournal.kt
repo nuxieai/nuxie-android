@@ -67,17 +67,18 @@ internal data class JourneyRun(
     data class Completion(val outcome: String, val atMillis: Long)
     data class ExperimentExposure(
         val experimentId: String,
+        val stepId: String,
         val variantId: String,
         val isHoldout: Boolean,
         val kind: Kind,
         val eventId: String,
         val selectedAtMillis: Long,
-        val presentationScreenId: String? = null,
-        val shownAtMillis: Long? = null,
         val queued: Boolean = false,
     ) {
         enum class Kind {
             ASSIGNED,
+            OVERRIDE,
+            FIXED,
             FALLBACK,
         }
     }
@@ -422,49 +423,17 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
     }
 
     /** Begin a presentation without carrying the previous control invocation into it. */
-    fun preparePresentation(id: String, screenId: String): JourneyRun? = update { state ->
+    fun preparePresentation(id: String): JourneyRun? = update { state ->
         val run = state.runs[id]
             ?.takeIf { it.startedQueued && it.completion == null }
             ?: return@update null
-        run.copy(
-            presentationSource = null,
-            experimentExposures = run.experimentExposures.map { exposure ->
-                if (!exposure.queued && exposure.shownAtMillis == null &&
-                    exposure.presentationScreenId == null
-                ) {
-                    exposure.copy(presentationScreenId = screenId)
-                } else {
-                    exposure
-                }
-            },
-        ).also { state.runs[id] = it }
-    }
-
-    fun markExperimentExposuresShown(
-        id: String,
-        screenId: String,
-        atMillis: Long,
-    ): JourneyRun? = update { state ->
-        val run = state.runs[id]
-            ?.takeIf { it.startedQueued && it.completion == null }
-            ?: return@update null
-        run.copy(
-            experimentExposures = run.experimentExposures.map { exposure ->
-                if (!exposure.queued && exposure.shownAtMillis == null &&
-                    exposure.presentationScreenId == screenId
-                ) {
-                    exposure.copy(shownAtMillis = atMillis)
-                } else {
-                    exposure
-                }
-            },
-        ).also { state.runs[id] = it }
+        run.copy(presentationSource = null).also { state.runs[id] = it }
     }
 
     fun markExperimentExposureQueued(id: String, eventId: String): Boolean = update { state ->
         val run = state.runs[id] ?: return@update false
         val index = run.experimentExposures.indexOfFirst {
-            it.eventId == eventId && it.shownAtMillis != null
+            it.eventId == eventId
         }
         if (index < 0) return@update false
         val exposures = run.experimentExposures.toMutableList()
@@ -832,14 +801,14 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
             if (rawAssignment == JsonNull) continue
             val assignment = rawAssignment as? JsonObject
                 ?: throw IOException("Invalid Journey experiment assignment")
-            if (assignment.keys != setOf("variantId", "isHoldout")) {
+            if (assignment.keys != setOf("variantId", "isHoldout", "source")) {
                 throw IOException("Invalid Journey experiment assignment")
             }
             val variantId = (assignment["variantId"] as? JsonPrimitive)
                 ?.takeIf(JsonPrimitive::isString)?.content
             val isHoldout = (assignment["isHoldout"] as? JsonPrimitive)
                 ?.takeUnless(JsonPrimitive::isString)?.booleanOrNull
-            if (variantId.isNullOrEmpty() || variantId.length > 256 || isHoldout == null) {
+            if (variantId.isNullOrEmpty() || variantId.length > 256 || isHoldout == null || (assignment["source"] as? JsonPrimitive)?.takeIf { it.isString }?.content !in setOf("profile", "override", "fixed")) {
                 throw IOException("Invalid Journey experiment assignment")
             }
         }
@@ -874,18 +843,17 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         exposure: JourneyRun.ExperimentExposure,
     ): JsonObject = buildJsonObject {
         put("experimentId", JsonPrimitive(exposure.experimentId))
+        put("stepId", JsonPrimitive(exposure.stepId))
         put("variantId", JsonPrimitive(exposure.variantId))
         put("isHoldout", JsonPrimitive(exposure.isHoldout))
         put("kind", JsonPrimitive(when (exposure.kind) {
             JourneyRun.ExperimentExposure.Kind.ASSIGNED -> "assigned"
+                JourneyRun.ExperimentExposure.Kind.OVERRIDE -> "override"
+                JourneyRun.ExperimentExposure.Kind.FIXED -> "fixed"
             JourneyRun.ExperimentExposure.Kind.FALLBACK -> "fallback"
         }))
         put("eventId", JsonPrimitive(exposure.eventId))
         put("selectedAtMillis", JsonPrimitive(exposure.selectedAtMillis))
-        exposure.presentationScreenId?.let {
-            put("presentationScreenId", JsonPrimitive(it))
-        }
-        exposure.shownAtMillis?.let { put("shownAtMillis", JsonPrimitive(it)) }
         if (exposure.queued) put("queued", JsonPrimitive(true))
     }
 
@@ -894,22 +862,23 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
     ): JourneyRun.ExperimentExposure {
         val kind = when (value.text("kind")) {
             "assigned" -> JourneyRun.ExperimentExposure.Kind.ASSIGNED
+            "override" -> JourneyRun.ExperimentExposure.Kind.OVERRIDE
+            "fixed" -> JourneyRun.ExperimentExposure.Kind.FIXED
             "fallback" -> JourneyRun.ExperimentExposure.Kind.FALLBACK
             else -> throw IOException("Invalid experiment exposure kind")
         }
         return JourneyRun.ExperimentExposure(
             experimentId = value.text("experimentId"),
+            stepId = value.text("stepId"),
             variantId = value.text("variantId"),
             isHoldout = value.getValue("isHoldout").jsonPrimitive.boolean,
             kind = kind,
             eventId = value.text("eventId"),
             selectedAtMillis = value.number("selectedAtMillis"),
-            presentationScreenId = value["presentationScreenId"]?.jsonPrimitive?.content,
-            shownAtMillis = value["shownAtMillis"]?.jsonPrimitive?.long,
             queued = value["queued"]?.jsonPrimitive?.boolean ?: false,
         ).also {
             if (it.experimentId.isEmpty() || it.variantId.isEmpty() || it.eventId.isEmpty() ||
-                it.selectedAtMillis < 0 || (it.shownAtMillis ?: 0) < 0
+                it.selectedAtMillis < 0
             ) throw IOException("Invalid experiment exposure")
         }
     }

@@ -113,6 +113,7 @@ class JourneyRunJournalTest {
                         mapOf(
                             "variantId" to JsonPrimitive("treatment"),
                             "isHoldout" to JsonPrimitive(true),
+                        "source" to JsonPrimitive("profile"),
                         ),
                     ),
                     "unassigned" to JsonNull,
@@ -300,7 +301,7 @@ class JourneyRunJournalTest {
         assertNotNull(reopened.stagePresentationPublication(run.id, "other-event", run.context, next))
         reopened.transition(run.id, "navigate", run.context, clearingPresentationPublication = "buy-again", presentationEventId = "purchase-event")
         assertNotNull(reopened.runs().single().presentationSource)
-        reopened.preparePresentation(run.id, "another-screen")
+        reopened.preparePresentation(run.id)
         assertNull(JourneyRunJournal(directory, "customer").runs().single().presentationSource)
     }
 
@@ -487,6 +488,7 @@ class JourneyRunJournalTest {
         )
         journal.markStartedQueued(run)
         val exposure = JourneyRun.ExperimentExposure(
+                stepId = "selector",
             experimentId = "checkout",
             variantId = "fallback",
             isHoldout = false,
@@ -500,23 +502,22 @@ class JourneyRunJournalTest {
             run.context,
             experimentExposure = exposure,
         )
-        journal.preparePresentation(run.id, "screen_checkout")
+        journal.preparePresentation(run.id)
         val captured = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
         val reporter = JourneyExperimentExposureReporter(
             JourneyRunJournal(directory, "customer"),
-        ) { name, properties, _, _ ->
+        ) { name, properties, _, _, occurredAt ->
+            assertEquals(2_000L, occurredAt)
             captured += name to properties
             true
         }
 
         assertTrue(reporter.flushPending())
-        assertTrue(captured.isEmpty())
+        assertEquals(1, captured.size)
         val bound = JourneyRunJournal(directory, "customer").runs().single()
             .experimentExposures.single()
-        assertEquals("screen_checkout", bound.presentationScreenId)
-        assertNull(bound.shownAtMillis)
+        assertTrue(bound.queued)
 
-        journal.markExperimentExposuresShown(run.id, "screen_checkout", 3_000)
         assertTrue(reporter.flushPending())
         assertTrue(reporter.flushPending())
 
@@ -524,7 +525,7 @@ class JourneyRunJournalTest {
         val properties = captured.single().second
         assertEquals(run.journeyId, properties["journey_id"])
         assertEquals("experience", properties["experience_id"])
-        assertEquals("version", properties["experience_version"])
+        assertEquals("version", properties["experience_version_id"])
         assertEquals(run.reference.getValue("legId").jsonPrimitive.content, properties["leg_id"])
         assertEquals(run.generation, properties["leg_generation"])
         assertEquals("checkout", properties["experiment_key"])
@@ -533,7 +534,6 @@ class JourneyRunJournalTest {
         assertEquals(false, properties["is_holdout"])
         val queued = JourneyRunJournal(directory, "customer").runs().single()
             .experimentExposures.single()
-        assertEquals(3_000L, queued.shownAtMillis)
         assertTrue(queued.queued)
     }
 

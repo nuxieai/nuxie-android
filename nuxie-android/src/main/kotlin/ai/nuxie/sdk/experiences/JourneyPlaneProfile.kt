@@ -62,7 +62,8 @@ internal class JourneyPlaneProfile private constructor(
                 if (runCatching { id(JsonPrimitive(key)) }.isFailure) continue
                 val assignment = value as? JsonObject
                 val valid = assignment != null &&
-                    assignment.keys == setOf("variantId", "isHoldout") &&
+                    assignment.keys == setOf("variantId", "isHoldout", "source") &&
+                        (assignment["source"] as? JsonPrimitive)?.takeIf { it.isString }?.content in setOf("profile", "override", "fixed") &&
                     runCatching { id(assignment["variantId"]) }.isSuccess &&
                     runCatching { boolean(assignment["isHoldout"]) }.isSuccess
                 assignments[key] = if (valid) requireNotNull(assignment) else JsonNull
