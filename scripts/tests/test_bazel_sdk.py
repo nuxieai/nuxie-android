@@ -39,7 +39,8 @@ class BazelSdkPackagingTests(unittest.TestCase):
         outputs = "\n".join("bazel-out/bin/" + name for name in (
             "sdk_instrumentation_apk_deploy.jar", "sdk_instrumentation_apk_unsigned.apk",
             "sdk_instrumentation_apk.apk"))
-        with patch.object(sdk, "ROOT", self.directory), patch.object(sdk, "bazel", return_value=outputs):
+        with patch.object(sdk, "ROOT", self.directory), \
+                patch.object(sdk, "bazel", side_effect=[outputs, str(self.directory)]):
             self.assertEqual(sdk.artifact("//:sdk_instrumentation_apk", filename="sdk_instrumentation_apk.apk"),
                              self.directory / "bazel-out/bin/sdk_instrumentation_apk.apk")
 
@@ -58,6 +59,16 @@ class BazelSdkPackagingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 sdk.artifact("//:sdk_instrumentation_apk")
 
+    def test_external_artifact_is_read_from_the_execution_root(self):
+        execution_root = self.directory / "private execution root"
+        relative = "external/runtime/provenance.json"
+        provenance = execution_root / relative
+        provenance.parent.mkdir(parents=True)
+        provenance.write_bytes(b'{"mode":"published"}')
+        with patch.object(sdk, "ROOT", self.directory / "checkout"), \
+                patch.object(sdk, "bazel", side_effect=[relative, str(execution_root)]):
+            self.assertEqual(sdk.artifact("@runtime//:provenance.json").read_bytes(), provenance.read_bytes())
+
     def test_instrumentation_command_installs_the_signed_binary_output(self):
         outputs = "\n".join("bazel-out/bin/" + name for name in (
             "sdk_instrumentation_apk_deploy.jar", "sdk_instrumentation_apk_unsigned.apk",
@@ -65,7 +76,7 @@ class BazelSdkPackagingTests(unittest.TestCase):
         with patch("sys.argv", ["sdk.py", "instrumentation-run", "--serial", "emulator-5554"]), \
                 patch.dict("os.environ", {"ANDROID_HOME": str(self.directory / "android")}), \
                 patch.object(sdk, "ROOT", self.directory), patch.object(sdk, "toolchain"), \
-                patch.object(sdk, "bazel", return_value=outputs), \
+                patch.object(sdk, "bazel", side_effect=[None, outputs, str(self.directory)]), \
                 patch.object(sdk.subprocess, "run") as run, patch.object(sdk, "run_instrumentation") as instrument:
             sdk.main()
         adb = [str(self.directory / "android/platform-tools/adb"), "-s", "emulator-5554"]
