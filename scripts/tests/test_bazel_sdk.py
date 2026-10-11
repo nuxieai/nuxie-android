@@ -36,6 +36,37 @@ class BazelSdkPackagingTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
 
+    def test_toolchain_uses_installed_pin_instead_of_a_stale_runner_ndk(self):
+        android = self.directory / "android"
+        for relative in ("platforms/android-36/android.jar", "build-tools/36.0.0/aapt2"):
+            tool = android / relative
+            tool.parent.mkdir(parents=True, exist_ok=True)
+            tool.touch()
+        pinned = android / "ndk/29.0.14206865"
+        inherited = self.directory / "runner-ndk"
+        for ndk, revision in ((pinned, "29.0.14206865"), (inherited, "27.2.12479018")):
+            ndk.mkdir(parents=True)
+            (ndk / "source.properties").write_text("Pkg.Revision = " + revision + "\n")
+        with patch.dict(os.environ, {"ANDROID_HOME": str(android), "ANDROID_NDK_HOME": str(inherited)}):
+            self.assertEqual(sdk.toolchain(), (android.resolve(), pinned.resolve()))
+            self.assertEqual(os.environ["ANDROID_NDK_HOME"], str(pinned.resolve()))
+
+    def test_toolchain_accepts_an_external_pin_when_not_installed_under_the_sdk(self):
+        android = self.directory / "android"
+        for relative in ("platforms/android-36/android.jar", "build-tools/36.0.0/aapt2"):
+            tool = android / relative
+            tool.parent.mkdir(parents=True, exist_ok=True)
+            tool.touch()
+        external = self.directory / "external-ndk"
+        external.mkdir()
+        properties = external / "source.properties"
+        properties.write_text("Pkg.Revision = 29.0.14206865\n")
+        with patch.dict(os.environ, {"ANDROID_HOME": str(android), "ANDROID_NDK_HOME": str(external)}):
+            self.assertEqual(sdk.toolchain(), (android.resolve(), external.resolve()))
+            properties.write_text("Pkg.Revision = 27.2.12479018\n")
+            with self.assertRaisesRegex(ValueError, "requires the pinned NDK"):
+                sdk.toolchain()
+
     def test_apk_artifact_selection_uses_the_signed_apk_from_binary_outputs(self):
         outputs = "\n".join("bazel-out/bin/" + name for name in (
             "sdk_instrumentation_apk_deploy.jar", "sdk_instrumentation_apk_unsigned.apk",

@@ -71,7 +71,11 @@ def toolchain():
     for relative in ("platforms/android-36/android.jar", "build-tools/36.0.0/aapt2"):
         if not (sdk / relative).is_file():
             raise ValueError(f"Pinned Android tool is missing: {sdk / relative}")
-    ndk = Path(os.environ.get("ANDROID_NDK_HOME", sdk / "ndk/29.0.14206865")).resolve()
+    # Hosted runners can inherit an older NDK even after installing our pin.
+    # Prefer the workspace's pinned installation; an external pin is a fallback.
+    pinned_ndk = sdk / "ndk/29.0.14206865"
+    ndk = pinned_ndk if pinned_ndk.is_dir() else Path(os.environ.get("ANDROID_NDK_HOME", pinned_ndk))
+    ndk = ndk.resolve()
     properties = dict(re.findall(r"^(\w[\w.]*)\s*=\s*(.+)$", (ndk / "source.properties").read_text(), re.MULTILINE))
     if properties.get("Pkg.Revision") != "29.0.14206865":
         raise ValueError("Android SDK compilation requires the pinned NDK29.0.14206865")
