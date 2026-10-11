@@ -181,12 +181,12 @@ def _runfile(ctx, file):
         return file.short_path[3:]
     return ctx.workspace_name + "/" + file.short_path
 
-def _host_harness_impl(ctx):
-    launcher = ctx.actions.declare_file(ctx.label.name + ".sh")
+def _host_launcher(ctx, is_test = False):
+    native_launcher = ctx.actions.declare_file(ctx.label.name + ("_native.sh" if is_test else ".sh"))
     binary = ctx.executable.binary
     ctx.actions.expand_template(
         template = ctx.file._launcher,
-        output = launcher,
+        output = native_launcher,
         substitutions = {
             "@binary@": _runfile(ctx, binary),
             "@jni@": _runfile(ctx, ctx.file.jni),
@@ -195,10 +195,30 @@ def _host_harness_impl(ctx):
         },
         is_executable = True,
     )
-    runfiles = ctx.runfiles(files = [binary, ctx.file.jni, ctx.file.capi])
+    runfiles = ctx.runfiles(files = [native_launcher, binary, ctx.file.jni, ctx.file.capi])
     for dep in [ctx.attr.binary, ctx.attr.jni, ctx.attr.capi]:
         runfiles = runfiles.merge(dep[DefaultInfo].default_runfiles)
+    launcher = native_launcher
+    if is_test:
+        launcher = ctx.actions.declare_file(ctx.label.name + ".sh")
+        ctx.actions.expand_template(
+            template = ctx.file._test_launcher,
+            output = launcher,
+            substitutions = {
+                "@native_launcher@": _runfile(ctx, native_launcher),
+                "@verify_tests@": _runfile(ctx, ctx.executable._verify_tests),
+            },
+            is_executable = True,
+        )
+        runfiles = runfiles.merge(ctx.runfiles(files = [ctx.executable._verify_tests]))
+        runfiles = runfiles.merge(ctx.attr._verify_tests[DefaultInfo].default_runfiles)
     return [DefaultInfo(executable = launcher, runfiles = runfiles)]
+
+def _host_harness_impl(ctx):
+    return _host_launcher(ctx)
+
+def _host_test_impl(ctx):
+    return _host_launcher(ctx, is_test = True)
 
 _host_attrs = {
     "binary": attr.label(executable = True, cfg = "target", mandatory = True),
@@ -208,7 +228,10 @@ _host_attrs = {
 }
 
 sdk_host_harness = rule(implementation = _host_harness_impl, attrs = _host_attrs, executable = True)
-sdk_host_test = rule(implementation = _host_harness_impl, attrs = _host_attrs, test = True)
+sdk_host_test = rule(implementation = _host_test_impl, attrs = dict(_host_attrs, **{
+    "_test_launcher": attr.label(default = Label("//scripts/bazel:host_test_launcher.sh"), allow_single_file = True),
+    "_verify_tests": attr.label(default = Label("//scripts/bazel:verify_host_tests"), executable = True, cfg = "exec"),
+}), test = True)
 
 def _assets_impl(ctx):
     files = {}

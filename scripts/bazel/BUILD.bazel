@@ -4,7 +4,7 @@ load("@rules_java//java:java_binary.bzl", "java_binary")
 load("@rules_java//toolchains:default_java_toolchain.bzl", "VANILLA_TOOLCHAIN_CONFIGURATION", "default_java_toolchain")
 
 package(default_visibility = ["//visibility:public"])
-exports_files(["runtime_artifacts.py", "host_runtime.py", "host_render_launcher.sh", "jvm_test_launcher.sh", "rules-kotlin-2.0-adapter.patch", "rules-android-min-sdk-23.patch"])
+exports_files(["runtime_artifacts.py", "host_runtime.py", "host_render_launcher.sh", "host_test_launcher.sh", "jvm_test_launcher.sh", "rules-kotlin-2.0-adapter.patch", "rules-android-min-sdk-23.patch"])
 
 # Match the owning lint module's JDK 17 compiler, independently of the JDK 21
 # used by Android tools. Newer javac emits PSI interface calls lint rejects.
@@ -36,6 +36,7 @@ define_kt_toolchain(
 
 py_binary(name = "package_aar", srcs = ["package_aar.py"])
 py_binary(name = "test_suite", srcs = ["test_suite.py"])
+py_binary(name = "verify_host_tests", srcs = ["verify_host_tests.py"])
 
 java_binary(
     name = "dokka_cli",
