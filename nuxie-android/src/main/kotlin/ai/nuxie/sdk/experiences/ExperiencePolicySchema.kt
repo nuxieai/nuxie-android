@@ -80,7 +80,7 @@ internal object ExperiencePolicySchema {
         if (it.trim() != it) fail("policy identifier whitespace")
     }
 
-    private fun event(value: JsonElement?) {
+    fun event(value: JsonElement?) {
         val name = identifier(value)
         if (name.startsWith("\$") && name !in systemEvents) fail("unsupported policy evidence")
     }

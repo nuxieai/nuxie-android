@@ -2,6 +2,7 @@ package ai.nuxie.sdk.billing
 
 import ai.nuxie.sdk.experiences.AuthenticatedJourneyRelease
 import ai.nuxie.sdk.features.FeatureAllowance
+import ai.nuxie.sdk.presentation.JourneyPresentationActionResult
 import android.app.Activity
 import com.android.billingclient.api.BillingClient
 import kotlinx.serialization.json.JsonArray
@@ -199,6 +200,31 @@ internal class JourneyCommerceSession(
             expectedOwnerDistinctId = correlation.distinctId,
             outcomeCorrelation = correlation,
         )
+    }
+
+    /** Prepared action adapter: store-owned completion follows the ordinary
+     * authored outlet, without inventing a commerce event to resume it. */
+    suspend fun purchaseAction(
+        activity: Activity,
+        placementId: String,
+        correlation: CommerceOutcomeCorrelation,
+    ): JourneyPresentationActionResult {
+        val product = productsByPlacement[placementId]
+            ?: return JourneyPresentationActionResult.Failed
+        var completesWithoutAcquisition = false
+        purchases.purchase(
+            activity = activity,
+            product = product,
+            replacement = null,
+            expectedOwnerDistinctId = correlation.distinctId,
+            outcomeCorrelation = correlation,
+            onCompletedWithoutAcquisition = { completesWithoutAcquisition = true },
+        )
+        return if (completesWithoutAcquisition) {
+            JourneyPresentationActionResult.Advanced("completed")
+        } else {
+            JourneyPresentationActionResult.AwaitingOutcome
+        }
     }
 
     suspend fun restore(correlation: CommerceOutcomeCorrelation): RestoreResult =

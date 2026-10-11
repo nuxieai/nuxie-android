@@ -2970,13 +2970,79 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun replacementIsPassedExactlyAndMissingReplacementReturnsTypedFailure() = runTest {
+    fun alreadyOwnedLaunchCompletesWithoutRecordingAcquisitionOrFailure() = runTest {
+        val events = mutableListOf<Pair<String, Map<String, Any?>>>()
+        val fixture = fixture(this, emissions = events)
+        var completions = 0
+        fixture.billing.launchCode = BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED
+        val owner = fixture.core.identity.distinctId()
+        assertEquals(PurchaseResult.Purchased, fixture.service.purchase(activity(), product(), null,
+            outcomeCorrelation = CommerceOutcomeCorrelation("owned-effect", owner, "owned-journey"),
+            onCompletedWithoutAcquisition = { completions++ }))
+        assertTrue(events.none { it.first == SystemEventNames.PURCHASE_COMPLETED || it.first == SystemEventNames.PURCHASE_FAILED })
+        assertTrue(fixture.purchaseEventCaptureAttempts.isEmpty())
+        assertTrue(fixture.store.load().isEmpty())
+        assertEquals(1, completions)
+        fixture.close()
+    }
+
+    @Test
+    fun alreadyOwnedCallbackCompletesWithoutRecordingAcquisitionOrFailure() = runTest {
+        val events = mutableListOf<Pair<String, Map<String, Any?>>>()
+        val fixture = fixture(this, emissions = events)
+        var completions = 0
+        val checkout = async { fixture.service.purchase(activity(), product(), null, onCompletedWithoutAcquisition = { completions++ }) }
+        runCurrent()
+        fixture.service.onPurchasesUpdated(PurchaseUpdate(BillingResult.newBuilder().setResponseCode(BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED).build(), null))
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        assertTrue(events.none { it.first == SystemEventNames.PURCHASE_COMPLETED || it.first == SystemEventNames.PURCHASE_FAILED })
+        assertTrue(fixture.store.load().isEmpty())
+        assertEquals(1, completions)
+        fixture.close()
+    }
+
+    @Test
+    fun alreadyOwnedJourneyBuyUsesTheAuthoredCompletedOutletWithoutRecords() = runTest {
+        val events = mutableListOf<Pair<String,Map<String,Any?>>>()
+        val fixture = fixture(this,emissions = events)
+        fixture.billing.launchCode = BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED
+        val shown = product()
+        val session = JourneyCommerceSession(listOf(shown),fixture.service)
+        val result = session.purchaseAction(activity(),checkNotNull(shown.placementId),CommerceOutcomeCorrelation("silent-effect",fixture.core.identity.distinctId(),"plans-journey"))
+        assertEquals(ai.nuxie.sdk.presentation.JourneyPresentationActionResult.Advanced("completed"),result)
+        assertTrue(events.isEmpty())
+        assertTrue(fixture.purchaseEventCaptureAttempts.isEmpty())
+        assertTrue(fixture.store.load().isEmpty())
+        assertTrue(fixture.store.loadBindings().all { it.outcomeEventId == null })
+        fixture.close()
+    }
+
+    @Test
+    fun sameProductAnotherPlanUsesTheOwnedTokenWithoutGuessingAMode() = runTest {
+        val fixture = fixture(this)
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(playPurchase("owned-token", products = listOf("play-pro")))
+        fixture.billing.launchCode = BillingClient.BillingResponseCode.USER_CANCELED
+        assertEquals(PurchaseResult.Cancelled, fixture.service.purchase(activity(), product(subscription = true), null))
+        assertEquals("owned-token", fixture.billing.launched?.ownedPurchaseToken)
+        assertNull(fixture.billing.launched?.replacement)
+        fixture.close()
+    }
+
+    @Test
+    fun differentProductLaunchesPlainlyDespiteAnotherActiveSubscription() = runTest {
+        val fixture = fixture(this)
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(playPurchase("owned-token", products = listOf("another-product")))
+        fixture.billing.launchCode = BillingClient.BillingResponseCode.USER_CANCELED
+        assertEquals(PurchaseResult.Cancelled, fixture.service.purchase(activity(), product(subscription = true), null))
+        assertNull(fixture.billing.launched?.ownedPurchaseToken)
+        assertNull(fixture.billing.launched?.replacement)
+        fixture.close()
+    }
+
+    @Test
+    fun appSuppliedReplacementIsPassedExactly() = runTest {
         val fixture = fixture(this)
         fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(playPurchase("old-token"))
-        val missing = fixture.service.purchase(activity(), product(subscription = true), null)
-        assertTrue((missing as PurchaseResult.Failed).cause is SubscriptionReplacementRequiredException)
-        assertEquals(null, fixture.billing.launched)
-
         val replacement = SubscriptionReplacement("old-token", ReplacementMode.DEFERRED)
         val replacing = async { fixture.service.purchase(activity(), product(subscription = true), replacement) }
         runCurrent()
