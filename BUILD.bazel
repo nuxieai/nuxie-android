@@ -277,8 +277,6 @@ kt_android_library(
     custom_package = "ai.nuxie.example",
     exports_manifest = 1,
     resource_files = glob(["example-app/src/main/res/**"]),
-    assets = glob(["example-app/src/debug/assets/**"]),
-    assets_dir = "example-app/src/debug/assets",
     deps = [":sdk_debug", ":sdk_native"],
 )
 
@@ -288,6 +286,8 @@ android_binary(
     manifest = ":example_manifest",
     custom_package = "ai.nuxie.example",
     manifest_values = {"applicationId": "ai.nuxie.example", "minSdkVersion": "23", "targetSdkVersion": "36", "versionCode": "11", "versionName": "0.1.10"},
+    assets = glob(["example-app/src/debug/assets/**"]),
+    assets_dir = "example-app/src/debug/assets",
     deps = [":example_app"],
 )
 
