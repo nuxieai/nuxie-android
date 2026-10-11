@@ -70,6 +70,7 @@ class BazelSdkPackagingTests(unittest.TestCase):
             self.assertEqual(sdk.artifact("@runtime//:provenance.json").read_bytes(), provenance.read_bytes())
 
     def test_instrumentation_command_installs_the_signed_binary_output(self):
+        (self.directory / "build.gradle.kts").write_text('version = "0.1.10"\n')
         outputs = "\n".join("bazel-out/bin/" + name for name in (
             "sdk_instrumentation_apk_deploy.jar", "sdk_instrumentation_apk_unsigned.apk",
             "sdk_instrumentation_apk.apk"))
