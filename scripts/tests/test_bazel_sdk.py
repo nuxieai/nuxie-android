@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import tomllib
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -276,13 +277,13 @@ class BazelSdkPackagingTests(unittest.TestCase):
             self.assertFalse(any("hostrender" in name for name in archive.namelist()))
 
     def test_maven_compile_and_runtime_scopes_match_the_owning_gradle_pom(self):
-        # API/runtime scopes were captured by owning Gradle at8c7de363.
-        # Main's canonical Gradle declarations omit V3's AndroidX Browser.
+        # Scopes follow the owning Gradle module's api/implementation boundary.
         expected = {
             ("com.android.billingclient", "billing", "9.1.0", "compile"),
             ("org.jetbrains.kotlinx", "kotlinx-coroutines-android", "1.9.0", "compile"),
             ("org.jetbrains.kotlin", "kotlin-stdlib", "2.0.21", "compile"),
             ("androidx.sqlite", "sqlite-framework", "2.6.2", "runtime"),
+            ("androidx.browser", "browser", "1.8.0", "runtime"),
             ("org.jetbrains.kotlinx", "kotlinx-serialization-json", "1.7.2", "runtime"),
         }
         ns = {"m": "http://maven.apache.org/POM/4.0.0"}
@@ -300,9 +301,20 @@ class BazelSdkPackagingTests(unittest.TestCase):
         api = {dep["module"] for dep in variants["java-api:library"]["dependencies"]}
         runtime_modules = {dep["module"] for dep in variants["java-runtime:library"]["dependencies"]}
         self.assertEqual(api, {"billing", "kotlinx-coroutines-android", "kotlin-stdlib"})
-        self.assertEqual(runtime_modules - api, {"sqlite-framework", "kotlinx-serialization-json"})
+        self.assertEqual(runtime_modules - api, {"sqlite-framework", "browser", "kotlinx-serialization-json"})
         self.assertIn("java-runtime:sources", variants)
         self.assertIn("java-runtime:javadoc", variants)
+
+    def test_custom_tab_resolver_and_publication_use_the_owning_version_catalog(self):
+        catalog = tomllib.loads((ROOT / "gradle/libs.versions.toml").read_text())
+        library = catalog["libraries"]["androidx-browser"]
+        version = catalog["versions"][library["version"]["ref"]]
+        group, name = library["module"].split(":")
+        lock = json.loads((ROOT / "scripts/bazel/locks/sdk_maven_install.json").read_text())
+        resolved = lock["artifacts"][library["module"] + ":aar"]
+        self.assertEqual(resolved["version"], version)
+        self.assertRegex(resolved["shasums"]["jar"], r"^[0-9a-f]{64}$")
+        self.assertIn((group, name, version, "runtime"), sdk.dependencies())
 
     def test_atomic_version_replacement_drops_stale_signatures_and_keeps_other_versions(self):
         destination = self.directory / "0.1.0"

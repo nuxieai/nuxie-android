@@ -23,6 +23,7 @@ cc_binary(
 )
 
 SDK_DEPS = [
+    "@sdk_maven//:androidx_browser_browser",
     "@sdk_maven//:androidx_sqlite_sqlite_framework",
     "@sdk_maven//:com_android_billingclient_billing",
     "@sdk_maven//:org_jetbrains_annotations",
@@ -169,7 +170,11 @@ sdk_host_test(
     tags = ["manual"],
 )
 
-TEST_SRCS = glob([
+SHARED_TEST_SRCS = glob([
+    "nuxie-android/src/sharedTest/**/*.kt", "nuxie-android/src/sharedTest/**/*.java",
+], allow_empty = True)
+
+TEST_SRCS = SHARED_TEST_SRCS + glob([
     "nuxie-android/src/test/**/*.kt", "nuxie-android/src/test/**/*.java",
     "nuxie-android/src/hostRenderHarness/**/*.kt",
 ])
@@ -309,7 +314,7 @@ genrule(
 
 kt_android_library(
     name = "instrumentation",
-    srcs = glob(["nuxie-android/src/androidTest/**/*.kt"]),
+    srcs = SHARED_TEST_SRCS + glob(["nuxie-android/src/androidTest/**/*.kt"]),
     associates = [":sdk_debug"],
     manifest = ":instrumentation_library_manifest",
     custom_package = "ai.nuxie.sdk",
