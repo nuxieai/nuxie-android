@@ -6,6 +6,32 @@ from pathlib import Path
 import re
 
 
+def test_owners(source):
+    # Ignore comments and literals when finding class bodies and annotations.
+    source = re.sub(
+        r'/\*[\s\S]*?\*/|//[^\n]*|"""[\s\S]*?"""|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`[^`]*`',
+        lambda match: re.sub(r"[^\n]", " ", match.group()), source,
+    )
+    declarations = list(re.finditer(r"^(?:public\s+)?(?:final\s+)?class\s+(\w+)", source, re.MULTILINE))
+    for index, declaration in enumerate(declarations):
+        limit = declarations[index + 1].start() if index + 1 < len(declarations) else len(source)
+        body = source.find("{", declaration.end(), limit)
+        if body < 0:
+            continue
+        depth = 0
+        for position in range(body, limit):
+            character = source[position]
+            if character == "{":
+                depth += 1
+            elif character == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif character == "@" and depth == 1 and re.match(r"@(?:org\.junit\.)?Test\b", source[position:]):
+                yield declaration.group(1)
+                break
+
+
 def classes(paths):
     result = set()
     for path in paths:
@@ -15,8 +41,8 @@ def classes(paths):
         package = re.search(r"^package\s+([\w.]+)", source, re.MULTILINE)
         if not package:
             raise ValueError(f"JUnit input has no package: {path}")
-        # Helpers and nested fixtures are indented; JVM JUnit owners are top-level.
-        for name in re.findall(r"^(?:public\s+)?(?:final\s+)?class\s+(\w+)", source, re.MULTILINE):
+        # A helper can be top-level in a test file without owning any test methods.
+        for name in test_owners(source):
             if name == "HostRenderSmokeTest":
                 continue
             result.add(package.group(1) + "." + name)
