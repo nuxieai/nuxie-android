@@ -20,6 +20,7 @@ def module(name):
 
 host = module("host_runtime")
 sdk = module("sdk")
+verifier = module("verify_host_tests")
 
 
 class HostRendererTests(unittest.TestCase):
@@ -108,6 +109,63 @@ class HostRendererTests(unittest.TestCase):
                                 "RUNFILES_DIR": str(self.directory / "missing")}, text=True, capture_output=True)
         self.assertEqual(result.returncode, 1)
         self.assertIn("requires its declared Bazel runfiles", result.stderr)
+
+    def test_host_report_requires_an_executed_method_but_allows_individual_skips(self):
+        report = self.directory / "tests.xml"
+        report.write_text('<testsuites><testsuite><testcase name="render" />'
+                          '<testcase name="optional"><skipped /></testcase></testsuite></testsuites>')
+        self.assertEqual(verifier.verify_report(report), (1, 1))
+
+    def test_empty_and_all_skipped_host_reports_fail_the_executable(self):
+        for contents in ('<testsuites><testsuite tests="0" /></testsuites>',
+                         '<testsuite><testcase name="render"><skipped /></testcase></testsuite>'):
+            report = self.directory / "tests.xml"
+            report.write_text(contents)
+            result = subprocess.run([sys.executable, str(ROOT / "scripts/bazel/verify_host_tests.py"),
+                                     str(report)], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("executed no test methods", result.stderr)
+
+    def test_missing_malformed_and_failed_host_reports_fail_closed(self):
+        report = self.directory / "tests.xml"
+        for contents in (None, '<testsuite',
+                         '<testsuite><testcase name="render"><failure /></testcase></testsuite>',
+                         '<testsuite><testcase name="render"><error /></testcase></testsuite>'):
+            report.unlink(missing_ok=True)
+            if contents is not None:
+                report.write_text(contents)
+            result = subprocess.run([sys.executable, str(ROOT / "scripts/bazel/verify_host_tests.py"),
+                                     str(report)], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 1)
+
+    def test_wrapped_host_test_propagates_native_and_report_failures(self):
+        launcher = self.directory / "host-test.sh"
+        runfiles = Path(str(launcher) + ".runfiles")
+        runfiles.mkdir()
+        native = runfiles / "native"
+        native.write_text('#!/usr/bin/env bash\ncat "$HOST_FIXTURE_XML" > "$XML_OUTPUT_FILE"\n'
+                          'exit "${NATIVE_EXIT:-0}"\n')
+        native.chmod(0o755)
+        checker = runfiles / "checker"
+        checker.write_text('#!/usr/bin/env bash\nexec "$PYTHON_FOR_TEST" "$VERIFIER_FOR_TEST" "$@"\n')
+        checker.chmod(0o755)
+        template = (ROOT / "scripts/bazel/host_test_launcher.sh").read_text()
+        launcher.write_text(template.replace("@native_launcher@", "native").replace("@verify_tests@", "checker"))
+        launcher.chmod(0o755)
+        fixture = self.directory / "fixture.xml"
+        environment = {**os.environ, "PYTHON_FOR_TEST": sys.executable,
+                       "VERIFIER_FOR_TEST": str(ROOT / "scripts/bazel/verify_host_tests.py"),
+                       "HOST_FIXTURE_XML": str(fixture), "XML_OUTPUT_FILE": str(self.directory / "result.xml")}
+        for contents, native_exit, expected in (
+            ('<testsuite><testcase name="render" /></testsuite>', "0", 0),
+            ('<testsuite tests="0" />', "0", 1),
+            ('<testsuite><testcase name="render"><skipped /></testcase></testsuite>', "0", 1),
+            ('<testsuite><testcase name="render" /></testsuite>', "6", 6),
+        ):
+            fixture.write_text(contents)
+            result = subprocess.run([str(launcher)], env={**environment, "NATIVE_EXIT": native_exit},
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, expected, result.stderr)
 
 
 if __name__ == "__main__":

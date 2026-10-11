@@ -100,6 +100,8 @@ Absolute checkout paths are absent from native compile/link arguments.
 `host-render-smoke` runs the four existing live tests through
 `//:host_render_smoke` in a separate JVM. Both frontends require a macOS or Linux
 scripting-enabled host runtime. Vulkan/loader environment variables are retained.
+The wrapped JUnit runner requires an XML report with an executed test method;
+an empty or entirely skipped run fails instead of qualifying the host renderer.
 Host harness sources and libraries remain outside the published Android AAR.
 See [UNIV-4194](https://universe.basis.dev/issue/UNIV-4194) for the parent headless
 driver's qualification and adoption.

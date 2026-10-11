@@ -148,15 +148,15 @@ kt_android_library(
     target_compatible_with = HOST_COMPATIBILITY,
 )
 
-java_binary(
+java_test(
     name = "host_render_smoke_java",
-    main_class = "org.junit.runner.JUnitCore",
-    args = ["ai.nuxie.sdk.hostrender.HostRenderSmokeTest"],
+    test_class = "ai.nuxie.sdk.hostrender.HostRenderSmokeTest",
     runtime_deps = [":host_render_smoke_kotlin", "@test_maven//:junit_junit"],
     resources = glob(["nuxie-android/src/test/resources/hostrender/**"]),
     resource_strip_prefix = "nuxie-android/src/test/resources",
     data = glob(["nuxie-android/src/androidTest/assets/**", "example-app/src/debug/assets/asset-smoke/**"]),
     target_compatible_with = HOST_COMPATIBILITY,
+    tags = ["manual"],
 )
 
 sdk_host_test(
