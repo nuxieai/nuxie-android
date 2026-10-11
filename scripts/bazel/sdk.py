@@ -115,8 +115,10 @@ def bazel(command, *args, capture=False, workspace=None, output_base_variable="N
     return result.stdout.strip() if capture else None
 
 
-def artifact(label):
+def artifact(label, *, filename=None):
     paths = bazel("cquery", label, "--output=files", capture=True).splitlines()
+    if filename is not None:
+        paths = [path for path in paths if Path(path).name == filename]
     if len(paths) != 1:
         raise ValueError(f"Expected exactly one artifact for {label}; got {paths}")
     path = Path(paths[0])
@@ -436,7 +438,7 @@ def main():
                        properties=("-PnuxieExamplePurchaseProvider=" + provider,))
         elif args.command == "instrumentation-run":
             bazel("build", "//:sdk_instrumentation_apk")
-            apk = artifact("//:sdk_instrumentation_apk")
+            apk = artifact("//:sdk_instrumentation_apk", filename="sdk_instrumentation_apk.apk")
             adb = [str(Path(os.environ["ANDROID_HOME"]) / "platform-tools/adb"), "-s", args.serial]
             subprocess.run(adb + ["install", "-r", str(apk)], check=True)
             run_instrumentation(adb, args.test_class)
