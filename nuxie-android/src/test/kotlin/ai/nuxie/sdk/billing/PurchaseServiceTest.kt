@@ -1,6 +1,15 @@
 package ai.nuxie.sdk.billing
 
 import ai.nuxie.sdk.testsupport.InertBillingClientAdapter
+import ai.nuxie.sdk.testsupport.acquired
+import ai.nuxie.sdk.testsupport.renderedJourneyRelease
+import ai.nuxie.sdk.testsupport.testPresentationFences
+import ai.nuxie.sdk.presentation.ExperiencePresentationService
+import ai.nuxie.sdk.presentation.JourneyPresentationActionResult
+import ai.nuxie.sdk.presentation.JourneyPresentationOwner
+import ai.nuxie.sdk.presentation.PresentationRegistry
+import ai.nuxie.sdk.presentation.PresentationScreenHandle
+import ai.nuxie.sdk.presentation.RendererEffectLifetime
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieActivity
 import ai.nuxie.sdk.NuxieEnvironment
@@ -2999,6 +3008,99 @@ class PurchaseServiceTest {
         assertTrue(fixture.store.load().isEmpty())
         assertEquals(1, completions)
         fixture.close()
+    }
+
+    @Test
+    fun livePresentedBuyUsesAuthoredCompletedForBothAlreadyOwnedAnswers() = runTest {
+        for (callback in listOf(false, true)) {
+            val events = mutableListOf<Pair<String, Map<String, Any?>>>()
+            val fixture = fixture(this, emissions = events)
+            fixture.core.identity.setDistinctId("customer-1")
+            fixture.billing.launchCode = if (callback) BillingClient.BillingResponseCode.OK
+                else BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED
+            val shown = product(subscription = true)
+            val launched = mutableListOf<String>()
+            val presenter = ExperiencePresentationService(
+                emit = { _, _, _ -> }, scope = this, runtimeAvailable = { true },
+                currentDistinctId = { "customer-1" }, launch = launched::add,
+                commerce = JourneyCommercePreparing { JourneyCommerceSession(listOf(shown), fixture.service) },
+            )
+            try {
+                val release = renderedJourneyRelease()
+                val presentation = async {
+                    presenter.presentJourney(testPresentationFences(), release, "screen_welcome", "owned-journey",
+                        "customer-1", presenter.reserveJourney("customer-1"),
+                        acquire = { acquired(release.identity, java.io.Closeable {}) }, onOutcome = {})
+                }
+                runCurrent()
+                val id = launched.single()
+                val host = object : PresentationScreenHandle {
+                    override val rendererEffects = RendererEffectLifetime()
+                    private var closeReason: ai.nuxie.sdk.presentation.CloseReason? = null
+                    override fun requestCloseFromService(reason: ai.nuxie.sdk.presentation.CloseReason): Boolean {
+                        closeReason = reason
+                        return true
+                    }
+                    override fun screenCloseReason() = closeReason
+                    override fun finishAfterServiceClose() = PresentationRegistry.detach(id, this)
+                    override fun purchaseActivity() = activity()
+                }
+                assertTrue(PresentationRegistry.attach(id, host))
+                PresentationRegistry.reportFirstFrame(id)
+                presentation.await().getOrThrow()
+                val action = async {
+                    presenter.dispatchJourneyAction(JourneyPresentationOwner("owned-journey", "customer-1"),
+                        Json.parseToJsonElement("""{"type":"purchase","placementId":"primary"}""").jsonObject,
+                        "silent-effect")
+                }
+                runCurrent()
+                if (callback) {
+                    fixture.service.onPurchasesUpdated(PurchaseUpdate(result(BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED), null))
+                }
+                assertEquals("callback=$callback", JourneyPresentationActionResult.Advanced("completed"), action.await())
+                assertTrue(events.isEmpty())
+                assertTrue(fixture.purchaseEventCaptureAttempts.isEmpty())
+                assertTrue(fixture.store.load().isEmpty())
+                assertTrue(fixture.store.loadBindings().all { it.outcomeEventId == null })
+            } finally {
+                presenter.shutdownOwnedBy("customer-1")
+                PresentationRegistry.clearForTesting()
+                fixture.close()
+            }
+        }
+    }
+
+    @Test
+    fun alreadyOwnedAnswerRecoversAccessWithoutPurchaseOrRevenueRecords() = runTest {
+        val events = mutableListOf<Pair<String, Map<String, Any?>>>()
+        val fixture = fixture(this, emissions = events)
+        try {
+            assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+            assertTrue(fixture.store.load().isEmpty())
+            val owner = fixture.core.identity.distinctId()
+            fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+                playPurchase("owned-access-token", obfuscatedAccountId = accountHash(owner)),
+            )
+            fixture.billing.launchCode = BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED
+            var completionObservedAccess = false
+            val result = fixture.service.purchase(activity(), product(subscription = true), null,
+                onCompletedWithoutAcquisition = { completionObservedAccess = fixture.core.featureInfo.isAllowed("pro") })
+            assertEquals(PurchaseResult.Purchased, result)
+            assertTrue(completionObservedAccess)
+            assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+            assertEquals("owned-access-token", fixture.billing.launched?.ownedPurchaseToken)
+            assertNull(fixture.billing.launched?.replacement)
+            assertTrue(fixture.billing.queries.containsAll(listOf(BillingClient.ProductType.SUBS, BillingClient.ProductType.INAPP)))
+            assertTrue(events.none { it.first == SystemEventNames.PURCHASE_COMPLETED || it.first == SystemEventNames.PURCHASE_FAILED })
+            assertTrue(fixture.purchaseEventCaptureAttempts.isEmpty())
+            assertTrue(fixture.store.load().getValue("owned-access-token").synced)
+            fixture.service.recover()
+            assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+            assertTrue(events.none { it.first == SystemEventNames.PURCHASE_COMPLETED || it.first == SystemEventNames.PURCHASE_FAILED })
+            assertTrue(fixture.purchaseEventCaptureAttempts.isEmpty())
+        } finally {
+            fixture.close()
+        }
     }
 
     @Test
