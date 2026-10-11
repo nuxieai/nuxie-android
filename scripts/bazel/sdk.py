@@ -116,7 +116,10 @@ def bazel(command, *args, capture=False, workspace=None, output_base_variable="N
 
 
 def artifact(label, *, filename=None):
-    paths = bazel("cquery", label, "--output=files", capture=True).splitlines()
+    # The same label can also exist under Android split transitions in a warm
+    # server. Select the configuration used by its top-level build explicitly.
+    paths = bazel("cquery", f"config({label}, target)", "--universe_scope=" + label,
+                  "--output=files", capture=True).splitlines()
     if filename is not None:
         paths = [path for path in paths if Path(path).name == filename]
     if len(paths) != 1:
