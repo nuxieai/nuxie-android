@@ -4,7 +4,7 @@ load("@rules_java//java:java_test.bzl", "java_test")
 load("@rules_java//java:java_binary.bzl", "java_binary")
 load("@rules_kotlin//kotlin:android.bzl", "kt_android_library", "kt_android_local_test")
 load("@rules_android//android:rules.bzl", "aar_import", "android_binary", "android_library")
-load("//scripts/bazel:sdk_rules.bzl", "sdk_library", "sdk_aar", "sdk_docs", "sdk_jvm_test", "sdk_assets", "sdk_host_harness", "sdk_host_test")
+load("//scripts/bazel:sdk_rules.bzl", "sdk_lint", "sdk_library", "sdk_aar", "sdk_docs", "sdk_jvm_test", "sdk_assets", "sdk_host_harness", "sdk_host_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -51,7 +51,7 @@ genrule(
     cmd = "$(location //scripts/bazel:package_aar) manifest --input $(SRCS) --output $@",
 )
 
-java_library(
+sdk_lint(
     name = "lint",
     srcs = glob(["nuxie-lint/src/main/java/**/*.java"]),
     resources = glob(["nuxie-lint/src/main/resources/**"]),
