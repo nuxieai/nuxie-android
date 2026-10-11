@@ -35,6 +35,44 @@ class BazelSdkPackagingTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
 
+    def test_apk_artifact_selection_uses_the_signed_apk_from_binary_outputs(self):
+        outputs = "\n".join("bazel-out/bin/" + name for name in (
+            "sdk_instrumentation_apk_deploy.jar", "sdk_instrumentation_apk_unsigned.apk",
+            "sdk_instrumentation_apk.apk"))
+        with patch.object(sdk, "ROOT", self.directory), patch.object(sdk, "bazel", return_value=outputs):
+            self.assertEqual(sdk.artifact("//:sdk_instrumentation_apk", filename="sdk_instrumentation_apk.apk"),
+                             self.directory / "bazel-out/bin/sdk_instrumentation_apk.apk")
+
+    def test_apk_artifact_selection_rejects_an_unsigned_only_result(self):
+        with patch.object(sdk, "bazel", return_value="bazel-out/bin/sdk_instrumentation_apk_unsigned.apk"):
+            with self.assertRaises(ValueError):
+                sdk.artifact("//:sdk_instrumentation_apk", filename="sdk_instrumentation_apk.apk")
+
+    def test_artifact_selection_rejects_ambiguous_matching_filenames(self):
+        with patch.object(sdk, "bazel", return_value="one/sdk.apk\ntwo/sdk.apk"):
+            with self.assertRaises(ValueError):
+                sdk.artifact("//:sdk_instrumentation_apk", filename="sdk.apk")
+
+    def test_artifact_selection_without_a_filename_still_requires_one_output(self):
+        with patch.object(sdk, "bazel", return_value="sdk.jar\nsdk.apk"):
+            with self.assertRaises(ValueError):
+                sdk.artifact("//:sdk_instrumentation_apk")
+
+    def test_instrumentation_command_installs_the_signed_binary_output(self):
+        outputs = "\n".join("bazel-out/bin/" + name for name in (
+            "sdk_instrumentation_apk_deploy.jar", "sdk_instrumentation_apk_unsigned.apk",
+            "sdk_instrumentation_apk.apk"))
+        with patch("sys.argv", ["sdk.py", "instrumentation-run", "--serial", "emulator-5554"]), \
+                patch.dict("os.environ", {"ANDROID_HOME": str(self.directory / "android")}), \
+                patch.object(sdk, "ROOT", self.directory), patch.object(sdk, "toolchain"), \
+                patch.object(sdk, "bazel", return_value=outputs), \
+                patch.object(sdk.subprocess, "run") as run, patch.object(sdk, "run_instrumentation") as instrument:
+            sdk.main()
+        adb = [str(self.directory / "android/platform-tools/adb"), "-s", "emulator-5554"]
+        run.assert_called_once_with(adb + ["install", "-r",
+                                    str(self.directory / "bazel-out/bin/sdk_instrumentation_apk.apk")], check=True)
+        instrument.assert_called_once_with(adb, None)
+
     def test_manifest_adapter_preserves_authored_example_overlay_in_its_namespace(self):
         source = self.directory / "debug.xml"
         source.write_text('''<manifest xmlns:android="http://schemas.android.com/apk/res/android">
