@@ -18,6 +18,9 @@ plugin sources with the exact pinned compiler, since compiler plugins depend
 on internal Kotlin APIs. Both the upstream source archive and builder release
 are checksummed in the override. The compiler's coroutine runtime is preloaded
 with its adapter so the compiler and worker do not load separate Kotlin types.
+The published lint library uses a declared JDK 17 compiler, matching its owning
+Gradle module. Android tools and Kotlin workers retain JDK 21. This keeps the
+lint registry's PSI method references compatible with Android lint.
 
 ```sh
 scripts/bazel/sdk.sh doctor

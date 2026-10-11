@@ -2,8 +2,30 @@
 
 load("@rules_android//providers:providers.bzl", "AndroidLibraryAarInfo")
 load("@rules_java//java/common:java_info.bzl", "JavaInfo")
+load("@rules_java//java/common:java_common.bzl", "java_common")
 load("@rules_android//rules:utils.bzl", "ANDROID_SDK_TOOLCHAIN_TYPE", "get_android_sdk")
 load("@rules_kotlin//kotlin:android.bzl", "kt_android_library")
+
+def _lint_impl(ctx):
+    output = ctx.actions.declare_file(ctx.label.name + ".jar")
+    java = java_common.compile(
+        ctx,
+        source_files = ctx.files.srcs,
+        resources = ctx.files.resources,
+        output = output,
+        deps = [dep[JavaInfo] for dep in ctx.attr.deps],
+        strict_deps = "OFF",
+        java_toolchain = ctx.attr._toolchain[java_common.JavaToolchainInfo],
+    )
+    return [DefaultInfo(files = depset([output])), java]
+
+sdk_lint = rule(implementation = _lint_impl, attrs = {
+    "srcs": attr.label_list(allow_files = [".java"]),
+    "resources": attr.label_list(allow_files = True),
+    "resource_strip_prefix": attr.string(default = "nuxie-lint/src/main/resources"),
+    "deps": attr.label_list(providers = [JavaInfo]),
+    "_toolchain": attr.label(default = Label("//scripts/bazel:lint_java17_toolchain"), cfg = "exec", providers = [java_common.JavaToolchainInfo]),
+}, fragments = ["java"], toolchains = ["@bazel_tools//tools/jdk:toolchain_type"])
 
 def sdk_library(name, srcs, deps):
     """Compile a source variant with the SDK's canonical manifest/resources."""
