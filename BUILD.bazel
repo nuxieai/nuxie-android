@@ -280,14 +280,22 @@ kt_android_library(
     deps = [":sdk_debug", ":sdk_native"],
 )
 
+# Normalize declared paths so rules_android can discover the generated asset
+# root even when the original source asset directory starts at the workspace.
+sdk_assets(
+    name = "example_assets",
+    srcs = glob(["example-app/src/debug/assets/**"]),
+    strip_prefixes = ["example-app/src/debug/assets/"],
+)
+
 android_binary(
     name = "example_app_debug",
     incremental_dexing = 0,
     manifest = ":example_manifest",
     custom_package = "ai.nuxie.example",
     manifest_values = {"applicationId": "ai.nuxie.example", "minSdkVersion": "23", "targetSdkVersion": "36", "versionCode": "11", "versionName": "0.1.10"},
-    assets = glob(["example-app/src/debug/assets/**"]),
-    assets_dir = "example-app/src/debug/assets",
+    assets = [":example_assets"],
+    assets_dir = "example_assets",
     deps = [":example_app"],
 )
 
