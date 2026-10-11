@@ -4,7 +4,7 @@ load("@rules_java//java:java_test.bzl", "java_test")
 load("@rules_java//java:java_binary.bzl", "java_binary")
 load("@rules_kotlin//kotlin:android.bzl", "kt_android_library", "kt_android_local_test")
 load("@rules_android//android:rules.bzl", "aar_import", "android_binary", "android_library")
-load("//scripts/bazel:sdk_rules.bzl", "sdk_aar", "sdk_docs", "sdk_jvm_test", "sdk_assets", "sdk_host_harness", "sdk_host_test")
+load("//scripts/bazel:sdk_rules.bzl", "sdk_library", "sdk_aar", "sdk_docs", "sdk_jvm_test", "sdk_assets", "sdk_host_harness", "sdk_host_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -32,15 +32,14 @@ SDK_DEPS = [
     "@sdk_maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
 ]
 
-kt_android_library(
-    name = "sdk",
-    srcs = glob(["nuxie-android/src/main/**/*.kt", "nuxie-android/src/main/**/*.java"]),
-    manifest = ":sdk_manifest",
-    custom_package = "ai.nuxie.sdk",
-    exports_manifest = 1,
-    resource_files = glob(["nuxie-android/src/main/res/**"]),
-    resources = glob(["nuxie-android/src/main/resources/**"]),
-    resource_strip_prefix = "nuxie-android/src/main/resources",
+SDK_MAIN_SRCS = glob(["nuxie-android/src/main/**/*.kt", "nuxie-android/src/main/**/*.java"])
+sdk_library(name = "sdk", srcs = SDK_MAIN_SRCS, deps = SDK_DEPS)
+
+# Native debug consumers retain Gradle's debug-only renderer probe. The Maven
+# release continues to compile and package only the main SDK sources.
+sdk_library(
+    name = "sdk_debug",
+    srcs = SDK_MAIN_SRCS + glob(["nuxie-android/src/debug/**/*.kt"]),
     deps = SDK_DEPS,
 )
 
@@ -93,6 +92,7 @@ filegroup(name = "fixtures", srcs = glob(["fixtures/**", "nuxie-android/src/test
 # The friend edge supplies internal Kotlin access; this ordinary Android edge
 # also carries the production manifest/resources into Robolectric and APKs.
 android_library(name = "sdk_test_resources", custom_package = "ai.nuxie.sdk", exports = [":sdk"])
+android_library(name = "sdk_debug_resources", custom_package = "ai.nuxie.sdk", exports = [":sdk_debug"])
 
 HOST_COMPATIBILITY = select({
     "@platforms//os:macos": [],
@@ -279,7 +279,7 @@ kt_android_library(
     resource_files = glob(["example-app/src/main/res/**"]),
     assets = glob(["example-app/src/debug/assets/**"]),
     assets_dir = "example-app/src/debug/assets",
-    deps = [":sdk_release"],
+    deps = [":sdk_debug", ":sdk_native"],
 )
 
 android_binary(
@@ -302,12 +302,12 @@ genrule(
 kt_android_library(
     name = "instrumentation",
     srcs = glob(["nuxie-android/src/androidTest/**/*.kt"]),
-    associates = [":sdk"],
+    associates = [":sdk_debug"],
     manifest = ":instrumentation_library_manifest",
     custom_package = "ai.nuxie.sdk",
     assets = [":instrumentation_assets"],
     assets_dir = "instrumentation_assets",
-    deps = SDK_DEPS + [":sdk_test_resources", "@test_maven//:androidx_test_runner", "@test_maven//:androidx_test_uiautomator_uiautomator", "@test_maven//:junit_junit"],
+    deps = SDK_DEPS + [":sdk_debug_resources", "@test_maven//:androidx_test_runner", "@test_maven//:androidx_test_uiautomator_uiautomator", "@test_maven//:junit_junit"],
 )
 
 sdk_assets(name = "instrumentation_assets", srcs = glob(["nuxie-android/src/androidTest/assets/**", "fixtures/**"]))

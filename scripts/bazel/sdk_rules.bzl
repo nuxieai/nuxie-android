@@ -3,6 +3,21 @@
 load("@rules_android//providers:providers.bzl", "AndroidLibraryAarInfo")
 load("@rules_java//java/common:java_info.bzl", "JavaInfo")
 load("@rules_android//rules:utils.bzl", "ANDROID_SDK_TOOLCHAIN_TYPE", "get_android_sdk")
+load("@rules_kotlin//kotlin:android.bzl", "kt_android_library")
+
+def sdk_library(name, srcs, deps):
+    """Compile a source variant with the SDK's canonical manifest/resources."""
+    kt_android_library(
+        name = name,
+        srcs = srcs,
+        manifest = Label("//:sdk_manifest"),
+        custom_package = "ai.nuxie.sdk",
+        exports_manifest = 1,
+        resource_files = native.glob(["nuxie-android/src/main/res/**"]),
+        resources = native.glob(["nuxie-android/src/main/resources/**"]),
+        resource_strip_prefix = "nuxie-android/src/main/resources",
+        deps = deps,
+    )
 
 def _abis_impl(_settings, attr):
     return {
