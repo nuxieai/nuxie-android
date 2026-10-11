@@ -361,6 +361,33 @@ class BazelSdkPackagingTests(unittest.TestCase):
         self.assertTrue(all(item["path"].startswith("ai/nuxie/nuxie-android/")
                             for item in receipt["artifacts"] if item["kind"] == "maven"))
 
+    def test_suite_discovers_only_classes_with_their_own_test_methods(self):
+        source = self.directory / "Owners.kt"
+        source.write_text('''package ai.nuxie.example
+class HelperBefore {
+    val text = "@Test { }"
+}
+class FirstOwner {
+    @Test fun exercise() { }
+}
+class NestedHelper {
+    class NestedOwner {
+        @Test fun exercise() { }
+    }
+}
+class SecondOwner {
+    /* @Test and an unmatched } are commentary. */
+    @org.junit.Test fun exercise() { }
+}
+class HelperAfter { }
+''')
+        self.assertEqual(suite.classes([source]),
+                         ["ai.nuxie.example.FirstOwner", "ai.nuxie.example.SecondOwner"])
+
+    def test_suite_preserves_insets_cases_without_running_the_helper_activity(self):
+        source = ROOT / "nuxie-android/src/test/kotlin/ai/nuxie/sdk/presentation/ExperienceWindowInsetsTest.kt"
+        self.assertEqual(suite.classes([source]), ["ai.nuxie.sdk.presentation.ExperienceWindowInsetsTest"])
+
     def test_ordinary_suite_excludes_live_native_smoke_and_preserves_host_option_tests(self):
         paths = list((ROOT / "nuxie-android/src/test").rglob("*.kt")) + list((ROOT / "nuxie-android/src/test").rglob("*.java"))
         selected = suite.classes(paths)
