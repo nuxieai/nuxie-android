@@ -192,9 +192,10 @@ def _assets_impl(ctx):
     files = {}
     for source in ctx.files.srcs:
         path = source.short_path
-        prefix = "nuxie-android/src/androidTest/assets/" if path.startswith("nuxie-android/") else "fixtures/"
-        if not path.startswith(prefix):
-            fail("Unsupported instrumentation asset: " + path)
+        prefixes = [prefix for prefix in ctx.attr.strip_prefixes if path.startswith(prefix)]
+        if len(prefixes) != 1:
+            fail("Expected one declared asset prefix for: " + path)
+        prefix = prefixes[0]
         relative = path[len(prefix):]
         if relative in files:
             fail("Duplicate instrumentation asset: " + relative)
@@ -203,4 +204,7 @@ def _assets_impl(ctx):
         files[relative] = output
     return [DefaultInfo(files = depset(files.values()))]
 
-sdk_assets = rule(implementation = _assets_impl, attrs = {"srcs": attr.label_list(allow_files = True)})
+sdk_assets = rule(implementation = _assets_impl, attrs = {
+    "srcs": attr.label_list(allow_files = True),
+    "strip_prefixes": attr.string_list(default = ["nuxie-android/src/androidTest/assets/", "fixtures/"]),
+})
