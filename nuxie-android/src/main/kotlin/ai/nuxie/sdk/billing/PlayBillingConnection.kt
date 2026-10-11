@@ -76,6 +76,7 @@ internal data class CheckoutRequest(
     val product: StoreProduct,
     val obfuscatedAccountId: String,
     val replacement: SubscriptionReplacement?,
+    val ownedPurchaseToken: String? = null,
 )
 
 internal sealed interface ActivePurchasesResult {
@@ -267,13 +268,12 @@ internal class PlayBillingConnection(
             .setObfuscatedAccountId(request.obfuscatedAccountId)
             .setIsOfferPersonalized(request.product.isOfferPersonalized)
             .apply {
-                request.replacement?.let { replacement ->
-                    setSubscriptionUpdateParams(
-                        BillingFlowParams.SubscriptionUpdateParams.newBuilder()
-                            .setOldPurchaseToken(replacement.oldPurchaseToken)
-                            .setSubscriptionReplacementMode(replacement.replacementMode.playValue)
-                            .build(),
-                    )
+                val replacement = request.replacement
+                if (replacement != null || request.ownedPurchaseToken != null) {
+                    val update = BillingFlowParams.SubscriptionUpdateParams.newBuilder()
+                        .setOldPurchaseToken(replacement?.oldPurchaseToken ?: checkNotNull(request.ownedPurchaseToken))
+                    replacement?.let { update.setSubscriptionReplacementMode(it.replacementMode.playValue) }
+                    setSubscriptionUpdateParams(update.build())
                 }
             }
             .build()

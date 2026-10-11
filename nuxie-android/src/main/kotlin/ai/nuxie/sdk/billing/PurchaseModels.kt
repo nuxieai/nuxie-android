@@ -76,10 +76,6 @@ enum class ReplacementMode {
     DEFERRED,
 }
 
-/** Checkout found an active subscription but no replacement policy was configured. */
-class SubscriptionReplacementRequiredException internal constructor() :
-    IllegalStateException("An active subscription requires an explicit SubscriptionReplacement.")
-
 /** The result of launching checkout for the [StoreProduct] shown to the customer. */
 sealed interface PurchaseResult {
     data object Purchased : PurchaseResult

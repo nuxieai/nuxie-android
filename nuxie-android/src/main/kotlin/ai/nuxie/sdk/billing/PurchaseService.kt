@@ -161,6 +161,7 @@ internal class PurchaseService(
         val product: StoreProduct,
         val nuxieManaged: Boolean,
         val outcomeEventId: String?,
+        val onCompletedWithoutAcquisition: (() -> Unit)?,
     )
 
     private sealed interface UsageCoordination {
@@ -254,6 +255,7 @@ internal class PurchaseService(
         val publications = mutableListOf<FeatureInfo.Mutation>()
         val purchaseCompletions = mutableListOf<PendingPurchaseCompletion>()
         val directCheckoutCompletions = mutableListOf<PendingDirectCheckoutCompletion>()
+        val silentCheckoutCompletions = mutableListOf<InFlightPurchase>()
         val outcomeEmissions = mutableListOf<PendingOutcomeEmission>()
     }
 
@@ -344,6 +346,20 @@ internal class PurchaseService(
                 .onFailure { completionFailure ->
                     failure = aggregateFailure(failure, completionFailure)
                 }
+        }
+        effects.silentCheckoutCompletions.forEach { checkout ->
+            try {
+                if (distinctId() == checkout.owner && !checkoutIntakeClosed) {
+                    checkout.onCompletedWithoutAcquisition?.invoke()
+                }
+                checkout.result.complete(PurchaseResult.Purchased)
+            } catch (error: Throwable) {
+                checkout.result.completeExceptionally(error)
+                failure = aggregateFailure(failure,error)
+            } finally {
+                inFlight.remove(checkout.product.storeProductId,checkout)
+                releaseCheckoutCompletion(checkout)
+            }
         }
         effects.directCheckoutCompletions.forEach { completion ->
             runCatching {
@@ -810,8 +826,9 @@ internal class PurchaseService(
         replacement: SubscriptionReplacement?,
         expectedOwnerDistinctId: String? = null,
         outcomeCorrelation: CommerceOutcomeCorrelation? = null,
+        onCompletedWithoutAcquisition: (() -> Unit)? = null,
     ): PurchaseResult = withContext(ioDispatcher) {
-        purchaseOnIo(activity, product, replacement, expectedOwnerDistinctId, outcomeCorrelation)
+        purchaseOnIo(activity, product, replacement, expectedOwnerDistinctId, outcomeCorrelation, onCompletedWithoutAcquisition)
     }
 
     private suspend fun purchaseOnIo(
@@ -820,6 +837,7 @@ internal class PurchaseService(
         replacement: SubscriptionReplacement?,
         expectedOwnerDistinctId: String?,
         outcomeCorrelation: CommerceOutcomeCorrelation?,
+        onCompletedWithoutAcquisition: (() -> Unit)?,
     ): PurchaseResult {
         val product = product.forJourneyCheckout(outcomeCorrelation?.journeyId)
         ensureCheckoutIntakeOpen()
@@ -899,15 +917,9 @@ internal class PurchaseService(
             )
             is ActivePurchasesResult.Success -> queried.purchases
         }
-        if (product.productType == BillingClient.ProductType.SUBS && replacement == null && active.isNotEmpty()) {
-            return failed(
-                product,
-                SubscriptionReplacementRequiredException(),
-                owner,
-                PurchaseOutcomeSource.CHECKOUT,
-                outcomeCorrelation?.eventId,
-            )
-        }
+        val ownedPurchaseToken = if (product.productType == BillingClient.ProductType.SUBS && replacement == null) {
+            active.firstOrNull { product.storeProductId in it.products && it.state == StoredPurchaseState.PURCHASED }?.purchaseToken
+        } else null
         val priorTokens = active.mapTo(mutableSetOf()) { it.purchaseToken }
 
         val result = CompletableDeferred<PurchaseResult>()
@@ -919,6 +931,7 @@ internal class PurchaseService(
             product,
             settings.handlingMode == PurchaseHandlingMode.NUXIE_MANAGED,
             outcomeCorrelation?.eventId,
+            onCompletedWithoutAcquisition,
         )
         val registered = synchronized(inFlight) {
             ensureCheckoutIntakeOpen()
@@ -940,7 +953,7 @@ internal class PurchaseService(
             ensureCheckoutIntakeOpen()
             billing.launch(
                 activity,
-                CheckoutRequest(product, accountId, replacement),
+                CheckoutRequest(product, accountId, replacement, ownedPurchaseToken),
             )
         }.getOrElse {
             inFlight.remove(product.storeProductId, pending)
@@ -953,6 +966,10 @@ internal class PurchaseService(
                 PurchaseOutcomeSource.CHECKOUT,
                 outcomeCorrelation?.eventId,
             )
+        }
+        if (launch.responseCode == BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED) {
+            completeWithoutAcquisition(pending)
+            return result.await()
         }
         if (launch.responseCode != BillingClient.BillingResponseCode.OK) {
             inFlight.remove(product.storeProductId, pending)
@@ -1138,8 +1155,30 @@ internal class PurchaseService(
         }
     }
 
+    private suspend fun completeWithoutAcquisition(checkout: InFlightPurchase) {
+        withProcessingDecision { effects ->
+            val claimed = synchronized(inFlight) {
+                if (inFlight[checkout.product.storeProductId] !== checkout || checkout.result.isCompleted) false
+                else claimedCheckoutCompletions.add(checkout)
+            }
+            if (claimed) {
+                if (clearOutcomeCorrelation(checkout.outcomeEventId)) {
+                    effects.silentCheckoutCompletions += checkout
+                } else {
+                    inFlight.remove(checkout.product.storeProductId,checkout)
+                    checkout.result.complete(PurchaseResult.Failed(IllegalStateException("Could not clear the completed Journey purchase correlation.")))
+                    releaseCheckoutCompletion(checkout)
+                }
+            }
+        }
+    }
+
     suspend fun onPurchasesUpdated(update: PurchaseUpdate) {
         if (testStore != null) return
+        if (update.billingResult.responseCode == BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED) {
+            inFlight.values.toList().forEach { completeWithoutAcquisition(it) }
+            return
+        }
         if (update.billingResult.responseCode == BillingClient.BillingResponseCode.USER_CANCELED) {
             withProcessingDecision { effects ->
                 commitPurchaseOutcome(

@@ -711,9 +711,6 @@ public final class ai/nuxie/sdk/billing/SubscriptionReplacement {
 	public fun toString ()Ljava/lang/String;
 }
 
-public final class ai/nuxie/sdk/billing/SubscriptionReplacementRequiredException : java/lang/IllegalStateException {
-}
-
 public final class ai/nuxie/sdk/features/FeatureAccess {
 	public fun <init> (ZZLjava/lang/Double;Lai/nuxie/sdk/features/FeatureType;)V
 	public final fun component1 ()Z

@@ -16,6 +16,7 @@ import com.android.billingclient.api.QueryProductDetailsParams
 import com.android.billingclient.api.QueryPurchasesParams
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -54,6 +55,7 @@ class PlayBillingFlowParamsTest {
                 product,
                 "account-hash",
                 SubscriptionReplacement("old-token", ReplacementMode.DEFERRED),
+                ownedPurchaseToken = "store-token",
             ),
         )
 
@@ -66,6 +68,22 @@ class PlayBillingFlowParamsTest {
         assertEquals("old-token", params.zzh())
         assertEquals(BillingFlowParams.SubscriptionUpdateParams.ReplacementMode.DEFERRED, params.zzb())
         connection.close()
+    }
+
+    @Suppress("DEPRECATION")
+    @Test
+    fun ownedTokenHasNoReplacementModeAndOtherProductsUsePlainLaunch() = runTest {
+        for (ownedToken in listOf("owned-token", null)) {
+            val adapter = CapturingAdapter()
+            val connection = PlayBillingConnection(factory = BillingClientAdapterFactory { adapter }, scope = this)
+            connection.connect(); adapter.finishSetup()
+            val product = StoreProduct(productId = "pro", storeProductId = "play-pro", basePlanId = "annual", offerId = "launch", offerToken = "offer-token", isOfferPersonalized = true, placementId = "primary", rawProduct = productDetails(), productType = BillingClient.ProductType.SUBS)
+            connection.launch(Robolectric.buildActivity(Activity::class.java).get(), CheckoutRequest(product,"account",null,ownedPurchaseToken = ownedToken))
+            val params = checkNotNull(adapter.launchedParams)
+            if (ownedToken == null) assertNull(params.zzh()) else assertEquals(ownedToken, params.zzh())
+            assertEquals(0,params.zzb())
+            connection.close()
+        }
     }
 
     private fun productDetails(): ProductDetails = ProductDetails::class.java
