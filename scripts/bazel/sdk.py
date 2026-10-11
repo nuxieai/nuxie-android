@@ -125,7 +125,9 @@ def artifact(label, *, filename=None):
     if len(paths) != 1:
         raise ValueError(f"Expected exactly one artifact for {label}; got {paths}")
     path = Path(paths[0])
-    return path if path.is_absolute() else ROOT / path
+    if path.is_absolute():
+        return path
+    return Path(bazel("info", "execution_root", capture=True)) / path
 
 
 def dependencies():
