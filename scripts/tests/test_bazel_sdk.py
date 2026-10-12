@@ -36,6 +36,35 @@ class BazelSdkPackagingTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
 
+    def test_low_disk_refuses_bazel_before_launch_for_legacy_and_v2(self):
+        for version in ('1', '2'):
+            with patch.object(sdk, 'ROOT', self.directory), \
+                    patch.object(sdk.shutil, 'disk_usage', return_value=sdk.shutil._ntuple_diskusage(10, 9, 1)), \
+                    patch.dict('os.environ', {'NUXIE_CI_RUNNER_POLICY_VERSION': version}, clear=True), \
+                    patch.object(sdk.subprocess, 'run') as run, patch.object(sdk.subprocess, 'check_output') as capture:
+                with self.assertRaisesRegex(ValueError, 'at least 5 GiB'):
+                    sdk.bazel('build', '//fixture')
+                with self.assertRaisesRegex(ValueError, 'at least 5 GiB'):
+                    sdk.bazel('cquery', '//fixture', capture=True)
+                run.assert_not_called()
+                capture.assert_not_called()
+
+    def test_v2_frontend_uses_guarded_workspace_and_rejects_legacy_output_override(self):
+        workspace = self.directory / 'schema-fixture'
+        workspace.mkdir()
+        with patch.object(sdk, 'ROOT', self.directory), patch.object(sdk, 'require_space'), \
+                patch.dict('os.environ', {'NUXIE_CI_RUNNER_POLICY_VERSION': '2', 'NUXIE_BAZEL_JOBS': '100'}, clear=True), \
+                patch.object(sdk.subprocess, 'run') as run:
+            sdk.bazel('build', '//fixture', workspace=workspace)
+            self.assertEqual(run.call_args.args[0], [str(self.directory / 'scripts/bazel/bazel.sh'), 'build', '//fixture'])
+            self.assertEqual(run.call_args.kwargs['cwd'], workspace)
+            self.assertEqual(run.call_args.kwargs['env']['NUXIE_BAZEL_WORKSPACE'], str(workspace))
+            run.reset_mock()
+            with patch.dict('os.environ', {'NUXIE_ANDROID_BAZEL_OUTPUT_BASE': str(self.directory / 'shared-output')}):
+                with self.assertRaisesRegex(ValueError, 'derives output bases'):
+                    sdk.bazel('build', '//fixture')
+            run.assert_not_called()
+
     def test_apk_artifact_selection_uses_the_signed_apk_from_binary_outputs(self):
         outputs = "\n".join("bazel-out/bin/" + name for name in (
             "sdk_instrumentation_apk_deploy.jar", "sdk_instrumentation_apk_unsigned.apk",

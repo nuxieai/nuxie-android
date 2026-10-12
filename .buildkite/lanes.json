@@ -1,0 +1,29 @@
+{
+  "env": {
+    "CI": "1",
+    "NUXIE_BAZEL_BATCH": "1"
+  },
+  "steps": [
+    {
+      "label": ":android: SDK tests and example build",
+      "command": "set -euo pipefail\nexport JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home\nexport ANDROID_HOME=/opt/homebrew/share/android-commandlinetools\nexport ANDROID_SDK_ROOT=\"$ANDROID_HOME\"\nexport PATH=\"$JAVA_HOME/bin:$PATH\"\n\"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager\" \"platform-tools\" \"platforms;android-36\" \"build-tools;36.0.0\" \"ndk;29.0.14206865\" \"cmake;3.22.1\"\nsource scripts/bazel/ci-cache.sh\nexport NUXIE_BAZEL_JOBS=2\nexport NUXIE_BAZEL_BIN=\"$(python3 -c 'import sys; sys.path.insert(0, \"scripts/bazel\"); import launcher; print(launcher.executable())')\"\nscripts/bazel/sdk.sh test\nscripts/bazel/sdk.sh build\nscripts/bazel/sdk.sh example\nscripts/bazel/sdk.sh instrumentation\nscripts/bazel/sdk.sh prepare --output build/maven-repository\n./gradlew --no-daemon --max-workers=2 :nuxie-android:test :nuxie-android:apiCheck :nuxie-android:lint\n./gradlew --no-daemon --max-workers=2 verifyAndroidReleaseArtifacts\npython3 scripts/test-maven-consumer.py --version \"$(python3 -c 'import sys; sys.path.insert(0, \"scripts/bazel\"); import sdk; print(sdk.declared_version())')\"\nscripts/verify-fixtures.sh\n",
+      "agents": {
+        "queue": "nuxie-pr",
+        "nuxie-platform": "macos"
+      },
+      "timeout_in_minutes": 90,
+      "retry": {
+        "automatic": [
+          {
+            "exit_status": -1,
+            "limit": 1
+          }
+        ]
+      },
+      "artifact_paths": [
+        "**/build/reports/tests/**/*",
+        "bazel-testlogs/**/*"
+      ]
+    }
+  ]
+}
