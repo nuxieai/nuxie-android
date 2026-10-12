@@ -501,7 +501,7 @@ internal class NuxieRuntimeViewModelState(
             defaultInstanceId = defaultInstanceId,
         )
         if (paywallSelection != null) values = values.withPaywallSelection(
-            paywallSelection.products.associate { it.nativeId to it.productId }, paywallSelectionValid)
+            paywallSelection.identities(), paywallSelectionValid)
         return NuxieCapturedViewModelSnapshot(snapshot, values)
     }
 

@@ -5,14 +5,14 @@ internal class NuxieViewModelArchive private constructor(
     private val rootId: Long,
     private val instances: List<Instance>,
     private val aliases: Map<String, Long>,
-    private val paywallProducts: Map<Long, String?>? = null,
+    private val paywallProducts: Map<Long, NuxiePaywallSelection.Identity>? = null,
     private val paywallSelectionValid: Boolean = true,
 ) {
     private data class Instance(val id: Long, val schemaIndex: Int, val schemaName: String?, val values: List<NativeViewModelSnapshotValue>)
 
     internal val instanceIdentities: Set<Long> get() = instances.map { it.id }.toSet()
 
-    internal fun withPaywallProducts(products: Map<Long, String?>, selected: Boolean): NuxieViewModelArchive =
+    internal fun withPaywallProducts(products: Map<Long, NuxiePaywallSelection.Identity>, selected: Boolean): NuxieViewModelArchive =
         NuxieViewModelArchive(rootId, instances, aliases, products.toMap(), selected)
 
     fun withoutRootProperty(name: String): NuxieViewModelArchive {
@@ -116,8 +116,8 @@ internal class NuxieViewModelArchive private constructor(
             return NuxieRuntimeViewModelState(root, handles.filterKeys { it != rootId }.values.toList(), native, catalog,
                 instances.single { it.id == rootId }.schemaIndex, aliases.mapValues { (_, old) -> newIds.getValue(old) },
                 paywallSelection = paywallProducts?.let { products -> NuxiePaywallSelection(
-                    products.filterKeys(handles::containsKey).map { (old, productId) ->
-                        NuxiePaywallSelection.Product(newIds.getValue(old), handles.getValue(old), productId)
+                    products.filterKeys(handles::containsKey).map { (old, identity) ->
+                        NuxiePaywallSelection.Product(newIds.getValue(old), handles.getValue(old), identity.productId, identity.placementId)
                     }) }, paywallSelectionValid = paywallSelectionValid)
         } catch (error: Throwable) {
             handles.values.toList().asReversed().forEach { handle ->
