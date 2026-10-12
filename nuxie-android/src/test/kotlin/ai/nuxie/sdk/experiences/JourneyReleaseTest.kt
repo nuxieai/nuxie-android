@@ -26,6 +26,159 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class JourneyReleaseTest {
+    @Test fun formSelectorRejectsMalformedNamesAndOtherFieldKinds() {
+        fun field(type: String = "Response.Field", form: kotlinx.serialization.json.JsonElement) = buildJsonObject {
+            put("type", type); put("key", "trip_days"); put("form", form)
+        }
+        fun validate(field: JsonObject) = JourneyGrammar.action(buildJsonObject {
+            put("type", "send_event"); put("eventName", "trip")
+            putJsonObject("payload") { put("days", field) }
+        }, emptySet(), emptySet())
+        for (form in listOf(JsonNull, JsonPrimitive(12), JsonPrimitive(""), JsonPrimitive("bad-form"), JsonPrimitive("form\n"), JsonPrimitive("é"))) {
+            assertThrows(JourneyReleaseAuthenticationException::class.java) { validate(field(form = form)) }
+            assertThrows(JourneyReleaseAuthenticationException::class.java) { DeviceEntryIrSchema.validate(field(form = form)) }
+        }
+        for (type in listOf("Event.Field", "Customer.Field")) {
+            assertThrows(JourneyReleaseAuthenticationException::class.java) { validate(field(type, JsonPrimitive("onboarding"))) }
+        }
+        for (form in listOf("onboarding", "7_form", "true", "x".repeat(257))) {
+            validate(field(form = JsonPrimitive(form)))
+            DeviceEntryIrSchema.validate(field(form = JsonPrimitive(form)))
+        }
+    }
+
+    @Test fun `published F5 authenticates exact response policy`() {
+        val folder = FixtureRunner.fixturesRoot().resolve("runtime/forms-saves")
+        val bytes = folder.resolve("release.json").readBytes()
+        val entry = Json.parseToJsonElement(folder.resolve("profile-entry.json").readText()).jsonObject
+        val source = Json.parseToJsonElement(bytes.decodeToString()).jsonObject
+        val locator = entry.getValue("locator").jsonObject
+        val release = JourneyReleaseVerifier.authenticate(
+            entry.getValue("envelope").toString().encodeToByteArray(), keys,
+            requireNotNull(JourneyReleaseIdentity.fromJson(JsonObject(locator - "legId"))),
+            locator.getValue("legId").jsonPrimitive.content, runtime(source), JourneyReleaseReplayPolicy.Active(0))
+        assertArrayEquals(bytes, release.descriptorBytes)
+        val expected = Json.parseToJsonElement(folder.resolve("expectations.json").readText())
+            .jsonObject.getValue("release").jsonObject
+        for (name in listOf("state", "responses", "ruleGroups")) {
+            assertEquals(name, expected.getValue(name), release.descriptor.getValue(name))
+        }
+        val render = release.descriptor.getValue("render").jsonObject.getValue("nux").jsonObject
+        val scene = folder.resolve(render.getValue("key").jsonPrimitive.content).readBytes()
+        assertArrayEquals(folder.resolve("screen.riv").readBytes(), scene)
+        assertEquals(render.getValue("sha256").jsonPrimitive.content,
+            java.security.MessageDigest.getInstance("SHA-256").digest(scene).joinToString("") { "%02x".format(it) })
+    }
+
+    @Test fun `published F4 authenticates exact version three values`() {
+        val folder = FixtureRunner.fixturesRoot().resolve("runtime/run-values")
+        val bytes = folder.resolve("release.json").readBytes()
+        val entry = Json.parseToJsonElement(folder.resolve("profile-entry.json").readText()).jsonObject
+        val source = Json.parseToJsonElement(bytes.decodeToString()).jsonObject
+        val locator = entry.getValue("locator").jsonObject
+        val release = JourneyReleaseVerifier.authenticate(
+            entry.getValue("envelope").toString().encodeToByteArray(), keys,
+            requireNotNull(JourneyReleaseIdentity.fromJson(JsonObject(locator - "legId"))),
+            locator.getValue("legId").jsonPrimitive.content, runtime(source), JourneyReleaseReplayPolicy.Active(0))
+        assertArrayEquals(bytes, release.descriptorBytes)
+        assertEquals(mapOf("trip_days" to "number", "level" to "number"),
+            release.descriptor.getValue("state").jsonObject.mapValues { it.value.jsonObject.getValue("type").jsonPrimitive.content })
+        assertEquals(JsonObject(emptyMap()), release.descriptor.getValue("responses"))
+        assertEquals(JsonArray(emptyList()), release.descriptor.getValue("ruleGroups"))
+        assertEquals(listOf("scr_screens_sdevice", "scr_screens_slevel", "scr_screens_stap"),
+            release.leg.getValue("screens").jsonArray.map { it.jsonObject.getValue("id").jsonPrimitive.content })
+        val render = release.descriptor.getValue("render").jsonObject.getValue("nux").jsonObject
+        val scene = folder.resolve(render.getValue("key").jsonPrimitive.content).readBytes()
+        assertArrayEquals(folder.resolve("screen.riv").readBytes(), scene)
+        assertEquals(render.getValue("sha256").jsonPrimitive.content,
+            java.security.MessageDigest.getInstance("SHA-256").digest(scene).joinToString("") { "%02x".format(it) })
+    }
+
+    @Test fun `version three requires native value policy sections`() {
+        val envelope = fixture.getValue("entry").jsonObject.getValue("envelope").jsonObject
+        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val root = JsonObject(source + mapOf(
+            "state" to Json.parseToJsonElement("""{"days":{"type":"number"},"goals":{"type":"list","items":{"title":{"type":"string"}}}}"""),
+            "responses" to JsonObject(emptyMap()), "ruleGroups" to JsonArray(emptyList()),
+        ))
+        JourneySchemaValidator.validate(root)
+        for (key in listOf("state", "responses", "ruleGroups")) {
+            assertThrows(JourneyReleaseAuthenticationException::class.java) { JourneySchemaValidator.validate(JsonObject(root - key)) }
+        }
+        assertThrows(JourneyReleaseAuthenticationException::class.java) {
+            JourneySchemaValidator.validate(JsonObject(root + ("state" to Json.parseToJsonElement("""{"days":{"type":"number","rules":[]}}"""))))
+        }
+    }
+
+    @Test fun `version three requires native input names and rejects retired identities`() {
+        val corpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/planes/native-input-admission.json").readText()).jsonObject
+        val envelope = fixture.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
+        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val render = source.getValue("render").jsonObject
+        val removed = corpus.getValue("removedFields").jsonArray.map { it.jsonPrimitive.content }.toSet()
+        val inputs = render.getValue("textInputs").jsonArray.map {
+            JsonObject(it.jsonObject - removed + ("textInputName" to JsonPrimitive("Email editable value")))
+        }
+        fun candidate(input: JsonObject = inputs.first(), version: String = "nuxie.journey-release.v3") =
+            JsonObject(source + mapOf("schemaVersion" to JsonPrimitive(version),
+                "render" to JsonObject(render + ("textInputs" to JsonArray(listOf(input) + inputs.drop(1))))))
+        JourneySchemaValidator.validate(candidate())
+        for (version in corpus.getValue("retiredVersions").jsonArray) {
+            assertThrows(JourneyReleaseAuthenticationException::class.java) {
+                JourneySchemaValidator.validate(candidate(version = version.jsonPrimitive.content))
+            }
+        }
+        for (field in removed) assertThrows(field, JourneyReleaseAuthenticationException::class.java) {
+            JourneySchemaValidator.validate(candidate(JsonObject(inputs.first() + (field to JsonPrimitive("retired")))))
+        }
+        assertThrows(JourneyReleaseAuthenticationException::class.java) {
+            JourneySchemaValidator.validate(candidate(JsonObject(inputs.first() - "textInputName")))
+        }
+        for (item in corpus.getValue("cases").jsonArray.map { it.jsonObject }) {
+            val input = JsonObject(inputs.first() + ("textInputName" to item.getValue("value")))
+            if (item.getValue("valid").jsonPrimitive.boolean) JourneySchemaValidator.validate(candidate(input))
+            else assertThrows(item.getValue("name").jsonPrimitive.content, JourneyReleaseAuthenticationException::class.java) {
+                JourneySchemaValidator.validate(candidate(input))
+            }
+        }
+    }
+
+    @Test fun `version three signatures reject the retired domain`() {
+        val envelope = fixture.getValue("entry").jsonObject.getValue("envelope").jsonObject
+        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val root = JsonObject(source + ("schemaVersion" to JsonPrimitive("nuxie.journey-release.v3")))
+        val bytes = root.toString().encodeToByteArray()
+        val pair = java.security.KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        val trusted = mapOf("TEST_ONLY_V3" to pair.public.encoded.takeLast(32).toByteArray())
+        fun signed(domain: String): ByteArray {
+            val signature = java.security.Signature.getInstance("Ed25519").run {
+                initSign(pair.private)
+                update(domain.encodeToByteArray() + bytes)
+                sign()
+            }
+            return JsonObject(envelope + mapOf(
+                "descriptorBytesBase64" to JsonPrimitive(Base64.encodeToString(bytes, Base64.NO_WRAP)),
+                "descriptorSizeBytes" to JsonPrimitive(bytes.size),
+                "descriptorSha256" to JsonPrimitive(java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(bytes).joinToString("") { "%02x".format(it) }),
+                "signature" to buildJsonObject {
+                    put("version", 1); put("algorithm", "ed25519"); put("keyId", "TEST_ONLY_V3")
+                    put("signatureBase64", Base64.encodeToString(signature, Base64.NO_WRAP))
+                },
+            )).toString().encodeToByteArray()
+        }
+        // Literal domains are independent of the production constant.
+        assertArrayEquals(bytes, JourneyReleaseEnvelope.authenticate(signed("nuxie.journey-release.v3\u0000"), trusted).descriptorBytes)
+        assertThrows(JourneyReleaseAuthenticationException::class.java) {
+            JourneyReleaseEnvelope.authenticate(signed("nuxie.journey-release.v2\u0000"), trusted)
+        }
+    }
+
+
     @Test fun `release presentation keeps only orientation and background`() {
         val envelope = fixture.getValue("entry").jsonObject.getValue("envelope").jsonObject
         val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64").jsonPrimitive.content,
