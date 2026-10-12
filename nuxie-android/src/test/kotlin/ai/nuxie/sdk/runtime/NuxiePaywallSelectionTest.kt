@@ -42,10 +42,14 @@ class NuxiePaywallSelectionTest {
         }
 
     @Test
-    fun `a refused native selection write keeps the previous purchase target`() = withPaywall { _, native, state ->
+    fun `a refused native selection write leaves no purchase target`() = withPaywall { _, native, state ->
         native.refuseSelectionWrites = true
         val changes = native.tap("product-annual")
-        assertEquals("placement-monthly", state.captureSnapshot(changes).values.resolveString("paywall.selectedProduct.placementId"))
+        val refused = state.captureSnapshot(changes).values
+        assertEquals("product-annual", refused.resolveString("paywall.selectedProductId"))
+        assertNull(refused.resolveString("paywall.selectedProduct.placementId"))
+        assertNull("A later frame must not revive the previous purchase target",
+            state.captureSnapshot().values.resolveString("paywall.selectedProduct.placementId"))
     }
 
     @Test
