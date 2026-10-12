@@ -12,6 +12,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -19,6 +20,58 @@ import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 class HostRenderSmokeTest {
+    @Test
+    fun `a real native placement tap moves the signed purchase target`() {
+        assertTrue("Native proof requires the configured host C API", !System.getenv("NUXIE_HOST_CAPI_LIB").isNullOrBlank())
+        val runtime = NuxieRuntime.shared
+        assertTrue("Pinned runtime and host JNI must load", runtime.isAvailable)
+        val bytes = File(System.getProperty("nuxie.repo.root"), "fixtures/runtime/paywall-placement-selection/screen.riv").readBytes()
+        val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(320, 100))
+        try {
+            val file = checkNotNull(runtime.importFile(renderer, bytes))
+            try {
+                val artboard = checkNotNull(file.newArtboard("Paywall"))
+                try {
+                    val projection = ai.nuxie.sdk.runtime.NuxieViewModelListProjection(
+                        "Runtime", "paywall/products", "paywall/selectedProduct", "PaywallProduct",
+                        listOf("monthly", "annual").mapIndexed { index, plan ->
+                            ai.nuxie.sdk.runtime.NuxieViewModelListProjection.Item(plan.replaceFirstChar { it.uppercase() }, index, index == 0,
+                                mapOf("productId" to ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.StringValue("product-pro"),
+                                      "placementId" to ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.StringValue("placement-$plan")), instanceId = plan)
+                        }, defaultInstanceId = "root-sdk-id")
+                    val state = runtime.bindViewModelList(file, artboard, projection)
+                    try {
+                        val player = file.newExperiencePlayer(artboard, "Paywall")
+                        try {
+                            assertEquals("placement-monthly", state.snapshot().resolveScopedString(
+                                "paywall.selectedProduct.placementId", "Runtime", "root-sdk-id"))
+                            repeat(20) { state.captureSnapshot(player.stepTyped(elapsedSeconds = 0.016).viewModelChanges) }
+                            val changes = mutableListOf<ai.nuxie.sdk.runtime.NuxieViewModelChange>()
+                            fun advance(pointers: List<ai.nuxie.sdk.runtime.NuxiePlayerPointerEvent> = emptyList()): ai.nuxie.sdk.runtime.NuxieViewModelSnapshot {
+                                val step = player.stepTyped(elapsedSeconds = 0.0, pointers = pointers)
+                                changes += step.viewModelChanges
+                                return state.captureSnapshot(step.viewModelChanges).values
+                            }
+                            advance(listOf(ai.nuxie.sdk.runtime.NuxiePlayerPointerEvent(
+                                ai.nuxie.sdk.runtime.NuxiePlayerPointerKind.DOWN, 80f, 40f, 1, 0f)))
+                            advance(listOf(ai.nuxie.sdk.runtime.NuxiePlayerPointerEvent(
+                                ai.nuxie.sdk.runtime.NuxiePlayerPointerKind.UP, 80f, 40f, 1, 0.1f)))
+                            val after = advance()
+                            assertTrue("The real pointer must produce the placement write", changes.any {
+                                it.origin == ai.nuxie.sdk.runtime.NuxieViewModelChangeOrigin.RUNTIME &&
+                                (it.value as? ai.nuxie.sdk.runtime.NuxieViewModelValue.Bytes)?.value?.decodeToString() == "placement-annual" })
+                            assertEquals("placement-annual", after.resolveScopedString(
+                                "paywall.selectedProduct.placementId", "Runtime", "root-sdk-id"))
+                            assertEquals(ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.NumberValue(1.0),
+                                after.resolveScalar(listOf("paywall", "selectedIndex")))
+                            assertEquals(true, after.resolveBoolean("paywall.selectedProduct.isSelected"))
+                        } finally { player.close() }
+                    } finally { state.close() }
+                } finally { artboard.close() }
+            } finally { file.close() }
+        } finally { renderer.close() }
+    }
+
     @Test
     fun `plain file import supplies an inert sized config`() {
         assumeHostRuntime()
