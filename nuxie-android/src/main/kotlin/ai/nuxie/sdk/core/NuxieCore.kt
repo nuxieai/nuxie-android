@@ -88,7 +88,7 @@ internal fun supportedRuntimeForEmbeddedRuntime(nativeSourceRevision: String?): 
         sceneFormatMinor = NuxieEmbeddedRuntimeCompatibility.SCENE_FORMAT_MINOR,
         timezoneDataRevision = SignedTimezoneBundle.REVISION,
         timezoneDataSha256 = SignedTimezoneBundle.SHA256,
-        supportedCapabilities = NuxieEmbeddedRuntimeCompatibility.CAPABILITIES + setOf("system-fonts", "paywall.selection.v1"),
+        supportedCapabilities = NuxieEmbeddedRuntimeCompatibility.CAPABILITIES + setOf("system-fonts"),
     )
 }
 
