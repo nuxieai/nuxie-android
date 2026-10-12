@@ -41,8 +41,8 @@ internal class NuxiePaywallSelection(val products: List<Product>) {
             write(root, NativeViewModelWrite(NuxieViewModelMutationKind.SET_VIEW_MODEL,
                 "paywall/selectedProduct", relatedViewModel = selected.handle))
         }
-        // The purchase link is last. A rejected display write cannot change
-        // the purchase target; restore any earlier display values best-effort.
+        // The purchase link is last. If feedback is refused, hide the purchase
+        // target rather than charge the old plan; restore display values best-effort.
         val applied = mutableListOf<Pair<Long, NativeViewModelWrite>>()
         try {
             for ((handle, mutation) in writes) {
@@ -57,12 +57,12 @@ internal class NuxiePaywallSelection(val products: List<Product>) {
                 }
             }
         } catch (error: Throwable) {
-            Log.w("NuxiePaywallSelection", "Native paywall selection was rejected; keeping the previous target", error)
+            Log.w("NuxiePaywallSelection", "Native paywall selection was rejected; clearing the purchase target", error)
             for ((handle, previous) in applied.asReversed()) {
                 runCatching { check(native.mutateViewModel(handle, previous) == 0) }
                     .exceptionOrNull()?.let { Log.w("NuxiePaywallSelection", "Could not restore paywall display state", it) }
             }
-            return null
+            return false
         }
         return selected != null
     }
