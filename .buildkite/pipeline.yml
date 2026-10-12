@@ -1,36 +1,48 @@
-env:
-  CI: "1"
-  NUXIE_BAZEL_BATCH: "1"
-
 steps:
-  - label: ":android: SDK tests and example build"
+  - label: ":pipeline: Compose owning SDK confidence lanes"
+    key: compose-lanes
+    if: build.env("NUXIE_CI_RUNNER_POLICY_VERSION") != "2"
     command: |
       set -euo pipefail
-      export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
-      export ANDROID_HOME=/opt/homebrew/share/android-commandlinetools
-      export ANDROID_SDK_ROOT="$ANDROID_HOME"
-      export PATH="$JAVA_HOME/bin:$PATH"
-      "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;29.0.14206865" "cmake;3.22.1"
-      source scripts/bazel/ci-cache.sh
-      export NUXIE_BAZEL_JOBS=2
-      export NUXIE_BAZEL_BIN="$(python3 -c 'import sys; sys.path.insert(0, "scripts/bazel"); import launcher; print(launcher.executable())')"
-      scripts/bazel/sdk.sh test
-      scripts/bazel/sdk.sh build
-      scripts/bazel/sdk.sh example
-      scripts/bazel/sdk.sh instrumentation
-      scripts/bazel/sdk.sh prepare --output build/maven-repository
-      ./gradlew --no-daemon --max-workers=2 :nuxie-android:test :nuxie-android:apiCheck :nuxie-android:lint
-      ./gradlew --no-daemon --max-workers=2 verifyAndroidReleaseArtifacts
-      python3 scripts/test-maven-consumer.py --version "$(python3 -c 'import sys; sys.path.insert(0, "scripts/bazel"); import sdk; print(sdk.declared_version())')"
-      scripts/verify-fixtures.sh
+      python3 scripts/ci/pipeline.py | buildkite-agent pipeline upload --no-interpolation
     agents:
       queue: nuxie-pr
-      nuxie-platform: macos
-    timeout_in_minutes: 90
-    artifact_paths:
-      - "**/build/reports/tests/**/*"
-      - "bazel-testlogs/**/*"
-    retry:
-      automatic:
-        - exit_status: -1
-          limit: 1
+    timeout_in_minutes: 5
+
+  - label: ":pipeline: Compose owning SDK confidence lanes"
+    key: compose-lanes-v2
+    if: build.env("NUXIE_CI_RUNNER_POLICY_VERSION") == "2" && build.env("NUXIE_CI_RUNNER_TOPOLOGY") != "fallback"
+    command: |
+      set -euo pipefail
+      python3 scripts/ci/pipeline.py | buildkite-agent pipeline upload --no-interpolation
+    agents:
+      queue: nuxie-pr
+      nuxie-platform: linux
+      nuxie-resources: linux-14g-v2
+    env:
+      NUXIE_CI_RUNNER_POLICY_VERSION: "2"
+      NUXIE_CI_RUNNER_PROFILE: linux-portable
+      NUXIE_BAZEL_REMOTE_CACHE_MODE: "off"
+    concurrency: 1
+    concurrency_group: nuxie/physical/proxmox-heavy
+    concurrency_method: eager
+    timeout_in_minutes: 5
+
+  - label: ":pipeline: Reject unsupported SDK fallback graph"
+    key: compose-lanes-fallback-v2
+    if: build.env("NUXIE_CI_RUNNER_POLICY_VERSION") == "2" && build.env("NUXIE_CI_RUNNER_TOPOLOGY") == "fallback"
+    command: |
+      set -euo pipefail
+      python3 scripts/ci/pipeline.py | buildkite-agent pipeline upload --no-interpolation
+    agents:
+      queue: nuxie-pr
+      nuxie-platform: linux
+      nuxie-resources: linux-light-6g-v2
+    env:
+      NUXIE_CI_RUNNER_POLICY_VERSION: "2"
+      NUXIE_CI_RUNNER_PROFILE: temporary-light
+      NUXIE_BAZEL_REMOTE_CACHE_MODE: "off"
+    concurrency: 1
+    concurrency_group: nuxie/physical/proxmox-heavy
+    concurrency_method: eager
+    timeout_in_minutes: 5

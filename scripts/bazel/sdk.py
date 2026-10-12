@@ -60,7 +60,7 @@ def require_space():
 
 def gradle(*tasks, properties=()):
     require_space()
-    subprocess.run([str(ROOT / "gradlew"), "--no-daemon", "--max-workers=2", *properties, *tasks], cwd=ROOT, check=True)
+    subprocess.run([str(ROOT / "gradlew"), "--no-daemon", "--max-workers=" + ("1" if os.environ.get("NUXIE_CI_RUNNER_POLICY_VERSION") == "2" else "2"), *properties, *tasks], cwd=ROOT, check=True)
 
 
 def toolchain():
@@ -82,6 +82,10 @@ def toolchain():
 
 def bazel_command(workspace=None, output_base_variable="NUXIE_ANDROID_BAZEL_OUTPUT_BASE"):
     workspace = ROOT if workspace is None else workspace
+    if os.environ.get("NUXIE_CI_RUNNER_POLICY_VERSION") == "2":
+        if os.environ.get(output_base_variable):
+            raise ValueError("Installed runner policy derives output bases from each workspace; explicit output-base overrides are local legacy controls")
+        return [str(ROOT / "scripts/bazel/bazel.sh")]
     candidate = os.environ.get("NUXIE_BAZEL_BIN") or shutil.which("bazelisk") or shutil.which("bazel")
     if not candidate:
         parent = ROOT.parent.parent / "node_modules/.bin/bazelisk"
@@ -102,17 +106,21 @@ def bazel_command(workspace=None, output_base_variable="NUXIE_ANDROID_BAZEL_OUTP
 
 def bazel(command, *args, capture=False, workspace=None, output_base_variable="NUXIE_ANDROID_BAZEL_OUTPUT_BASE"):
     require_space()
-    workspace = ROOT if workspace is None else workspace
+    workspace = workspace or ROOT
     executable = bazel_command(workspace, output_base_variable)
-    flags = []
-    if command in ("build", "test", "run", "cquery", "aquery"):
+    options = []
+    environment = dict(os.environ)
+    if os.environ.get("NUXIE_CI_RUNNER_POLICY_VERSION") == "2":
+        environment["NUXIE_BAZEL_WORKSPACE"] = str(workspace)
+    elif command in {"build", "test", "run", "cquery", "aquery"}:
         jobs = os.environ.get("NUXIE_BAZEL_JOBS", "2")
         if not re.fullmatch(r"[1-9][0-9]*", jobs):
             raise ValueError("NUXIE_BAZEL_JOBS must be a positive integer")
-        flags.append("--jobs=" + jobs)
-    result = subprocess.run([*executable, command, *flags, *args], cwd=workspace,
-                            check=True, text=True, stdout=subprocess.PIPE if capture else None)
-    return result.stdout.strip() if capture else None
+        options = ["--jobs=" + jobs]
+    argv = executable + [command] + options + list(args)
+    if capture:
+        return subprocess.check_output(argv, cwd=workspace, env=environment, text=True).strip()
+    subprocess.run(argv, cwd=workspace, env=environment, check=True)
 
 
 def artifact(label, *, filename=None):
