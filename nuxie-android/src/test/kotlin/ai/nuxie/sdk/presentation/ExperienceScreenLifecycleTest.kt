@@ -13,6 +13,21 @@ import org.junit.Test
 
 class ExperienceScreenLifecycleTest {
     @Test
+    fun `exit reason follows its edge and clears on return`() {
+        val state = ExperienceScreenLifecycle()
+        val key = "screen/exitReason"
+        assertEquals(NuxieViewModelScalarValue.StringValue("none"), state.snapshot()[key])
+        assertEquals(NuxieViewModelScalarValue.StringValue("navigation"),
+            state.move(ExperienceScreenLifecycle.Phase.EXITING, exitReason = ExperienceScreenLifecycle.ExitReason.NAVIGATION)[key])
+        assertEquals(NuxieViewModelScalarValue.StringValue("navigation"), state.updateReduceMotion(true)[key])
+        assertEquals(NuxieViewModelScalarValue.StringValue("none"), state.move(ExperienceScreenLifecycle.Phase.HIDDEN)[key])
+        assertEquals(NuxieViewModelScalarValue.StringValue("none"), state.move(ExperienceScreenLifecycle.Phase.ENTERING)[key])
+        assertEquals(NuxieViewModelScalarValue.StringValue("dismissed"),
+            state.move(ExperienceScreenLifecycle.Phase.EXITING, exitReason = ExperienceScreenLifecycle.ExitReason.DISMISSED)[key])
+        assertEquals(NuxieViewModelScalarValue.StringValue("none"), state.move(ExperienceScreenLifecycle.Phase.ACTIVE)[key])
+    }
+
+    @Test
     fun `font scale follows canonical cases without changing lifecycle or prepared copies`() {
         val contract = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("runtime/font-scale-policy/cases.json").readText()).jsonObject
@@ -69,6 +84,7 @@ class ExperienceScreenLifecycleTest {
                 "screen/phase" to NuxieViewModelScalarValue.StringValue(phase),
                 "screen/appearances" to NuxieViewModelScalarValue.NumberValue(step.getValue("appearances").jsonPrimitive.double),
                 "screen/transition" to NuxieViewModelScalarValue.StringValue(transition),
+                "screen/exitReason" to NuxieViewModelScalarValue.StringValue(step.getValue("exitReason").jsonPrimitive.content),
                 "env/reduceMotion" to NuxieViewModelScalarValue.BooleanValue(reduced),
                 "fontScale" to NuxieViewModelScalarValue.NumberValue(1.0),
             ), values)
