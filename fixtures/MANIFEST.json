@@ -42,6 +42,7 @@
     "journeys/planes/drawer-content-clipping.json": "c34045c264aa2e616f883252f2694aecbd90e0042ecaa0813a6665adf2179be8",
     "journeys/planes/entry-evaluation.json": "361608607b5cef842e89e712013dc5449b37a50265bf375b5d7c0545e1b42d33",
     "journeys/planes/executor-controls.json": "82fd502f9476bc229318d8fcd01f0574a5576c84898df1b8355929050e5f7963",
+    "journeys/planes/file-paywall-selection.json": "cad6d3379239b923e46daa5ff30fe5b955924d20c5c5716bd1ac269311b48c45",
     "journeys/planes/history-coverage.json": "598dc2bfb411a11988547de9d01db35b0ba8f4a3aec5971b409ff1da6f843bbf",
     "journeys/planes/history-targeting.json": "0ccdfad60797cb305082e6799cd8098131973fdcd17aee34dec6cd156cce8d48",
     "journeys/planes/loading-treatment.json": "82beb9f80eef5768f47ff430945f34706463e514db899f23e91c5215a2d56f57",
@@ -49,6 +50,7 @@
     "journeys/planes/navigation-acquisition-android.json": "c061146613e0a9485e90585c12e7e335426211e98d38823788c3d6ae469cb954",
     "journeys/planes/navigation-input-handoff-android.json": "dfc42e1707f1f69516984cfb0394073a2908011f0e8b450287652a4a8e83920e",
     "journeys/planes/occurrence-evaluation.json": "5ec208634c9e0d1d0919f84fa008dffa1d59618a9556a37bf46c326d292f3e02",
+    "journeys/planes/pending-commerce.json": "8aa980f9594d0fb2e66a9d74c61e3fdda1eb08c140fc319f7ca462e8ebb56599",
     "journeys/planes/persistent-navigation-android.json": "f44bcffb184fab3cfafd4f676f18c2d57183b3bff6f4a85b60a415bbc6f668df",
     "journeys/planes/presentation-acquisition-recovery-android.json": "5d5c530900258d4ad668d37d6fbaadbaf6164b3b6b509fc3ef751973d87cbb17",
     "journeys/planes/presentation-navigation-recovery-android.json": "4ccc52001b27a8740c11374f9da25ce5fccd115cb89456fe11e98a8fef9b5eaa",
@@ -456,8 +458,7 @@
     "video/multilingual.mp4": "db01aede12e87d4357aabcc76ef7f518ec766a7684afe0e6da7229decf93196b",
     "video/waiting-inventory.json": "3c707b124011c110dad62acc0f16e6f09940326e2d6fa59e1afd3202595412e4",
     "video/waiting-journey.json": "8cc61bdb05b2d1f3bd9e8b616fd1f6848b49d794f63becda0d12929be57cca8b",
-    "video/waiting.nux": "0312918deeabae4853fc84e8a00ab7daf5f30e80e4c0dc14326aae4efb3872d2",
-    "journeys/planes/pending-commerce.json": "8aa980f9594d0fb2e66a9d74c61e3fdda1eb08c140fc319f7ca462e8ebb56599"
+    "video/waiting.nux": "0312918deeabae4853fc84e8a00ab7daf5f30e80e4c0dc14326aae4efb3872d2"
   },
   "sourceCommitOverrides": {
     "README.md": "c0faf25cfd6e7c9316dc3182154b62c7d3811793",
@@ -723,6 +724,7 @@
     "runtime/typing-probes/README.md": "ccaad4fe7f09685429a0159222a6332e3f29a13b",
     "runtime/typing-probes/f3-field-in-flow.riv": "ccaad4fe7f09685429a0159222a6332e3f29a13b",
     "video/README.md": "bc082e702f39ea2359ecbb28b15340eb40ad939b",
-    "journeys/planes/pending-commerce.json": "bc082e702f39ea2359ecbb28b15340eb40ad939b"
+    "journeys/planes/pending-commerce.json": "bc082e702f39ea2359ecbb28b15340eb40ad939b",
+    "journeys/planes/file-paywall-selection.json": "313ff341a4327e121023f20b93ab9bbdf45221bd"
   }
 }
