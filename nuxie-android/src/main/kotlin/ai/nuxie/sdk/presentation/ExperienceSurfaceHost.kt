@@ -1521,7 +1521,7 @@ internal class ExperienceSurfaceHost(
 
     /** Called once after each player step, before any later native writes. */
     private fun captureStepSnapshot(outcome: NuxiePlayerStepOutcome, correlationId: ULong): NuxieViewModelSnapshot? {
-        val captured = viewModelState?.captureSnapshot() ?: artboard?.captureDefaultSnapshot()
+        val captured = viewModelState?.captureSnapshot(outcome.viewModelChanges) ?: artboard?.captureDefaultSnapshot()
         val saves = mutableListOf<ExperienceResponseSaveRequest>()
         val descriptor = saveDescriptor
         if (descriptor != null && captured != null && (outcome.events.any { it.name == ExperienceResponseSaveRequest.EVENT } ||

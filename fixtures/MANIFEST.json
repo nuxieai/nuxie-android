@@ -42,7 +42,7 @@
     "journeys/planes/drawer-content-clipping.json": "c34045c264aa2e616f883252f2694aecbd90e0042ecaa0813a6665adf2179be8",
     "journeys/planes/entry-evaluation.json": "361608607b5cef842e89e712013dc5449b37a50265bf375b5d7c0545e1b42d33",
     "journeys/planes/executor-controls.json": "82fd502f9476bc229318d8fcd01f0574a5576c84898df1b8355929050e5f7963",
-    "journeys/planes/file-paywall-selection.json": "cad6d3379239b923e46daa5ff30fe5b955924d20c5c5716bd1ac269311b48c45",
+    "journeys/planes/file-paywall-selection.json": "551edb9e0560370dd5996191f88c9abd0eca569ded12f4a4014c12f6952343db",
     "journeys/planes/history-coverage.json": "598dc2bfb411a11988547de9d01db35b0ba8f4a3aec5971b409ff1da6f843bbf",
     "journeys/planes/history-targeting.json": "0ccdfad60797cb305082e6799cd8098131973fdcd17aee34dec6cd156cce8d48",
     "journeys/planes/loading-treatment.json": "82beb9f80eef5768f47ff430945f34706463e514db899f23e91c5215a2d56f57",
@@ -725,6 +725,6 @@
     "runtime/typing-probes/f3-field-in-flow.riv": "ccaad4fe7f09685429a0159222a6332e3f29a13b",
     "video/README.md": "bc082e702f39ea2359ecbb28b15340eb40ad939b",
     "journeys/planes/pending-commerce.json": "bc082e702f39ea2359ecbb28b15340eb40ad939b",
-    "journeys/planes/file-paywall-selection.json": "313ff341a4327e121023f20b93ab9bbdf45221bd"
+    "journeys/planes/file-paywall-selection.json": "80194e72e943a83f5d17f8a2b0d12e0272cb2b47"
   }
 }

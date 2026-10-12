@@ -455,6 +455,7 @@ internal class NuxieRuntimeViewModelState(
     private val instanceIds: Map<String, Long> = emptyMap(),
     private val defaultInstanceId: String? = null,
     private val paywallSelection: NuxiePaywallSelection? = null,
+    private var paywallSelectionValid: Boolean = true,
 ) {
     private val children = children.toMutableList()
 
@@ -487,17 +488,20 @@ internal class NuxieRuntimeViewModelState(
     /** Must be called on the owning runtime lane before the next player step. */
     fun snapshot(): NuxieViewModelSnapshot = captureSnapshot().values
 
-    fun captureSnapshot(): NuxieCapturedViewModelSnapshot {
+    fun captureSnapshot(changes: List<NuxieViewModelChange> = emptyList()): NuxieCapturedViewModelSnapshot {
         var snapshot = nativeSnapshot()
-        val selected = paywallSelection?.apply(requireHandle(), native, snapshot)
-        if (selected != null) snapshot = nativeSnapshot()
+        val write = paywallSelection?.selectionWrite(snapshot, changes)
+        if (write != null) {
+            paywallSelectionValid = checkNotNull(paywallSelection).apply(requireHandle(), native, snapshot, write)
+            snapshot = nativeSnapshot()
+        }
         var values = NuxieViewModelSnapshot.fromNative(snapshot,
             schemaNames = catalog.schemas.associate { it.index.toLong() to it.name },
             instanceIds = instanceIds,
             defaultInstanceId = defaultInstanceId,
         )
-        if (selected != null) values = values.withPaywallSelection(
-            checkNotNull(paywallSelection).products.associate { it.nativeId to it.productId }, selected)
+        if (paywallSelection != null) values = values.withPaywallSelection(
+            paywallSelection.products.associate { it.nativeId to it.productId }, paywallSelectionValid)
         return NuxieCapturedViewModelSnapshot(snapshot, values)
     }
 
