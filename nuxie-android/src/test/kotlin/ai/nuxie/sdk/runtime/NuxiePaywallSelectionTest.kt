@@ -27,6 +27,28 @@ class NuxiePaywallSelectionTest {
         }
     }
     @Test
+    fun `two placements of one product buy the signed choice without a tap`() =
+        withPaywall(duplicateProductId = true) { _, _, state ->
+            val opened = state.captureSnapshot().values
+            assertEquals("placement-monthly", opened.resolveString("paywall.selectedProduct.placementId"))
+            assertEquals(NuxieViewModelScalarValue.NumberValue(0.0), opened.resolveScalar(listOf("paywall", "selectedIndex")))
+            assertEquals(true, opened.resolveBoolean("paywall.selectedProduct.isSelected"))
+        }
+
+    @Test
+    fun `a baked root id does not replace the signed at-open choice`() =
+        withPaywall(bakedProductId = "other-environment-product") { _, _, state ->
+            assertEquals("placement-monthly", state.captureSnapshot().values.resolveString("paywall.selectedProduct.placementId"))
+        }
+
+    @Test
+    fun `a refused native selection write keeps the previous purchase target`() = withPaywall { _, native, state ->
+        native.refuseSelectionWrites = true
+        native.tap("product-annual")
+        assertEquals("placement-monthly", state.captureSnapshot().values.resolveString("paywall.selectedProduct.placementId"))
+    }
+
+    @Test
     fun `signed identities survive renderer changes and checkpoint restoration`() = withPaywall { _, native, state ->
         native.changeProductId("annual", "forged")
         native.tap("product-annual")
@@ -35,7 +57,9 @@ class NuxiePaywallSelectionTest {
         val restored = NuxieRuntime(native).restoreViewModel(NuxieRuntimeFile(10, native),
             NuxieRuntimeArtboard(20, native) { error("Restoration reads the catalog") }, snapshot)
         try {
-            assertNotEquals(snapshot.nativeRootInstanceId, restored.snapshot().nativeRootInstanceId)
+            val rebuilt = restored.snapshot()
+            assertNotEquals(snapshot.nativeRootInstanceId, rebuilt.nativeRootInstanceId)
+            assertEquals("placement-annual", rebuilt.resolveString("paywall.selectedProduct.placementId"))
             native.tap("forged")
             assertNull(restored.snapshot().resolveString("paywall.selectedProduct.placementId"))
             native.tap("product-monthly")
@@ -57,7 +81,7 @@ class NuxiePaywallSelectionTest {
         assertTrue(invalid.native.values.filter { it.name == "isSelected" }.none { it.boolValue })
     }
 
-    private fun withPaywall(block: (JsonObject, PlanTapNative, NuxieRuntimeViewModelState) -> Unit) {
+    private fun withPaywall(duplicateProductId: Boolean = false, bakedProductId: String = "product-monthly", block: (JsonObject, PlanTapNative, NuxieRuntimeViewModelState) -> Unit) {
         val scenario = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/file-paywall-selection.json").readText()).jsonObject
         val screen = scenario.getValue("screen").jsonObject
@@ -66,7 +90,7 @@ class NuxiePaywallSelectionTest {
         val rows = scenario.getValue("viewModelValues").jsonArray.map { it.jsonObject }
         val plans = rows.single { it.getValue("path").jsonPrimitive.content == "paywall/products" }
             .getValue("value").jsonArray.map { it.jsonObject.getValue("vmInstanceId").jsonPrimitive.content }
-        val native = PlanTapNative(model, plans)
+        val native = PlanTapNative(model, plans, bakedProductId)
         val state = NuxieRuntime(native).bindViewModelList(
             NuxieRuntimeFile(10, native),
             NuxieRuntimeArtboard(20, native) { error("Projection reads the catalog") },
@@ -75,14 +99,16 @@ class NuxiePaywallSelectionTest {
                     NuxieViewModelListProjection.Item(id, index, index == 0,
                         rows.filter { it.getValue("instanceId").jsonPrimitive.content == id }
                             .associate { it.getValue("path").jsonPrimitive.content to
-                                NuxieViewModelScalarValue.StringValue(it.getValue("value").jsonPrimitive.content) },
+                                NuxieViewModelScalarValue.StringValue(
+                                    if (duplicateProductId && it.getValue("path").jsonPrimitive.content == "productId") "product-monthly"
+                                    else it.getValue("value").jsonPrimitive.content) },
                         instanceId = id)
                 }, defaultInstanceId = root),
         )
         try { block(scenario, native, state) } finally { state.close() }
     }
 
-    private class PlanTapNative(private val model: String, private val plans: List<String>) : NuxieTypedRuntimeNative {
+    private class PlanTapNative(private val model: String, private val plans: List<String>, private val bakedProductId: String) : NuxieTypedRuntimeNative {
         private data class Node(val schema: Int, val values: MutableMap<String, Any> = mutableMapOf())
         private val nodes = linkedMapOf<Long, Node>()
         private var nextHandle = 40L
@@ -91,6 +117,7 @@ class NuxiePaywallSelectionTest {
         private fun paywall(): Node = nodes.getValue(nodes.getValue(activeRoot).values.getValue("paywall") as Long)
         @Suppress("UNCHECKED_CAST")
         private fun order(): MutableList<Long> = paywall().values.getValue("products") as MutableList<Long>
+        var refuseSelectionWrites = false
         fun tap(productId: String) { paywall().values["selectedProductId"] = productId }
         fun changeProductId(plan: String, id: String) {
             nodes.getValue(order()[plans.indexOf(plan)]).values["productId"] = id
@@ -126,7 +153,7 @@ class NuxiePaywallSelectionTest {
             nodes.getValue(root).values["paywall"] = group
             val authoredProducts = plans.map { allocate(2) }
             nodes.getValue(group).values.putAll(mapOf("products" to authoredProducts.toMutableList(),
-                "selectedProductId" to "product-monthly", "selectedIndex" to 0f))
+                "selectedProductId" to bakedProductId, "selectedIndex" to 0f))
             nodes.getValue(group).values["selectedProduct"] = authoredProducts.first()
             activeRoot = root
             return NativeCallResult(0, root)
@@ -138,6 +165,7 @@ class NuxiePaywallSelectionTest {
         override fun freeViewModel(handle: Long) = 0
 
         override fun mutateViewModel(handle: Long, write: NativeViewModelWrite): Int {
+            if (refuseSelectionWrites && write.path in setOf("paywall/selectedProduct", "paywall/selectedIndex", "isSelected")) return 1
             val parts = write.path.split('/')
             var target = nodes.getValue(handle)
             for (segment in parts.dropLast(1)) target = nodes.getValue(target.values.getValue(segment) as Long)
