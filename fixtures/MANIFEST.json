@@ -69,7 +69,7 @@
     "journeys/planes/runtime-layout-transform.json": "05a6283f028f823b92d4b38175582db52ac8bac5eef4dfe3533cbf76436e97a0",
     "journeys/planes/runtime-reduced-motion-android.json": "fff4b8245243801a0d0d95b468282da3b5434d52da78aca080a304a10d579897",
     "journeys/planes/runtime-safe-area.json": "91710510ce43724bf2db3b7d39af0f5f24d95873a4dd6a76883b9aab2b08e089",
-    "journeys/planes/runtime-screen-lifecycle.json": "da0b9cc6d74645aa21252095f69f5b216c165e854adae76fdd54e891c35ba823",
+    "journeys/planes/runtime-screen-lifecycle.json": "83afd3677de750bb32224f7d4b471f7022b80f4b218fdf6787bede56cf09ff32",
     "journeys/planes/runtime-visibility-android.json": "996bfc4b8dfd5d10b151113e89b342e13445613453f986b26f386cb2752e78a2",
     "journeys/planes/runtime-window-insets-android.json": "69403f8e007e6b230cb527f8832fec7aaefeb91d529d03b11ce0758242fbe9d4",
     "journeys/planes/scene-admission.json": "fbb8b110e428c507b2b49d82baeb05b6886fab730f16a8d3929f8a14013c83db",
@@ -783,6 +783,7 @@
     "runtime/text-editing-experiment/text_input_secure_observed.riv": "5f0f378c4eb3c4fbec1d6710fa6afdb6fb75cb71",
     "runtime/typing-probes/README.md": "ccaad4fe7f09685429a0159222a6332e3f29a13b",
     "runtime/typing-probes/f3-field-in-flow.riv": "ccaad4fe7f09685429a0159222a6332e3f29a13b",
-    "video/README.md": "bc082e702f39ea2359ecbb28b15340eb40ad939b"
+    "video/README.md": "bc082e702f39ea2359ecbb28b15340eb40ad939b",
+    "journeys/planes/runtime-screen-lifecycle.json": "a2bbec176a96d0daed8deea45a0f5eb9408e6750"
   }
 }

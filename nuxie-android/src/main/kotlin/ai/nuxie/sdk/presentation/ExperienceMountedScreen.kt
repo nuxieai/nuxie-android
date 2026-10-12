@@ -164,7 +164,7 @@ internal class ExperienceMountedScreen(
         val screen = screens?.filterIsInstance<JsonObject>()?.firstOrNull {
             (it["id"] as? JsonPrimitive)?.content == prepared.screenId
         }
-        transitionEvents.perform(screen?.get("exit") as? JsonObject, reduceMotionEnabled, ::exit)
+        transitionEvents.perform(screen?.get("exit") as? JsonObject, reduceMotionEnabled) { exit(ExperienceScreenLifecycle.ExitReason.NAVIGATION) }
     }
 
     suspend fun beginCustomTransition(id: String, outgoing: Boolean) {
@@ -173,8 +173,8 @@ internal class ExperienceMountedScreen(
         else lifecycle.beginPreparedTransition(id))
     }
 
-    fun exit() {
-        surface.updateRuntimeValues(lifecycle.move(ExperienceScreenLifecycle.Phase.EXITING))
+    fun exit(reason: ExperienceScreenLifecycle.ExitReason = ExperienceScreenLifecycle.ExitReason.DISMISSED) {
+        surface.updateRuntimeValues(lifecycle.move(ExperienceScreenLifecycle.Phase.EXITING, exitReason = reason))
     }
 
     /** Completion follows native handle release, so the owner can release its artifact lease. */
