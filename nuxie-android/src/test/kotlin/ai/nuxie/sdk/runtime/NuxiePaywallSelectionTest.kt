@@ -49,6 +49,26 @@ class NuxiePaywallSelectionTest {
     }
 
     @Test
+    fun `placement writes choose between two placements of one signed product`() =
+        withPaywall(duplicateProductId = true) { _, native, state ->
+            val annual = state.captureSnapshot(native.tapPlacement("placement-annual")).values
+            assertEquals("placement-annual", annual.resolveString("paywall.selectedProduct.placementId"))
+            assertEquals("product-monthly", annual.resolveString("paywall.selectedProductId"))
+            assertEquals(NuxieViewModelScalarValue.NumberValue(1.0), annual.resolveScalar(listOf("paywall", "selectedIndex")))
+            assertEquals(true, annual.resolveBoolean("paywall.selectedProduct.isSelected"))
+            val invalid = state.captureSnapshot(native.tapPlacement("unknown")).values
+            assertNull(invalid.resolveString("paywall.selectedProduct.placementId"))
+            assertEquals("", invalid.resolveString("paywall.selectedProductId"))
+            val restored = NuxieRuntime(native).restoreViewModel(NuxieRuntimeFile(10, native),
+                NuxieRuntimeArtboard(20, native) { error("Restoration reads the catalog") }, invalid)
+            try {
+                assertNull("Rebuilding must not revive the non-nullable old link", restored.snapshot().resolveString("paywall.selectedProduct.placementId"))
+                val monthly = restored.captureSnapshot(native.tapPlacement("placement-monthly")).values
+                assertEquals("placement-monthly", monthly.resolveString("paywall.selectedProduct.placementId"))
+            } finally { restored.close() }
+        }
+
+    @Test
     fun `signed identities survive renderer changes and checkpoint restoration`() = withPaywall { _, native, state ->
         native.changeProductId("annual", "forged")
         val changes = native.tap("product-annual")
@@ -126,6 +146,12 @@ class NuxiePaywallSelectionTest {
             return listOf(NuxieViewModelChange(NuxieViewModelChangeOrigin.RUNTIME, 0u,
                 (owner + 1000).toULong(), 3, NuxieViewModelValue.Bytes(productId.encodeToByteArray())))
         }
+        fun tapPlacement(placementId: String): List<NuxieViewModelChange> {
+            paywall().values["selectedPlacementId"] = placementId
+            val owner = nodes.getValue(activeRoot).values.getValue("paywall") as Long
+            return listOf(NuxieViewModelChange(NuxieViewModelChangeOrigin.RUNTIME, 0u,
+                (owner + 1000).toULong(), 5, NuxieViewModelValue.Bytes(placementId.encodeToByteArray())))
+        }
         fun changeProductId(plan: String, id: String) {
             nodes.getValue(order()[plans.indexOf(plan)]).values["productId"] = id
         }
@@ -138,18 +164,19 @@ class NuxiePaywallSelectionTest {
         override fun viewModelCatalog(fileHandle: Long) = NativeCallResult(0, NativeViewModelCatalog(
             schemas = arrayOf(
                 NativeViewModelSchema(0, model, 0, 1, 0, 0, -1, false),
-                NativeViewModelSchema(1, "Paywall", 1, 4, 0, 0, -1, false),
-                NativeViewModelSchema(2, "PaywallProduct", 5, 3, 0, 2, 0, false),
+                NativeViewModelSchema(1, "Paywall", 1, 5, 0, 0, -1, false),
+                NativeViewModelSchema(2, "PaywallProduct", 6, 3, 0, 2, 0, false),
             ),
             properties = arrayOf(
-                NativeViewModelProperty(0, 0, "paywall", 9, 1, emptyArray()),
-                NativeViewModelProperty(1, 1, "products", 8, 2, emptyArray()),
-                NativeViewModelProperty(1, 2, "selectedProduct", 9, 2, emptyArray()),
-                NativeViewModelProperty(1, 3, "selectedProductId", 1, -1, emptyArray()),
-                NativeViewModelProperty(1, 4, "selectedIndex", 2, -1, emptyArray()),
-                NativeViewModelProperty(2, 5, "productId", 1, -1, emptyArray()),
-                NativeViewModelProperty(2, 6, "placementId", 1, -1, emptyArray()),
-                NativeViewModelProperty(2, 7, "isSelected", 3, -1, emptyArray()),
+                NativeViewModelProperty(0, 0, "paywall", NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue, 1, emptyArray()),
+                NativeViewModelProperty(1, 1, "products", NuxieViewModelPropertyKind.LIST.nativeValue, 2, emptyArray()),
+                NativeViewModelProperty(1, 2, "selectedProduct", NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue, 2, emptyArray()),
+                NativeViewModelProperty(1, 3, "selectedProductId", NuxieViewModelPropertyKind.STRING.nativeValue, -1, emptyArray()),
+                NativeViewModelProperty(1, 4, "selectedIndex", NuxieViewModelPropertyKind.NUMBER.nativeValue, -1, emptyArray()),
+                NativeViewModelProperty(1, 5, "selectedPlacementId", NuxieViewModelPropertyKind.STRING.nativeValue, -1, emptyArray()),
+                NativeViewModelProperty(2, 6, "productId", NuxieViewModelPropertyKind.STRING.nativeValue, -1, emptyArray()),
+                NativeViewModelProperty(2, 7, "placementId", NuxieViewModelPropertyKind.STRING.nativeValue, -1, emptyArray()),
+                NativeViewModelProperty(2, 8, "isSelected", NuxieViewModelPropertyKind.BOOLEAN.nativeValue, -1, emptyArray()),
             ),
             authoredInstances = plans.mapIndexed { index, name -> NativeViewModelAuthoredInstance(2, index.toLong(), name) }.toTypedArray(),
         ))
@@ -160,7 +187,7 @@ class NuxiePaywallSelectionTest {
             nodes.getValue(root).values["paywall"] = group
             val authoredProducts = plans.map { allocate(2) }
             nodes.getValue(group).values.putAll(mapOf("products" to authoredProducts.toMutableList(),
-                "selectedProductId" to bakedProductId, "selectedIndex" to 0f))
+                "selectedProductId" to bakedProductId, "selectedPlacementId" to "placement-monthly", "selectedIndex" to 0f))
             nodes.getValue(group).values["selectedProduct"] = authoredProducts.first()
             activeRoot = root
             return NativeCallResult(0, root)
@@ -204,15 +231,15 @@ class NuxiePaywallSelectionTest {
                 for (property in properties.filter { it.schemaIndex == node.schema.toLong() }) {
                     val value = node.values[property.name] ?: continue
                     val children = when (property.kind) {
-                        9 -> listOf(value as Long)
-                        8 -> (value as List<*>).map { it as Long }
+                        NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue -> listOf(value as Long)
+                        NuxieViewModelPropertyKind.LIST.nativeValue -> (value as List<*>).map { it as Long }
                         else -> emptyList()
                     }
                     values += NativeViewModelSnapshotValue(handle + 1000, property.index, property.name, property.kind,
                         if (value is String) value.encodeToByteArray() else byteArrayOf(),
-                        if (property.kind == 9) (value as Long) + 1000 else 0,
+                        if (property.kind == NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue) (value as Long) + 1000 else 0,
                         numberValue = (value as? Float) ?: 0f, boolValue = value == true,
-                        listItemIds = if (property.kind == 8) children.map { it + 1000 }.toLongArray() else longArrayOf())
+                        listItemIds = if (property.kind == NuxieViewModelPropertyKind.LIST.nativeValue) children.map { it + 1000 }.toLongArray() else longArrayOf())
                     children.forEach(::visit)
                 }
             }

@@ -196,7 +196,7 @@ internal class NuxieViewModelSnapshot private constructor(
     }
 
     /** Invalid selections mask the non-nullable native link for every purchase scope. */
-    internal fun withPaywallSelection(products: Map<Long, String?>, selected: Boolean): NuxieViewModelSnapshot {
+    internal fun withPaywallSelection(products: Map<Long, NuxiePaywallSelection.Identity>, selected: Boolean): NuxieViewModelSnapshot {
         val owner = (instancesById[rootInstanceId]?.values?.get("paywall") as? Value.Reference)?.instanceId
         return NuxieViewModelSnapshot(rootInstanceId, instancesById.values.map { instance ->
             if (!selected && instance.id == owner) instance.copy(values = instance.values +
