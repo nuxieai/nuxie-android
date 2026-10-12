@@ -85,9 +85,10 @@ internal class NuxiePaywallSelection(val products: List<Product>) {
         fun create(projection: NuxieViewModelListProjection, children: List<Long>, native: NuxieTypedRuntimeNative,
                    catalog: NuxieViewModelCatalog, rootSchema: Int): NuxiePaywallSelection? {
             if (projection.listPath != "paywall/products" || projection.selectedItemPath != "paywall/selectedProduct" ||
-                projection.itemSchemaName != "PaywallProduct" || runCatching {
-                    catalog.propertyAtPath(rootSchema, "paywall/selectedProductId").kind
-                }.getOrNull() != NuxieViewModelPropertyKind.STRING) return null
+                projection.itemSchemaName != "PaywallProduct" ||
+                listOf("paywall/selectedProductId", "paywall/selectedPlacementId").none { path ->
+                    runCatching { catalog.propertyAtPath(rootSchema, path).kind }.getOrNull() == NuxieViewModelPropertyKind.STRING
+                }) return null
             return NuxiePaywallSelection(projection.items.zip(children).map { (item, handle) ->
                 val identity = native.snapshotViewModel(handle)
                 check(identity.status == 0) { "Cannot identify signed paywall product" }
