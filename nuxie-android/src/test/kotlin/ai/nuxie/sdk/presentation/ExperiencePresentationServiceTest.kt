@@ -73,6 +73,8 @@ class ExperiencePresentationServiceTest {
         override val rendererEffects = RendererEffectLifetime()
         var requestedReason: CloseReason? = null
         var finished = false
+        val screenValues = mutableMapOf<String, ai.nuxie.sdk.runtime.NuxieViewModelScalarValue>()
+        override suspend fun updateRuntimeValues(values: Map<String, ai.nuxie.sdk.runtime.NuxieViewModelScalarValue>) { screenValues.putAll(values) }
 
         override fun requestCloseFromService(reason: CloseReason): Boolean {
             requestedReason = reason
@@ -117,6 +119,33 @@ class ExperiencePresentationServiceTest {
         assertNull(batches.single().source.instanceId)
         assertTrue(service.ownsJourney(JourneyPresentationOwner("journey-1", "customer-1")))
         assertTrue(outcomes.isEmpty())
+    }
+
+    @Test
+    fun `purchase without a selected plan returns the failed outlet`() = runTest {
+        val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot().resolve("events/purchase-without-selection.json").readText()).jsonObject
+        val expected = fixture.getValue("expected").jsonObject
+        val purchase = expected.getValue("purchase").jsonObject
+        val release = renderedJourneyRelease()
+        val launched = mutableListOf<String>()
+        val service = service(this, launch = launched::add)
+        val presentation = async {
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) }, onOutcome = {})
+        }
+        runCurrent()
+        PresentationRegistry.reportFirstFrame(launched.single())
+        presentation.await()
+        val host = AttachedHost()
+        assertTrue(PresentationRegistry.attach(launched.single(), host))
+        val owner = JourneyPresentationOwner("journey-1", "customer-1")
+        val action = Json.parseToJsonElement("""{"type":"purchase","placementId":""}""").jsonObject
+        assertEquals(JourneyPresentationActionResult.Advanced(expected.getValue("outlet").jsonPrimitive.content), service.dispatchJourneyAction(owner, action, "buy-no-selection"))
+        assertEquals(ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.StringValue(purchase.getValue("status").jsonPrimitive.content), host.screenValues["paywall/purchase/status"])
+        assertEquals(ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.StringValue(purchase.getValue("errorCode").jsonPrimitive.content), host.screenValues["paywall/purchase/errorCode"])
+        assertTrue(service.ownsJourney(owner))
+        PresentationRegistry.detach(launched.single(), host)
+        service.shutdownOwnedBy("customer-1")
     }
 
     @Test
