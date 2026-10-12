@@ -73,6 +73,16 @@ class NuxiePaywallSelectionTest {
         }
 
     @Test
+    fun `placement selection works without a declared product selector`() =
+        withPaywall(duplicateProductId = true, declaresProductSelector = false) { _, native, state ->
+            for (plan in listOf("annual", "monthly")) {
+                val selected = state.captureSnapshot(native.tapPlacement("placement-$plan")).values
+                assertEquals("placement-$plan", selected.resolveString("paywall.selectedProduct.placementId"))
+                assertEquals(true, selected.resolveBoolean("paywall.selectedProduct.isSelected"))
+            }
+        }
+
+    @Test
     fun `signed identities survive renderer changes and checkpoint restoration`() = withPaywall { _, native, state ->
         native.changeProductId("annual", "forged")
         val changes = native.tap("product-annual")
@@ -107,7 +117,7 @@ class NuxiePaywallSelectionTest {
         assertTrue(invalid.native.values.filter { it.name == "isSelected" }.none { it.boolValue })
     }
 
-    private fun withPaywall(duplicateProductId: Boolean = false, bakedProductId: String = "product-monthly", block: (JsonObject, PlanTapNative, NuxieRuntimeViewModelState) -> Unit) {
+    private fun withPaywall(duplicateProductId: Boolean = false, bakedProductId: String = "product-monthly", declaresProductSelector: Boolean = true, block: (JsonObject, PlanTapNative, NuxieRuntimeViewModelState) -> Unit) {
         val scenario = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/file-paywall-selection.json").readText()).jsonObject
         val screen = scenario.getValue("screen").jsonObject
@@ -116,7 +126,7 @@ class NuxiePaywallSelectionTest {
         val rows = scenario.getValue("viewModelValues").jsonArray.map { it.jsonObject }
         val plans = rows.single { it.getValue("path").jsonPrimitive.content == "paywall/products" }
             .getValue("value").jsonArray.map { it.jsonObject.getValue("vmInstanceId").jsonPrimitive.content }
-        val native = PlanTapNative(model, plans, bakedProductId)
+        val native = PlanTapNative(model, plans, bakedProductId, declaresProductSelector)
         val state = NuxieRuntime(native).bindViewModelList(
             NuxieRuntimeFile(10, native),
             NuxieRuntimeArtboard(20, native) { error("Projection reads the catalog") },
@@ -134,7 +144,7 @@ class NuxiePaywallSelectionTest {
         try { block(scenario, native, state) } finally { state.close() }
     }
 
-    private class PlanTapNative(private val model: String, private val plans: List<String>, private val bakedProductId: String) : NuxieTypedRuntimeNative {
+    private class PlanTapNative(private val model: String, private val plans: List<String>, private val bakedProductId: String, private val declaresProductSelector: Boolean) : NuxieTypedRuntimeNative {
         private data class Node(val schema: Int, val values: MutableMap<String, Any> = mutableMapOf())
         private val nodes = linkedMapOf<Long, Node>()
         private var nextHandle = 40L
@@ -168,8 +178,8 @@ class NuxiePaywallSelectionTest {
         override fun viewModelCatalog(fileHandle: Long) = NativeCallResult(0, NativeViewModelCatalog(
             schemas = arrayOf(
                 NativeViewModelSchema(0, model, 0, 1, 0, 0, -1, false),
-                NativeViewModelSchema(1, "Paywall", 1, 5, 0, 0, -1, false),
-                NativeViewModelSchema(2, "PaywallProduct", 6, 3, 0, 2, 0, false),
+                NativeViewModelSchema(1, "Paywall", 1, if (declaresProductSelector) 5 else 4, 0, 0, -1, false),
+                NativeViewModelSchema(2, "PaywallProduct", if (declaresProductSelector) 6 else 5, 3, 0, 2, 0, false),
             ),
             properties = arrayOf(
                 NativeViewModelProperty(0, 0, "paywall", NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue, 1, emptyArray()),
@@ -181,7 +191,7 @@ class NuxiePaywallSelectionTest {
                 NativeViewModelProperty(2, 6, "productId", NuxieViewModelPropertyKind.STRING.nativeValue, -1, emptyArray()),
                 NativeViewModelProperty(2, 7, "placementId", NuxieViewModelPropertyKind.STRING.nativeValue, -1, emptyArray()),
                 NativeViewModelProperty(2, 8, "isSelected", NuxieViewModelPropertyKind.BOOLEAN.nativeValue, -1, emptyArray()),
-            ),
+            ).filter { declaresProductSelector || it.name != "selectedProductId" }.toTypedArray(),
             authoredInstances = plans.mapIndexed { index, name -> NativeViewModelAuthoredInstance(2, index.toLong(), name) }.toTypedArray(),
         ))
 
