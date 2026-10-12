@@ -32,6 +32,16 @@ import org.robolectric.RobolectricTestRunner
 @RunWith(RobolectricTestRunner::class)
 class GooglePlayProductViewModelProjectionTest {
     @Test
+    fun `signed catalog identity survives live Play projection`() {
+        val projection = checkNotNull(GooglePlayProductViewModelProjection.prepare(
+            descriptor("productId" to JsonPrimitive("nuxie-pro")),
+            products = listOf(subscription()), screenId = "paywall", locale = Locale.US,
+        ))
+        assertEquals(string("nuxie-pro"), projection.items.single().values["productId"])
+        assertEquals(string("primary"), projection.items.single().values["placementId"])
+    }
+
+    @Test
     fun `Test Store projection matches shared reference vectors`() = runBlocking {
         val fixture = Json.parseToJsonElement(
             File(FixtureRunner.fixturesRoot(), "purchases/test-store-preview.json").readText(),

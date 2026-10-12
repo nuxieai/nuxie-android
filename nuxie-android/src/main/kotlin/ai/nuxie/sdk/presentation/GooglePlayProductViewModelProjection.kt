@@ -64,6 +64,10 @@ internal object GooglePlayProductViewModelProjection {
             if ("placementId" in declaredPaths) {
                 liveValues["placementId"] = string(placementId)
             }
+            if ("productId" in declaredPaths) {
+                // File taps use the signed catalog identity, not the Play SKU.
+                liveValues["productId"] = string(group.requiredString("productId"))
+            }
             val missingClaims = declaredPaths
                 .filter { it in COMMERCE_VALUE_PATHS && group.value(it).isVisibleClaim() }
                 .filterNot(liveValues::containsKey)

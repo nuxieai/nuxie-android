@@ -3,15 +3,61 @@ package ai.nuxie.sdk.runtime
 import ai.nuxie.sdk.fixtures.FixtureRunner
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import org.junit.Assert.assertEquals
+import org.junit.Assert.*
 import org.junit.Test
 
 class NuxiePaywallSelectionTest {
     @Test
-    fun `a native plan tap changes the file paywall purchase placement`() {
+    fun `a native plan tap changes the file paywall purchase placement`() = withPaywall { scenario, native, state ->
+        val path = scenario.getValue("purchaseReference").jsonObject.getValue("ref")
+            .jsonObject.getValue("path").jsonPrimitive.content
+        assertEquals(scenario.getValue("initialPlacement").jsonPrimitive.content,
+            state.captureSnapshot().values.resolveString(path))
+        for (entry in scenario.getValue("writes").jsonArray) {
+            val write = entry.jsonObject
+            // The native tap changes only selectedProductId. Production's
+            // post-step capture must derive the reference before purchase.
+            native.tap(write.getValue("selectedProductId").jsonPrimitive.content)
+            val expected = write.getValue("expectedPlacement").takeUnless { it == JsonNull }?.jsonPrimitive?.content
+            assertEquals(expected, state.captureSnapshot().values.resolveString(path))
+        }
+    }
+    @Test
+    fun `signed identities survive renderer changes and checkpoint restoration`() = withPaywall { _, native, state ->
+        native.changeProductId("annual", "forged")
+        native.tap("product-annual")
+        val snapshot = state.captureSnapshot().values
+        assertEquals("placement-annual", snapshot.resolveString("paywall.selectedProduct.placementId"))
+        val restored = NuxieRuntime(native).restoreViewModel(NuxieRuntimeFile(10, native),
+            NuxieRuntimeArtboard(20, native) { error("Restoration reads the catalog") }, snapshot)
+        try {
+            assertNotEquals(snapshot.nativeRootInstanceId, restored.snapshot().nativeRootInstanceId)
+            native.tap("forged")
+            assertNull(restored.snapshot().resolveString("paywall.selectedProduct.placementId"))
+            native.tap("product-monthly")
+            assertEquals("placement-monthly", restored.snapshot().resolveString("paywall.selectedProduct.placementId"))
+        } finally { restored.close() }
+    }
+
+    @Test
+    fun `selection follows current order and rejects a removed plan`() = withPaywall { _, native, state ->
+        native.reversePlans()
+        native.tap("product-annual")
+        val selected = state.captureSnapshot().values
+        assertEquals("placement-annual", selected.resolveString("paywall.selectedProduct.placementId"))
+        assertEquals(NuxieViewModelScalarValue.NumberValue(0.0), selected.resolveScalar(listOf("paywall", "selectedIndex")))
+        assertEquals(true, selected.resolveBoolean("paywall.selectedProduct.isSelected"))
+        native.keepOnly("monthly")
+        val invalid = state.captureSnapshot()
+        assertNull(invalid.values.resolveString("paywall.selectedProduct.placementId"))
+        assertTrue(invalid.native.values.filter { it.name == "isSelected" }.none { it.boolValue })
+    }
+
+    private fun withPaywall(block: (JsonObject, PlanTapNative, NuxieRuntimeViewModelState) -> Unit) {
         val scenario = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/file-paywall-selection.json").readText()).jsonObject
         val screen = scenario.getValue("screen").jsonObject
@@ -33,31 +79,27 @@ class NuxiePaywallSelectionTest {
                         instanceId = id)
                 }, defaultInstanceId = root),
         )
-        try {
-            val path = scenario.getValue("purchaseReference").jsonObject.getValue("ref")
-                .jsonObject.getValue("path").jsonPrimitive.content
-            assertEquals(scenario.getValue("initialPlacement").jsonPrimitive.content,
-                state.captureSnapshot().values.resolveString(path))
-            for (entry in scenario.getValue("writes").jsonArray) {
-                val write = entry.jsonObject
-                // The native tap changes only selectedProductId. Production's
-                // post-step capture must derive the reference before purchase.
-                native.tap(write.getValue("selectedProductId").jsonPrimitive.content)
-                val expected = write.getValue("expectedPlacement").takeUnless { it == JsonNull }?.jsonPrimitive?.content
-                assertEquals(expected, state.captureSnapshot().values.resolveString(path))
-            }
-        } finally { state.close() }
+        try { block(scenario, native, state) } finally { state.close() }
     }
 
     private class PlanTapNative(private val model: String, private val plans: List<String>) : NuxieTypedRuntimeNative {
-        private val values = plans.indices.associate { (41L + it) to mutableMapOf<String, String>() }
-        private val selected = plans.indices.associate { (41L + it) to (it == 0) }.toMutableMap()
-        private val order = plans.indices.map { 1041L + it }.toMutableList()
-        private var selectedProductId = "product-monthly"
-        private var selectedHandle = 41L
-        private var selectedIndex = 0f
-
-        fun tap(productId: String) { selectedProductId = productId }
+        private data class Node(val schema: Int, val values: MutableMap<String, Any> = mutableMapOf())
+        private val nodes = linkedMapOf<Long, Node>()
+        private var nextHandle = 40L
+        private var activeRoot = 0L
+        private fun allocate(schema: Int): Long = nextHandle++.also { nodes[it] = Node(schema) }
+        private fun paywall(): Node = nodes.getValue(nodes.getValue(activeRoot).values.getValue("paywall") as Long)
+        @Suppress("UNCHECKED_CAST")
+        private fun order(): MutableList<Long> = paywall().values.getValue("products") as MutableList<Long>
+        fun tap(productId: String) { paywall().values["selectedProductId"] = productId }
+        fun changeProductId(plan: String, id: String) {
+            nodes.getValue(order()[plans.indexOf(plan)]).values["productId"] = id
+        }
+        fun reversePlans() { order().reverse() }
+        fun keepOnly(plan: String) {
+            val expected = "placement-$plan"
+            order().removeAll { nodes.getValue(it).values["placementId"] != expected }
+        }
 
         override fun viewModelCatalog(fileHandle: Long) = NativeCallResult(0, NativeViewModelCatalog(
             schemas = arrayOf(
@@ -78,58 +120,70 @@ class NuxiePaywallSelectionTest {
             authoredInstances = plans.mapIndexed { index, name -> NativeViewModelAuthoredInstance(2, index.toLong(), name) }.toTypedArray(),
         ))
 
-        override fun newDefaultViewModel(artboardHandle: Long) = NativeCallResult(0, 40L)
-        override fun newViewModel(fileHandle: Long, schemaIndex: Int, authoredInstanceIndex: Int?) =
-            NativeCallResult(0, 41L + checkNotNull(authoredInstanceIndex))
-        override fun bindViewModel(artboardHandle: Long, viewModelHandle: Long) = 0
+        override fun newDefaultViewModel(artboardHandle: Long): NativeCallResult<Long> {
+            val root = allocate(0)
+            val group = allocate(1)
+            nodes.getValue(root).values["paywall"] = group
+            val authoredProducts = plans.map { allocate(2) }
+            nodes.getValue(group).values.putAll(mapOf("products" to authoredProducts.toMutableList(),
+                "selectedProductId" to "product-monthly", "selectedIndex" to 0f))
+            nodes.getValue(group).values["selectedProduct"] = authoredProducts.first()
+            activeRoot = root
+            return NativeCallResult(0, root)
+        }
+        override fun newViewModel(fileHandle: Long, schemaIndex: Int, authoredInstanceIndex: Int?) = NativeCallResult(0,
+            allocate(schemaIndex).also { if (schemaIndex == 2) nodes.getValue(it).values["isSelected"] = authoredInstanceIndex == 0 })
+        override fun viewModelRootSchemaIndex(viewModelHandle: Long) = NativeCallResult(0, nodes.getValue(viewModelHandle).schema.toLong())
+        override fun bindViewModel(artboardHandle: Long, viewModelHandle: Long): Int { activeRoot = viewModelHandle; return 0 }
         override fun freeViewModel(handle: Long) = 0
 
         override fun mutateViewModel(handle: Long, write: NativeViewModelWrite): Int {
-            if (handle == 40L) {
-                when (write.kind) {
-                    NuxieViewModelMutationKind.SET_VIEW_MODEL -> selectedHandle = write.relatedViewModel
-                    NuxieViewModelMutationKind.SET_NUMBER -> selectedIndex = write.numberValue
-                    NuxieViewModelMutationKind.LIST_SET -> order[write.index.toInt()] = 1000L + write.relatedViewModel
-                    else -> error("Unexpected root write ${write.kind}")
-                }
-            } else when (write.kind) {
-                NuxieViewModelMutationKind.SET_STRING -> checkNotNull(values[handle])[write.path] = write.bytesValue.decodeToString()
-                NuxieViewModelMutationKind.SET_BOOLEAN -> selected[handle] = write.boolValue
-                else -> error("Unexpected product write ${write.kind}")
+            val parts = write.path.split('/')
+            var target = nodes.getValue(handle)
+            for (segment in parts.dropLast(1)) target = nodes.getValue(target.values.getValue(segment) as Long)
+            val key = parts.last()
+            @Suppress("UNCHECKED_CAST")
+            fun list(): MutableList<Long> = target.values.getOrPut(key) { mutableListOf<Long>() } as MutableList<Long>
+            when (write.kind) {
+                NuxieViewModelMutationKind.SET_VIEW_MODEL -> target.values[key] = write.relatedViewModel
+                NuxieViewModelMutationKind.SET_NUMBER -> target.values[key] = write.numberValue
+                NuxieViewModelMutationKind.SET_STRING -> target.values[key] = write.bytesValue.decodeToString()
+                NuxieViewModelMutationKind.SET_BOOLEAN -> target.values[key] = write.boolValue
+                NuxieViewModelMutationKind.LIST_SET -> list()[write.index.toInt()] = write.relatedViewModel
+                NuxieViewModelMutationKind.LIST_CLEAR -> list().clear()
+                NuxieViewModelMutationKind.LIST_INSERT -> list().add(write.index.toInt(), write.relatedViewModel)
+                else -> error("Unexpected fixture write ${write.kind}")
             }
             return 0
         }
 
         override fun snapshotViewModel(viewModelHandle: Long): NativeCallResult<NativeViewModelSnapshot> {
-            fun product(handle: Long): List<NativeViewModelSnapshotValue> = listOf(
-                scalar(1000L + handle, 5, "productId", checkNotNull(values[handle])["productId"].orEmpty()),
-                scalar(1000L + handle, 6, "placementId", checkNotNull(values[handle])["placementId"].orEmpty()),
-                NativeViewModelSnapshotValue(1000L + handle, 7, "isSelected", 3, byteArrayOf(), 0,
-                    boolValue = selected[handle] == true),
-            )
-            val root = viewModelHandle == 40L
-            val instances = buildList {
-                if (root) {
-                    add(NativeViewModelSnapshotInstance(1, 0))
-                    add(NativeViewModelSnapshotInstance(2, 1))
-                    plans.indices.forEach { add(NativeViewModelSnapshotInstance(1041L + it, 2)) }
-                } else add(NativeViewModelSnapshotInstance(1000L + viewModelHandle, 2))
+            val properties = checkNotNull(viewModelCatalog(10).value).properties
+            val instances = mutableListOf<NativeViewModelSnapshotInstance>()
+            val values = mutableListOf<NativeViewModelSnapshotValue>()
+            val seen = mutableSetOf<Long>()
+            fun visit(handle: Long) {
+                if (!seen.add(handle)) return
+                val node = nodes.getValue(handle)
+                instances += NativeViewModelSnapshotInstance(handle + 1000, node.schema.toLong())
+                for (property in properties.filter { it.schemaIndex == node.schema.toLong() }) {
+                    val value = node.values[property.name] ?: continue
+                    val children = when (property.kind) {
+                        9 -> listOf(value as Long)
+                        8 -> (value as List<*>).map { it as Long }
+                        else -> emptyList()
+                    }
+                    values += NativeViewModelSnapshotValue(handle + 1000, property.index, property.name, property.kind,
+                        if (value is String) value.encodeToByteArray() else byteArrayOf(),
+                        if (property.kind == 9) (value as Long) + 1000 else 0,
+                        numberValue = (value as? Float) ?: 0f, boolValue = value == true,
+                        listItemIds = if (property.kind == 8) children.map { it + 1000 }.toLongArray() else longArrayOf())
+                    children.forEach(::visit)
+                }
             }
-            val snapshotValues = buildList {
-                if (root) {
-                    add(NativeViewModelSnapshotValue(1, 0, "paywall", 9, byteArrayOf(), 2))
-                    add(NativeViewModelSnapshotValue(2, 1, "products", 8, byteArrayOf(), 0, listItemIds = order.toLongArray()))
-                    add(NativeViewModelSnapshotValue(2, 2, "selectedProduct", 9, byteArrayOf(), 1000L + selectedHandle))
-                    add(scalar(2, 3, "selectedProductId", selectedProductId))
-                    add(NativeViewModelSnapshotValue(2, 4, "selectedIndex", 2, byteArrayOf(), 0, numberValue = selectedIndex))
-                    plans.indices.forEach { addAll(product(41L + it)) }
-                } else addAll(product(viewModelHandle))
-            }
-            return NativeCallResult(0, NativeViewModelSnapshot(if (root) 1 else 1000L + viewModelHandle,
-                instances.toTypedArray(), snapshotValues.toTypedArray()))
+            visit(viewModelHandle)
+            return NativeCallResult(0, NativeViewModelSnapshot(viewModelHandle + 1000,
+                instances.toTypedArray(), values.toTypedArray()))
         }
-
-        private fun scalar(owner: Long, property: Long, name: String, text: String) =
-            NativeViewModelSnapshotValue(owner, property, name, 1, text.encodeToByteArray(), 0)
     }
 }
