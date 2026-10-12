@@ -21,9 +21,9 @@ class NuxiePaywallSelectionTest {
             val write = entry.jsonObject
             // The native tap changes only selectedProductId. Production's
             // post-step capture must derive the reference before purchase.
-            native.tap(write.getValue("selectedProductId").jsonPrimitive.content)
+            val changes = native.tap(write.getValue("selectedProductId").jsonPrimitive.content)
             val expected = write.getValue("expectedPlacement").takeUnless { it == JsonNull }?.jsonPrimitive?.content
-            assertEquals(expected, state.captureSnapshot().values.resolveString(path))
+            assertEquals(expected, state.captureSnapshot(changes).values.resolveString(path))
         }
     }
     @Test
@@ -44,15 +44,15 @@ class NuxiePaywallSelectionTest {
     @Test
     fun `a refused native selection write keeps the previous purchase target`() = withPaywall { _, native, state ->
         native.refuseSelectionWrites = true
-        native.tap("product-annual")
-        assertEquals("placement-monthly", state.captureSnapshot().values.resolveString("paywall.selectedProduct.placementId"))
+        val changes = native.tap("product-annual")
+        assertEquals("placement-monthly", state.captureSnapshot(changes).values.resolveString("paywall.selectedProduct.placementId"))
     }
 
     @Test
     fun `signed identities survive renderer changes and checkpoint restoration`() = withPaywall { _, native, state ->
         native.changeProductId("annual", "forged")
-        native.tap("product-annual")
-        val snapshot = state.captureSnapshot().values
+        val changes = native.tap("product-annual")
+        val snapshot = state.captureSnapshot(changes).values
         assertEquals("placement-annual", snapshot.resolveString("paywall.selectedProduct.placementId"))
         val restored = NuxieRuntime(native).restoreViewModel(NuxieRuntimeFile(10, native),
             NuxieRuntimeArtboard(20, native) { error("Restoration reads the catalog") }, snapshot)
@@ -60,23 +60,25 @@ class NuxiePaywallSelectionTest {
             val rebuilt = restored.snapshot()
             assertNotEquals(snapshot.nativeRootInstanceId, rebuilt.nativeRootInstanceId)
             assertEquals("placement-annual", rebuilt.resolveString("paywall.selectedProduct.placementId"))
-            native.tap("forged")
-            assertNull(restored.snapshot().resolveString("paywall.selectedProduct.placementId"))
-            native.tap("product-monthly")
-            assertEquals("placement-monthly", restored.snapshot().resolveString("paywall.selectedProduct.placementId"))
+            val forged = native.tap("forged")
+            assertNull(restored.captureSnapshot(forged).values.resolveString("paywall.selectedProduct.placementId"))
+            val monthly = native.tap("product-monthly")
+            assertEquals("placement-monthly", restored.captureSnapshot(monthly).values.resolveString("paywall.selectedProduct.placementId"))
         } finally { restored.close() }
     }
 
     @Test
     fun `selection follows current order and rejects a removed plan`() = withPaywall { _, native, state ->
         native.reversePlans()
-        native.tap("product-annual")
-        val selected = state.captureSnapshot().values
+        val changes = native.tap("product-annual")
+        val selected = state.captureSnapshot(changes).values
         assertEquals("placement-annual", selected.resolveString("paywall.selectedProduct.placementId"))
         assertEquals(NuxieViewModelScalarValue.NumberValue(0.0), selected.resolveScalar(listOf("paywall", "selectedIndex")))
         assertEquals(true, selected.resolveBoolean("paywall.selectedProduct.isSelected"))
         native.keepOnly("monthly")
-        val invalid = state.captureSnapshot()
+        assertEquals("List changes alone keep the earlier choice, as on iOS", "placement-annual",
+            state.captureSnapshot().values.resolveString("paywall.selectedProduct.placementId"))
+        val invalid = state.captureSnapshot(native.tap("product-annual"))
         assertNull(invalid.values.resolveString("paywall.selectedProduct.placementId"))
         assertTrue(invalid.native.values.filter { it.name == "isSelected" }.none { it.boolValue })
     }
@@ -118,7 +120,12 @@ class NuxiePaywallSelectionTest {
         @Suppress("UNCHECKED_CAST")
         private fun order(): MutableList<Long> = paywall().values.getValue("products") as MutableList<Long>
         var refuseSelectionWrites = false
-        fun tap(productId: String) { paywall().values["selectedProductId"] = productId }
+        fun tap(productId: String): List<NuxieViewModelChange> {
+            paywall().values["selectedProductId"] = productId
+            val owner = nodes.getValue(activeRoot).values.getValue("paywall") as Long
+            return listOf(NuxieViewModelChange(NuxieViewModelChangeOrigin.RUNTIME, 0u,
+                (owner + 1000).toULong(), 3, NuxieViewModelValue.Bytes(productId.encodeToByteArray())))
+        }
         fun changeProductId(plan: String, id: String) {
             nodes.getValue(order()[plans.indexOf(plan)]).values["productId"] = id
         }

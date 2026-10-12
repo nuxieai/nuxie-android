@@ -201,7 +201,7 @@ internal class NuxieViewModelSnapshot private constructor(
         return NuxieViewModelSnapshot(rootInstanceId, instancesById.values.map { instance ->
             if (!selected && instance.id == owner) instance.copy(values = instance.values +
                 ("selectedProduct" to Value.Unsupported)) else instance
-        }, instanceIds, retainedGraph.withPaywallProducts(products))
+        }, instanceIds, retainedGraph.withPaywallProducts(products, selected))
     }
 
     /** Authored geometry paths may include the root view-model label. */

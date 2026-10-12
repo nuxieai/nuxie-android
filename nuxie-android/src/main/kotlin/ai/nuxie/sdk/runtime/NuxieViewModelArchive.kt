@@ -6,13 +6,14 @@ internal class NuxieViewModelArchive private constructor(
     private val instances: List<Instance>,
     private val aliases: Map<String, Long>,
     private val paywallProducts: Map<Long, String?>? = null,
+    private val paywallSelectionValid: Boolean = true,
 ) {
     private data class Instance(val id: Long, val schemaIndex: Int, val schemaName: String?, val values: List<NativeViewModelSnapshotValue>)
 
     internal val instanceIdentities: Set<Long> get() = instances.map { it.id }.toSet()
 
-    internal fun withPaywallProducts(products: Map<Long, String?>): NuxieViewModelArchive =
-        NuxieViewModelArchive(rootId, instances, aliases, products.toMap())
+    internal fun withPaywallProducts(products: Map<Long, String?>, selected: Boolean): NuxieViewModelArchive =
+        NuxieViewModelArchive(rootId, instances, aliases, products.toMap(), selected)
 
     fun withoutRootProperty(name: String): NuxieViewModelArchive {
         fun children(value: NativeViewModelSnapshotValue): List<Long> = when (value.kind) {
@@ -33,7 +34,7 @@ internal class NuxieViewModelArchive private constructor(
             })
         }
         return NuxieViewModelArchive(rootId, kept, aliases.filterValues { it !in excluded },
-            paywallProducts?.filterKeys { it !in excluded })
+            paywallProducts?.filterKeys { it !in excluded }, paywallSelectionValid)
     }
 
     fun restore(
@@ -117,7 +118,7 @@ internal class NuxieViewModelArchive private constructor(
                 paywallSelection = paywallProducts?.let { products -> NuxiePaywallSelection(
                     products.filterKeys(handles::containsKey).map { (old, productId) ->
                         NuxiePaywallSelection.Product(newIds.getValue(old), handles.getValue(old), productId)
-                    }) })
+                    }) }, paywallSelectionValid = paywallSelectionValid)
         } catch (error: Throwable) {
             handles.values.toList().asReversed().forEach { handle ->
                 runCatching { check(native.freeViewModel(handle) == STATUS_OK) }.exceptionOrNull()?.let(error::addSuppressed)
