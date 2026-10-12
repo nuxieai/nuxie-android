@@ -165,6 +165,9 @@ internal class NuxieExperienceActivity : Activity() {
         override suspend fun prepareNavigation(id: String, content: PreparedPresentation): PreparedScreenNavigation =
             prepareScreenNavigation(this, id, content)
 
+        override suspend fun updateRuntimeValues(values: Map<String, ai.nuxie.sdk.runtime.NuxieViewModelScalarValue>): Unit = withContext(Dispatchers.Main.immediate) {
+            mounted?.surface?.updateRuntimeValues(values)
+        }
         override fun purchaseActivity(): Activity = this@NuxieExperienceActivity
         override suspend fun applyVideoCommand(action: ai.nuxie.sdk.experiences.JourneyVideoAction): Boolean =
             withContext(Dispatchers.Main.immediate) { mounted?.surface?.applyVideoCommand(action) ?: false }

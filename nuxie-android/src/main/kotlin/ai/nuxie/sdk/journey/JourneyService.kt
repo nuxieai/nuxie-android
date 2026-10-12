@@ -2681,16 +2681,15 @@ internal class JourneyService(
                                 presentation.resolveAction(owner, it, run.presentationSource?.source,
                                     eventSource.takeIf { run.presentationSource?.eventId == initial.presentationSource?.eventId })
                             }
-                            if (resolved == null) {
+                            val purchaseAction = resolved ?: if (actionType == JourneyActionType.PURCHASE && contextResolved != null) {
+                                JsonObject(contextResolved + ("placementId" to JsonPrimitive("")))
+                            } else null
+                            if (purchaseAction == null) {
                                 finishExecution(run, "abandoned")
                                 return
                             }
-                            if (actionType == JourneyActionType.PURCHASE) {
-                                val placementId = resolved.text("placementId")
-                                if (placementId.isNullOrEmpty()) {
-                                    finishExecution(run, "abandoned")
-                                    return
-                                }
+                            val placementId = purchaseAction.text("placementId")
+                            if (actionType == JourneyActionType.PURCHASE && !placementId.isNullOrEmpty()) {
                                 val offer = JourneyOfferAccess.forPurchaseStep(leg, result.stepId)
                                 if (offer == null) {
                                     val placement = release.descriptor.getValue("placements").jsonArray.map { it.jsonObject }.firstOrNull { it.text("id") == placementId }
@@ -2710,7 +2709,7 @@ internal class JourneyService(
                             }
                             when (val presentationResult = presentation.dispatchAction(
                                 owner,
-                                resolved,
+                                purchaseAction,
                                 effectId,
                             )) {
                                 is JourneyPresentationActionResult.Navigate -> {

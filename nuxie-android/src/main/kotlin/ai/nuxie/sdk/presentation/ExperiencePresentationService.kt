@@ -140,6 +140,8 @@ internal interface PresentationScreenHandle {
 
     fun finishAfterServiceClose()
 
+    suspend fun updateRuntimeValues(values: Map<String, ai.nuxie.sdk.runtime.NuxieViewModelScalarValue>) = Unit
+
     fun purchaseActivity(): Activity? = null
 
     suspend fun resolveJourneyPermission(request: JourneyPermissionRequest): Boolean = false
@@ -1311,7 +1313,17 @@ internal class ExperiencePresentationService(
             JourneyActionType.BACK -> prepareBackNavigation(owner, active, action)
             JourneyActionType.PURCHASE -> {
                 val placementId = action.string("placementId")
-                    ?: return JourneyPresentationActionResult.Failed
+                if (placementId.isNullOrEmpty()) {
+                    val screen = PresentationRegistry.currentScreen(active.id)
+                        ?: return JourneyPresentationActionResult.NoPresentation
+                    screen.updateRuntimeValues(mapOf(
+                        "paywall/purchase/status" to ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.StringValue("error"),
+                        "paywall/purchase/errorCode" to ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.StringValue("failed"),
+                        "paywall/purchase/invocationId" to ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.StringValue(effectId),
+                    ))
+                    return if (synchronized(stateLock) { current === active }) JourneyPresentationActionResult.Advanced("failed")
+                    else JourneyPresentationActionResult.NoPresentation
+                }
                 val session = active.journey.commerce
                     ?: return JourneyPresentationActionResult.ProductsUnavailable
                 if (session.products.none { it.placementId == placementId }) {

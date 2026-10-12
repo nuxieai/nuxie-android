@@ -3387,11 +3387,16 @@ class JourneyServiceTest {
         }
     }
 
+    @Test fun `purchase without selection follows failed outlet and keeps presentation`() = runBlocking {
+        assertPurchaseOfferRoute(ai.nuxie.sdk.features.FeatureAccess(false, false, null, ai.nuxie.sdk.features.FeatureType.BOOLEAN), noTarget = true)
+    }
+
     private suspend fun assertPurchaseOfferRoute(
         access: ai.nuxie.sdk.features.FeatureAccess?,
         dismissAlternative: JsonObject? = null,
         expectedOutcome: String = "continue",
         relativeRow: Boolean = false,
+        noTarget: Boolean = false,
     ) {
         val directory = java.io.File(this.directory, java.util.UUID.randomUUID().toString()).apply { mkdirs() }
         val identity = IdentityService(context).also { it.setDistinctId("customer") }
@@ -3408,7 +3413,7 @@ class JourneyServiceTest {
             put("id", "purchase")
             putJsonObject("action") {
                 put("type", "purchase")
-                put("placementId", if (relativeRow) Json.parseToJsonElement("""{"ref":{"kind":"path","path":"placementId","isRelative":true}}""") else JsonPrimitive("golden:monthly"))
+                put("placementId", if (noTarget) JsonPrimitive("") else if (relativeRow) Json.parseToJsonElement("""{"ref":{"kind":"path","path":"placementId","isRelative":true}}""") else JsonPrimitive("golden:monthly"))
             }
             putJsonObject("outlets") {
                 put("completed", "completed")
@@ -3417,6 +3422,12 @@ class JourneyServiceTest {
             }
         }
         fun completion(id: String) = buildJsonObject {
+            if (noTarget && id == "failed") {
+                put("kind", "action"); put("id", id)
+                putJsonObject("action") { put("type", "delay"); put("durationMs", 60_000) }
+                put("outlets", JsonObject(emptyMap()))
+                return@buildJsonObject
+            }
             put("kind", "complete")
             put("id", id)
             put("outcome", "continue")
@@ -3489,7 +3500,7 @@ class JourneyServiceTest {
             releasesByDigest = mapOf(release.descriptorSha256 to release),
         )
         val presenter = RecordingJourneyPresenter(
-            actionResult = JourneyPresentationActionResult.AwaitingOutcome,
+            actionResult = if (noTarget) JourneyPresentationActionResult.Advanced("failed") else JourneyPresentationActionResult.AwaitingOutcome,
         )
         val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
         val service = JourneyService(
@@ -3564,6 +3575,13 @@ class JourneyServiceTest {
             assertEquals(JsonPrimitive("golden:monthly"), presenter.actions.single().first["placementId"])
             assertEquals(3L, presenter.resolvedNativeIds.single())
         } else assertTrue(request.onScreenChanged("screen_welcome"))
+        if (noTarget) {
+            val journal = JourneyRunJournal(directory, "customer", JourneyStorageScope(renderedAuthority))
+            assertEquals("failed", journal.runs().singleOrNull()?.stepId)
+            assertEquals(1, presenter.actions.size)
+            assertTrue(presenter.owns(JourneyPresentationOwner(request.journeyId, "customer")))
+            return
+        }
         val effectId = presenter.actions.single().second
         val journal = JourneyRunJournal(
             directory,
