@@ -492,7 +492,7 @@ internal class NuxieRuntimeViewModelState(
         var snapshot = nativeSnapshot()
         val write = paywallSelection?.selectionWrite(snapshot, changes)
         if (write != null) {
-            paywallSelectionValid = checkNotNull(paywallSelection).apply(requireHandle(), native, snapshot, write)
+            checkNotNull(paywallSelection).apply(requireHandle(), native, snapshot, write)?.let { paywallSelectionValid = it }
             snapshot = nativeSnapshot()
         }
         var values = NuxieViewModelSnapshot.fromNative(snapshot,
