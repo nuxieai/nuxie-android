@@ -1,10 +1,12 @@
 package ai.nuxie.sdk.runtime
 
+import ai.nuxie.sdk.logging.NuxieLog as Log
+
 /** SDK selection projection; only identities frozen at signed binding may be selected. */
 internal class NuxiePaywallSelection(val products: List<Product>) {
     data class Product(val nativeId: Long, val handle: Long, val productId: String?)
 
-    fun apply(root: Long, native: NuxieTypedRuntimeNative, snapshot: NativeViewModelSnapshot, change: NuxieViewModelChange): Boolean {
+    fun apply(root: Long, native: NuxieTypedRuntimeNative, snapshot: NativeViewModelSnapshot, change: NuxieViewModelChange): Boolean? {
         val list = snapshot.atPath("paywall/products")?.takeIf { it.kind == NuxieViewModelPropertyKind.LIST.nativeValue }?.listItemIds?.toList()
         val id = (change.value as? NuxieViewModelValue.Bytes)?.value?.decodeToString()
         val validList = list != null && list.distinct().size == list.size &&
@@ -13,23 +15,45 @@ internal class NuxiePaywallSelection(val products: List<Product>) {
             it.nativeId in checkNotNull(list) && it.productId == id
         } else emptyList()
         val selected = matches.singleOrNull()
-        fun write(handle: Long, value: NativeViewModelWrite) {
-            check(native.mutateViewModel(handle, value) == 0) { "Paywall selection write failed: ${value.path}" }
-        }
+        val writes = mutableListOf<Pair<Long, NativeViewModelWrite>>()
+        fun write(handle: Long, value: NativeViewModelWrite) { writes += handle to value }
         snapshot.atPath("paywall/selectedIndex")?.takeIf { it.kind == NuxieViewModelPropertyKind.NUMBER.nativeValue }?.let {
             val index = selected?.let { product -> checkNotNull(list).indexOf(product.nativeId) } ?: -1
             if (it.numberValue != index.toFloat()) write(root, NativeViewModelWrite(
                 NuxieViewModelMutationKind.SET_NUMBER, "paywall/selectedIndex", numberValue = index.toFloat()))
-        }
-        if (selected != null && snapshot.atPath("paywall/selectedProduct")?.referencedInstanceId != selected.nativeId) {
-            write(root, NativeViewModelWrite(NuxieViewModelMutationKind.SET_VIEW_MODEL,
-                "paywall/selectedProduct", relatedViewModel = selected.handle))
         }
         for (product in products) {
             val flag = snapshot.values.singleOrNull { it.ownerInstanceId == product.nativeId && it.name == "isSelected" }
             val isSelected = product == selected
             if (flag?.kind == NuxieViewModelPropertyKind.BOOLEAN.nativeValue && flag.boolValue != isSelected) write(product.handle,
                 NativeViewModelWrite(NuxieViewModelMutationKind.SET_BOOLEAN, "isSelected", boolValue = isSelected))
+        }
+        if (selected != null && snapshot.atPath("paywall/selectedProduct")?.referencedInstanceId != selected.nativeId) {
+            write(root, NativeViewModelWrite(NuxieViewModelMutationKind.SET_VIEW_MODEL,
+                "paywall/selectedProduct", relatedViewModel = selected.handle))
+        }
+        // The purchase link is last. A rejected display write cannot change
+        // the purchase target; restore any earlier display values best-effort.
+        val applied = mutableListOf<Pair<Long, NativeViewModelWrite>>()
+        try {
+            for ((handle, mutation) in writes) {
+                val owner = if (handle == root) snapshot.atPath(mutation.path)?.ownerInstanceId
+                    else products.single { it.handle == handle }.nativeId
+                val previous = snapshot.values.singleOrNull {
+                    it.ownerInstanceId == owner && it.name == mutation.path.substringAfterLast('/')
+                }
+                check(native.mutateViewModel(handle, mutation) == 0) { "Paywall selection write rejected: ${mutation.path}" }
+                if (previous != null && mutation.kind != NuxieViewModelMutationKind.SET_VIEW_MODEL) {
+                    applied += handle to mutation.copy(numberValue = previous.numberValue, boolValue = previous.boolValue)
+                }
+            }
+        } catch (error: Throwable) {
+            Log.w("NuxiePaywallSelection", "Native paywall selection was rejected; keeping the previous target", error)
+            for ((handle, previous) in applied.asReversed()) {
+                runCatching { check(native.mutateViewModel(handle, previous) == 0) }
+                    .exceptionOrNull()?.let { Log.w("NuxiePaywallSelection", "Could not restore paywall display state", it) }
+            }
+            return null
         }
         return selected != null
     }
