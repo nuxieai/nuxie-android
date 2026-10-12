@@ -5,10 +5,14 @@ internal class NuxieViewModelArchive private constructor(
     private val rootId: Long,
     private val instances: List<Instance>,
     private val aliases: Map<String, Long>,
+    private val paywallProducts: Map<Long, String?>? = null,
 ) {
     private data class Instance(val id: Long, val schemaIndex: Int, val schemaName: String?, val values: List<NativeViewModelSnapshotValue>)
 
     internal val instanceIdentities: Set<Long> get() = instances.map { it.id }.toSet()
+
+    internal fun withPaywallProducts(products: Map<Long, String?>): NuxieViewModelArchive =
+        NuxieViewModelArchive(rootId, instances, aliases, products.toMap())
 
     fun withoutRootProperty(name: String): NuxieViewModelArchive {
         fun children(value: NativeViewModelSnapshotValue): List<Long> = when (value.kind) {
@@ -28,7 +32,8 @@ internal class NuxieViewModelArchive private constructor(
                 !(instance.id == rootId && it.name == name) && children(it).none(excluded::contains)
             })
         }
-        return NuxieViewModelArchive(rootId, kept, aliases.filterValues { it !in excluded })
+        return NuxieViewModelArchive(rootId, kept, aliases.filterValues { it !in excluded },
+            paywallProducts?.filterKeys { it !in excluded })
     }
 
     fun restore(
@@ -108,7 +113,11 @@ internal class NuxieViewModelArchive private constructor(
             check(status == STATUS_OK) { "Bind retained view model failed: $status" }
             val newIds = handles.mapValues { (_, handle) -> value(native.snapshotViewModel(handle), "identify restored graph").rootInstanceId }
             return NuxieRuntimeViewModelState(root, handles.filterKeys { it != rootId }.values.toList(), native, catalog,
-                instances.single { it.id == rootId }.schemaIndex, aliases.mapValues { (_, old) -> newIds.getValue(old) })
+                instances.single { it.id == rootId }.schemaIndex, aliases.mapValues { (_, old) -> newIds.getValue(old) },
+                paywallSelection = paywallProducts?.let { products -> NuxiePaywallSelection(
+                    products.filterKeys(handles::containsKey).map { (old, productId) ->
+                        NuxiePaywallSelection.Product(newIds.getValue(old), handles.getValue(old), productId)
+                    }) })
         } catch (error: Throwable) {
             handles.values.toList().asReversed().forEach { handle ->
                 runCatching { check(native.freeViewModel(handle) == STATUS_OK) }.exceptionOrNull()?.let(error::addSuppressed)

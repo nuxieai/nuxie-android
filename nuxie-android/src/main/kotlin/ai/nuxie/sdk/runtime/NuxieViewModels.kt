@@ -195,6 +195,15 @@ internal class NuxieViewModelSnapshot private constructor(
         }, instanceIds.filterValues { it in kept }, archive)
     }
 
+    /** Invalid selections mask the non-nullable native link for every purchase scope. */
+    internal fun withPaywallSelection(products: Map<Long, String?>, selected: Boolean): NuxieViewModelSnapshot {
+        val owner = (instancesById[rootInstanceId]?.values?.get("paywall") as? Value.Reference)?.instanceId
+        return NuxieViewModelSnapshot(rootInstanceId, instancesById.values.map { instance ->
+            if (!selected && instance.id == owner) instance.copy(values = instance.values +
+                ("selectedProduct" to Value.Unsupported)) else instance
+        }, instanceIds, retainedGraph.withPaywallProducts(products))
+    }
+
     /** Authored geometry paths may include the root view-model label. */
     fun resolveGeometryNumber(path: String): Float? =
         (resolveGeometryValue(path) as? Value.NumberValue)?.value?.takeIf(Float::isFinite)

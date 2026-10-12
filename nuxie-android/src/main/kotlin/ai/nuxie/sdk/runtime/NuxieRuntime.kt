@@ -189,7 +189,8 @@ internal class NuxieRuntime(
                 ).captureInstanceIds(instanceBindings)
             }
             return NuxieRuntimeViewModelState(root, children, native, catalog, rootSchema.index,
-                capturedIds, projection.defaultInstanceId)
+                capturedIds, projection.defaultInstanceId,
+                NuxiePaywallSelection.create(projection, children, native, catalog, rootSchema.index))
         } catch (error: Throwable) {
             freeViewModelHandles(root, children, native)
             throw error
@@ -453,6 +454,7 @@ internal class NuxieRuntimeViewModelState(
     private val rootSchemaIndex: Int,
     private val instanceIds: Map<String, Long> = emptyMap(),
     private val defaultInstanceId: String? = null,
+    private val paywallSelection: NuxiePaywallSelection? = null,
 ) {
     private val children = children.toMutableList()
 
@@ -486,12 +488,17 @@ internal class NuxieRuntimeViewModelState(
     fun snapshot(): NuxieViewModelSnapshot = captureSnapshot().values
 
     fun captureSnapshot(): NuxieCapturedViewModelSnapshot {
-        val snapshot = nativeSnapshot()
-        return NuxieCapturedViewModelSnapshot(snapshot, NuxieViewModelSnapshot.fromNative(snapshot,
+        var snapshot = nativeSnapshot()
+        val selected = paywallSelection?.apply(requireHandle(), native, snapshot)
+        if (selected != null) snapshot = nativeSnapshot()
+        var values = NuxieViewModelSnapshot.fromNative(snapshot,
             schemaNames = catalog.schemas.associate { it.index.toLong() to it.name },
             instanceIds = instanceIds,
             defaultInstanceId = defaultInstanceId,
-        ))
+        )
+        if (selected != null) values = values.withPaywallSelection(
+            checkNotNull(paywallSelection).products.associate { it.nativeId to it.productId }, selected)
+        return NuxieCapturedViewModelSnapshot(snapshot, values)
     }
 
     /** Retains the actual child on the owning lane; the caller closes the returned state. */
