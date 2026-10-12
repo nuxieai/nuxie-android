@@ -735,16 +735,16 @@
     "runtime/typing-probes/f3-field-in-flow.riv": "ccaad4fe7f09685429a0159222a6332e3f29a13b",
     "video/README.md": "bc082e702f39ea2359ecbb28b15340eb40ad939b",
     "journeys/planes/pending-commerce.json": "bc082e702f39ea2359ecbb28b15340eb40ad939b",
-    "journeys/planes/file-paywall-selection.json": "80194e72e943a83f5d17f8a2b0d12e0272cb2b47",
-    "runtime/paywall-catalog-selection/report.json": "def8459cec030e21b8b6bd6086e2b7be33569654",
-    "runtime/paywall-catalog-selection/provenance.json": "def8459cec030e21b8b6bd6086e2b7be33569654",
-    "runtime/paywall-catalog-selection/snapshot.json": "def8459cec030e21b8b6bd6086e2b7be33569654",
-    "runtime/paywall-catalog-selection/README.md": "def8459cec030e21b8b6bd6086e2b7be33569654",
-    "runtime/paywall-catalog-selection/screen.riv": "def8459cec030e21b8b6bd6086e2b7be33569654",
-    "runtime/paywall-placement-selection/report.json": "def8459cec030e21b8b6bd6086e2b7be33569654",
-    "runtime/paywall-placement-selection/provenance.json": "def8459cec030e21b8b6bd6086e2b7be33569654",
-    "runtime/paywall-placement-selection/snapshot.json": "def8459cec030e21b8b6bd6086e2b7be33569654",
-    "runtime/paywall-placement-selection/README.md": "def8459cec030e21b8b6bd6086e2b7be33569654",
-    "runtime/paywall-placement-selection/screen.riv": "def8459cec030e21b8b6bd6086e2b7be33569654"
+    "journeys/planes/file-paywall-selection.json": "b0bb13ada6a62bcdc5e09be5f0beca34c42d9ffc",
+    "runtime/paywall-catalog-selection/report.json": "b0bb13ada6a62bcdc5e09be5f0beca34c42d9ffc",
+    "runtime/paywall-catalog-selection/provenance.json": "b0bb13ada6a62bcdc5e09be5f0beca34c42d9ffc",
+    "runtime/paywall-catalog-selection/snapshot.json": "b0bb13ada6a62bcdc5e09be5f0beca34c42d9ffc",
+    "runtime/paywall-catalog-selection/README.md": "b0bb13ada6a62bcdc5e09be5f0beca34c42d9ffc",
+    "runtime/paywall-catalog-selection/screen.riv": "b0bb13ada6a62bcdc5e09be5f0beca34c42d9ffc",
+    "runtime/paywall-placement-selection/report.json": "b0bb13ada6a62bcdc5e09be5f0beca34c42d9ffc",
+    "runtime/paywall-placement-selection/provenance.json": "b0bb13ada6a62bcdc5e09be5f0beca34c42d9ffc",
+    "runtime/paywall-placement-selection/snapshot.json": "b0bb13ada6a62bcdc5e09be5f0beca34c42d9ffc",
+    "runtime/paywall-placement-selection/README.md": "b0bb13ada6a62bcdc5e09be5f0beca34c42d9ffc",
+    "runtime/paywall-placement-selection/screen.riv": "b0bb13ada6a62bcdc5e09be5f0beca34c42d9ffc"
   }
 }
