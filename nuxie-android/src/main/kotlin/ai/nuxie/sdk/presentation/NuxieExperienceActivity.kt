@@ -154,7 +154,8 @@ internal class NuxieExperienceActivity : Activity() {
         override fun screenCloseReason(): CloseReason? = closeState.reason
         override fun finishAfterServiceClose() {
             runOnUiThread {
-                mounted?.exit()
+                mounted?.exit(if (closeState.reason == CloseReason.JourneyNavigation)
+                    ExperienceScreenLifecycle.ExitReason.NAVIGATION else ExperienceScreenLifecycle.ExitReason.DISMISSED)
                 if (closeState.reason != CloseReason.JourneyNavigation || navigation?.source !== this) finish()
             }
         }
