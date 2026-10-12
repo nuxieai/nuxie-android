@@ -5,6 +5,8 @@ import ai.nuxie.sdk.runtime.NuxieViewModelScalarValue
 /** Screen-owned state retained across visits; preparation copies are atomic with UI transitions. */
 internal class ExperienceScreenLifecycle {
     enum class Phase(val wireValue: String) { HIDDEN("hidden"), ENTERING("entering"), ACTIVE("active"), EXITING("exiting") }
+    enum class ExitReason(val wireValue: String) { NONE("none"), DISMISSED("dismissed"), NAVIGATION("navigation") }
+    private var exitReason = ExitReason.NONE
     var phase = Phase.HIDDEN
         private set
     var appearances = 0uL
@@ -14,9 +16,10 @@ internal class ExperienceScreenLifecycle {
     private var fontScale = 1.0
 
     @Synchronized
-    fun move(phase: Phase, transition: String = ""): Map<String, NuxieViewModelScalarValue> {
+    fun move(phase: Phase, transition: String = "", exitReason: ExitReason = ExitReason.NAVIGATION): Map<String, NuxieViewModelScalarValue> {
         if (phase == Phase.ENTERING) appearances += 1uL
         this.phase = phase
+        this.exitReason = if (phase == Phase.EXITING) exitReason else ExitReason.NONE
         this.transition = transition
         return snapshot()
     }
@@ -54,12 +57,14 @@ internal class ExperienceScreenLifecycle {
         phase = Phase.HIDDEN
         appearances = 0uL
         transition = ""
+        exitReason = ExitReason.NONE
     }
 
     @Synchronized
     fun snapshot(): Map<String, NuxieViewModelScalarValue> = linkedMapOf(
         "screen/phase" to NuxieViewModelScalarValue.StringValue(phase.wireValue),
         "screen/appearances" to NuxieViewModelScalarValue.NumberValue(appearances.toDouble()),
+        "screen/exitReason" to NuxieViewModelScalarValue.StringValue(exitReason.wireValue),
         "screen/transition" to NuxieViewModelScalarValue.StringValue(transition),
         "env/reduceMotion" to NuxieViewModelScalarValue.BooleanValue(reduceMotion),
         "fontScale" to NuxieViewModelScalarValue.NumberValue(fontScale),
