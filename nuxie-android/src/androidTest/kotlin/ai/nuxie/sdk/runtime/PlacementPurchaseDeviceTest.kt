@@ -58,6 +58,7 @@ class PlacementPurchaseDeviceTest {
     @Test
     fun nativePlanThenBuyDispatchesEachPlacementOfOneProduct() = runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
+        assertTrue("Pinned native runtime must load", NuxieRuntime.shared.isAvailable)
         val context = instrumentation.targetContext
         val writer = InstrumentationRegistry.getArguments().getString("nuxiePaywallWriter") ?: "placement"
         println("Native paywall writer: $writer")
@@ -118,9 +119,13 @@ class PlacementPurchaseDeviceTest {
                 val artboard = checkNotNull(file.newArtboard("Paywall"))
                 try {
                     val projection = checkNotNull(GooglePlayProductViewModelProjection.prepare(descriptor, products, "screen_welcome"))
-                    val state = NuxieRuntime.shared.bindViewModelList(file, artboard, projection,
-                        listOf("monthly", "annual").map { NuxieViewModelInstanceBinding("Runtime", "root-sdk-id", it, it, "PaywallProduct") })
+                    val state = NuxieRuntime.shared.bindViewModelList(file, artboard, projection)
                     try {
+                        val ids = state.nativeSnapshot().values.single { it.name == "products" }.listItemIds
+                        for ((index, plan) in listOf("monthly", "annual").withIndex()) {
+                            val child = state.acquireListItem("paywall/products", index, ids[index])
+                            try { assertTrue(state.linkViewModel(plan, child)) } finally { child.close() }
+                        }
                         val player = file.newExperiencePlayer(artboard, "Paywall")
                         try {
                             repeat(20) { player.stepTyped(elapsedSeconds = 0.016) }
