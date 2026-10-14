@@ -963,7 +963,9 @@ internal class ExperiencePresentationService(
                     return PreparedPresentation(source.acquired.sceneFile, source.screen.artboardName, source.screen.clearColor,
                         source.screen.shell, source.screen.screenId, source.descriptor, source.acquired.artifactsByKey,
                         source.screen.artboardSize, source.viewModelProjection, text, lifecycle, transition,
-                        AtomicReference(retained), journey.runValues)
+                        AtomicReference(retained), journey.runValues,
+                        existing?.takeIf { it.acquired.identity == source.identity }?.journey?.commerceValuesByScreen
+                            ?.get(journey.screenId) ?: AtomicReference(emptyMap()))
                 }
                 data class Destination(val source: PreparedSource, val content: PreparedPresentation, val navigation: PreparedScreenNavigation?)
                 suspend fun acquireInitial(): PreparedSource = try {
@@ -1053,9 +1055,7 @@ internal class ExperiencePresentationService(
                     }.also { PresentationRegistry.endNavigationRecovery(existing.id, navigationRecoveryToken) }
                 }
                 val source = destination.source
-                val preparedContent = destination.content.copy(commerceValues =
-                    existing?.takeIf { it.acquired.identity == source.identity }?.journey?.commerceValuesByScreen
-                        ?.get(journey.screenId) ?: AtomicReference(emptyMap()))
+                val preparedContent = destination.content
                 val textInputState = preparedContent.textInputState
                 navigation = destination.navigation
                 journey.commerce = source.commerceSession

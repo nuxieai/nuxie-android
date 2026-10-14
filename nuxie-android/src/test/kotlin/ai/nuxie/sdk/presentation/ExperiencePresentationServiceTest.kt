@@ -153,7 +153,7 @@ class ExperiencePresentationServiceTest {
         service.shutdownOwnedBy("customer-1")
     }
 
-    private fun reportCommerceSnapshot(id: String) {
+    private fun reportCommerceSnapshot(id: String): NuxieViewModelSnapshot {
         val values = listOf(
             NativeViewModelSnapshotValue(1, 0, "paywall", NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue, byteArrayOf(), 2),
             NativeViewModelSnapshotValue(2, 0, "purchase", NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue, byteArrayOf(), 3),
@@ -168,6 +168,7 @@ class ExperiencePresentationServiceTest {
                 NativeViewModelSnapshotInstance(3, 2), NativeViewModelSnapshotInstance(4, 2)), values.toTypedArray()))
         PresentationRegistry.reportRuntimeStep(id,
             ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome(true, emptyList(), emptyList(), emptyList(), emptyList()), 1uL, snapshot)
+        return snapshot
     }
 
     @Test
@@ -199,6 +200,76 @@ class ExperiencePresentationServiceTest {
         assertEquals(writesBeforeStale, host.valueWrites.size)
         PresentationRegistry.detach(id, host)
         service.shutdownOwnedBy("customer-1")
+    }
+
+    @Test
+    fun `return navigation prepares retained feedback received on another screen`() = runTest {
+        val release = renderedJourneyRelease("text-input-navigation.json")
+        val nextBuild = renderedJourneyRelease("text-input-navigation.json", "nextBuildEntry")
+        val launched = mutableListOf<String>()
+        val prepared = mutableListOf<PreparedPresentation>()
+        val service = service(this, launch = launched::add)
+        val owner = JourneyPresentationOwner("journey-1", "customer-1")
+        var currentId: String? = null
+        var host: PresentationScreenHandle? = null
+        suspend fun show(screen: String, selected: AuthenticatedJourneyRelease = release) {
+            val oldId = currentId
+            val oldHost = host
+            val pending = async {
+                service.presentJourney(testPresentationFences(), selected, screen, "journey-1", "customer-1",
+                    if (oldId == null) service.reserveJourney("customer-1") else null,
+                    acquire = { acquired(selected.identity, Lease()) }, onOutcome = {})
+            }
+            runCurrent()
+            if (oldId == null) PresentationRegistry.reportFirstFrame(launched.single())
+            pending.await()
+            val id = if (oldId == null) launched.single() else requireNotNull(currentId)
+            currentId = id
+            host = object : PresentationScreenHandle {
+                var closeReason: CloseReason? = null
+                override fun requestCloseFromService(reason: CloseReason): Boolean { closeReason = reason; return true }
+                override fun screenCloseReason() = closeReason
+                override fun finishAfterServiceClose() = Unit
+                override suspend fun prepareNavigation(id: String, content: PreparedPresentation): PreparedScreenNavigation {
+                    prepared += content
+                    val source = this
+                    return object : PreparedScreenNavigation {
+                        override suspend fun awaitExit() = Unit
+                        override fun activate() {
+                            PresentationRegistry.detach(requireNotNull(currentId), source)
+                            currentId = id
+                            PresentationRegistry.reportFirstFrame(id)
+                        }
+                        override suspend fun abort() = Unit
+                    }
+                }
+            }
+            if (oldId != null && oldHost != null) PresentationRegistry.detach(oldId, oldHost)
+            assertTrue(PresentationRegistry.attach(id, requireNotNull(host)))
+        }
+        try {
+            show("screen_welcome")
+            // The production surface retains its latest snapshot before leaving.
+            val welcome = requireNotNull(PresentationRegistry.resolve(requireNotNull(currentId)))
+            welcome.retainedViewModel.set(reportCommerceSnapshot(requireNotNull(currentId)))
+            val action = Json.parseToJsonElement("""{"type":"purchase","placementId":"monthly"}""").jsonObject
+            assertEquals(JourneyPresentationActionResult.ProductsUnavailable,
+                service.dispatchJourneyAction(owner, action, "original-attempt"))
+            show("screen_details")
+            service.projectJourneyCommerceOutcome(owner, ai.nuxie.sdk.journey.JourneyActionType.PURCHASE,
+                "failed", "store-offline", "original-attempt")
+            show("screen_welcome")
+            val returned = prepared.last().commerceValues.get()
+            fun string(value: String) = ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.StringValue(value)
+            assertEquals(string("error"), returned["paywall/purchase/status"])
+            assertEquals(string("store-offline"), returned["paywall/purchase/errorCode"])
+            assertEquals(string("original-attempt"), returned["paywall/purchase/invocationId"])
+            show("screen_welcome", nextBuild)
+            assertTrue(prepared.last().commerceValues.get().isEmpty())
+        } finally {
+            currentId?.let { id -> host?.let { PresentationRegistry.detach(id, it) } }
+            service.shutdownOwnedBy("customer-1")
+        }
     }
 
     @Test
