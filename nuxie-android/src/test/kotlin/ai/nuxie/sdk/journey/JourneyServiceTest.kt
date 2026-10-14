@@ -3391,12 +3391,17 @@ class JourneyServiceTest {
         assertPurchaseOfferRoute(ai.nuxie.sdk.features.FeatureAccess(false, false, null, ai.nuxie.sdk.features.FeatureType.BOOLEAN), noTarget = true)
     }
 
+    @Test fun `empty Buy without a failed outlet clears its receipt and permits retry`() = runBlocking {
+        assertPurchaseOfferRoute(ai.nuxie.sdk.features.FeatureAccess(false, false, null, ai.nuxie.sdk.features.FeatureType.BOOLEAN), noTarget = true, noFailureOutlet = true)
+    }
+
     private suspend fun assertPurchaseOfferRoute(
         access: ai.nuxie.sdk.features.FeatureAccess?,
         dismissAlternative: JsonObject? = null,
         expectedOutcome: String = "continue",
         relativeRow: Boolean = false,
         noTarget: Boolean = false,
+        noFailureOutlet: Boolean = false,
     ) {
         val directory = java.io.File(this.directory, java.util.UUID.randomUUID().toString()).apply { mkdirs() }
         val identity = IdentityService(context).also { it.setDistinctId("customer") }
@@ -3417,7 +3422,7 @@ class JourneyServiceTest {
             }
             putJsonObject("outlets") {
                 put("completed", "completed")
-                put("failed", "failed")
+                if (!noFailureOutlet) put("failed", "failed")
                 put("cancelled", "cancelled")
             }
         }
@@ -3455,7 +3460,7 @@ class JourneyServiceTest {
                                 put("kind", "screen")
                                 put("screenId", "screen_welcome")
                             }
-                            put("eventName", if (relativeRow) "buy" else SystemEventNames.SCREEN_SHOWN)
+                            put("eventName", if (relativeRow || noFailureOutlet) "buy" else SystemEventNames.SCREEN_SHOWN)
                             put("entryStepId", "purchase")
                         },
                         buildJsonObject {
@@ -3562,6 +3567,23 @@ class JourneyServiceTest {
         }
 
         val request = requireNotNull(presenter.request)
+        if (noFailureOutlet) {
+            val journal = JourneyRunJournal(directory, "customer", JourneyStorageScope(renderedAuthority))
+            for (index in 0..1) {
+                val batch = JourneyScreenEmissionBatch(request.journeyId, index.toLong(), "empty-buy-$index",
+                    JourneyScreenEmissionSource("screen_welcome", "buy-control"),
+                    listOf(JourneyScreenEmission("00000000-0000-7000-8000-00000000092$index", index.toLong(),
+                        100_000L + index, "buy", JsonObject(emptyMap()))))
+                assertEquals(JourneyEmissionBatchResult.ACCEPTED, request.onEmissionBatch(batch, null))
+                withTimeout(5_000L) { while (presenter.actions.size <= index || journal.runs().singleOrNull()?.effectReceipts?.isNotEmpty() == true || journal.runs().singleOrNull()?.pendingCommerce != null) kotlinx.coroutines.delay(10) }
+                val run = journal.runs().single()
+                assertEquals("purchase", run.stepId)
+                assertTrue(run.effectReceipts.isEmpty())
+                assertNull(run.pendingCommerce)
+            }
+            assertTrue(presenter.owns(JourneyPresentationOwner(request.journeyId, "customer")))
+            return
+        }
         if (relativeRow) {
             val frame = ai.nuxie.sdk.runtime.NuxieViewModelSnapshot.fromNative(ai.nuxie.sdk.runtime.NativeViewModelSnapshot(1,
                 (1L..4L).map { ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(it, 0) }.toTypedArray(),
