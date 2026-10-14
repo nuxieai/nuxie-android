@@ -1406,8 +1406,8 @@ internal class ExperiencePresentationService(
                 else active.journey.viewModelsByScreen[write.screenId]?.get()
             // Released screens may omit these fields; never add them to another screen.
             val declared = write.values.filterKeys { snapshot?.containsValue(it) == true }
-            active.journey.commerceValuesByScreen.getOrPut(write.screenId) { AtomicReference(emptyMap()) }
-                .updateAndGet { it + declared }
+            val retained = active.journey.commerceValuesByScreen.getOrPut(write.screenId) { AtomicReference(emptyMap()) }
+            retained.set(retained.get() + declared)
             declared
         }
         if (write.screenId == active.journey.screenId && values.isNotEmpty()) {
