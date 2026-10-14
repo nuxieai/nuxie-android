@@ -186,10 +186,10 @@ class PublishedVideoDeviceTest {
             assertTrue("Screenshot captured", screenshotSaved)
             assertTrue("Caption layout must be measured", layoutChecks > 0)
             fun setBoolean(path: String, value: Boolean) {
-                mounted.surface.updateRuntimeValues(mapOf(path to NuxieViewModelScalarValue.BooleanValue(value)))
+                mounted.surface.setVideoValuesChecked(mapOf(path to NuxieViewModelScalarValue.BooleanValue(value)))
             }
             fun setNumber(path: String, value: Double) {
-                mounted.surface.updateRuntimeValues(mapOf(path to NuxieViewModelScalarValue.NumberValue(value)))
+                mounted.surface.setVideoValuesChecked(mapOf(path to NuxieViewModelScalarValue.NumberValue(value)))
             }
             fun pixelMatches(expectRed: Boolean = true): Boolean {
                 var matches = false
@@ -243,7 +243,21 @@ class PublishedVideoDeviceTest {
                 setNumber("current-time", seconds)
                 awaitStablePausedFrame(red, "Paused seek $index")
             }
+            assertFalse("Missing bound paths must be rejected", kotlinx.coroutines.runBlocking {
+                kotlinx.coroutines.withTimeout(10_000) { mounted.surface.updateRuntimeValues(mapOf(
+                    "missing-video-path" to NuxieViewModelScalarValue.BooleanValue(true))).await() }
+            })
             setBoolean("paused", false)
+            if (!sharedCapacity) {
+                val until = SystemClock.elapsedRealtime() + 8_000
+                val resumedColors = mutableSetOf<Boolean>()
+                while (SystemClock.elapsedRealtime() < until && resumedColors.size < 2) {
+                    if (pixelMatches(true)) resumedColors += true
+                    if (pixelMatches(false)) resumedColors += false
+                    Thread.sleep(20)
+                }
+                assertEquals("Bound paused=false resumes both video phases", setOf(true, false), resumedColors)
+            }
             if (sharedCapacity) {
                 val otherOwner = UUID.randomUUID()
                 val demand = listOf(NuxieVideoDecoderRequest(id = 100, pixelsPerSecond = 64L * 32 * 31,

@@ -339,7 +339,11 @@ class ConfiguredImportSmokeTest {
         verifyDecodedVideo(false, endpointSeek = true)
     }
 
-    private fun verifyDecodedVideo(frenchCaptions: Boolean, measurement: VideoMeasurement? = null, avClockMeasurement: Boolean = false, endpointSeek: Boolean = false) {
+    @Test fun boundPlaybackSettingsReachPlayingDecoderAndPermanentFocusLossWritesBack() {
+        verifyDecodedVideo(false, hostSettings = true)
+    }
+
+    private fun verifyDecodedVideo(frenchCaptions: Boolean, measurement: VideoMeasurement? = null, avClockMeasurement: Boolean = false, endpointSeek: Boolean = false, hostSettings: Boolean = false) {
         val preparationStarted = System.nanoTime()
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val local = java.io.File.createTempFile("video-decoder-", ".mp4", instrumentation.targetContext.cacheDir)
@@ -433,6 +437,54 @@ class ConfiguredImportSmokeTest {
                                 }
                                 return color
                             }
+                            if (hostSettings) {
+                                fun decoder(): AndroidVideoDecoder? {
+                                    val field = ExperienceVideoPlayback::class.java.getDeclaredField("entries").apply { isAccessible = true }
+                                    val entry = (field.get(playback) as Map<*, *>).values.singleOrNull() ?: return null
+                                    return entry.javaClass.getDeclaredField("decoder").apply { isAccessible = true }.get(entry) as? AndroidVideoDecoder
+                                }
+                                fun tick() {
+                                    player.step(0.0)
+                                    playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
+                                    Thread.sleep(16)
+                                }
+                                val until = android.os.SystemClock.elapsedRealtime() + 10_000
+                                while (decoder()?.playing() != true && android.os.SystemClock.elapsedRealtime() < until) tick()
+                                val live = checkNotNull(decoder())
+                                assertTrue("Bound settings are changed during real playback", live.playing())
+                                fun onDecoder(block: () -> Unit) {
+                                    val handler = AndroidVideoDecoder::class.java.getDeclaredField("handler").apply { isAccessible = true }.get(live) as android.os.Handler
+                                    val done = java.util.concurrent.CountDownLatch(1)
+                                    val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+                                    handler.post { try { block() } catch (error: Throwable) { failure.set(error) } finally { done.countDown() } }
+                                    assertTrue(done.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                                    failure.get()?.let { throw AssertionError("Decoder settings", it) }
+                                }
+                                fun settings(path: String, value: NuxieViewModelScalarValue, expectedVolume: Float, expectedSpeed: Float) {
+                                    setVideoValue(artboard, player, path, value)
+                                    tick()
+                                    onDecoder {
+                                        val volume = AndroidVideoDecoder::class.java.getDeclaredField("volume").apply { isAccessible = true }.getFloat(live)
+                                        val media = AndroidVideoDecoder::class.java.getDeclaredField("player").apply { isAccessible = true }.get(live) as android.media.MediaPlayer
+                                        assertTrue("MediaPlayer stays playing during a bound change", media.isPlaying)
+                                        assertEquals("Effective decoder volume", expectedVolume, volume, 0.001f)
+                                        assertEquals("Actual MediaPlayer speed", expectedSpeed, media.playbackParams.speed, 0.001f)
+                                    }
+                                }
+                                settings("muted", NuxieViewModelScalarValue.BooleanValue(true), 0f, 1f)
+                                settings("volume", NuxieViewModelScalarValue.NumberValue(0.25), 0f, 1f)
+                                settings("muted", NuxieViewModelScalarValue.BooleanValue(false), 0.25f, 1f)
+                                settings("playback-rate", NuxieViewModelScalarValue.NumberValue(1.5), 0.25f, 1.5f)
+                                assertEquals(false, artboard.defaultViewModelSnapshot()?.resolveBoolean("paused"))
+                                AndroidVideoDecoder::class.java.getDeclaredMethod("focusChanged", Int::class.javaPrimitiveType)
+                                    .apply { isAccessible = true }.invoke(live, android.media.AudioManager.AUDIOFOCUS_LOSS)
+                                onDecoder { /* Drain the focus-loss callback on its owner thread. */ }
+                                tick()
+                                assertEquals("Permanent host focus loss writes paused=true to the bound value", true,
+                                    artboard.defaultViewModelSnapshot()?.resolveBoolean("paused"))
+                                assertFalse(player.videos().single().wantsPlay)
+                                return
+                            }
                             if (endpointSeek) {
                                 fun awaitColor(red: Boolean): Boolean {
                                     val until = android.os.SystemClock.elapsedRealtime() + 10_000
@@ -450,6 +502,8 @@ class ConfiguredImportSmokeTest {
                                 setVideoValue(artboard, player, "current-time", NuxieViewModelScalarValue.NumberValue(2.0))
                                 assertTrue("Seek to duration presents the final 1.9-second blue image", awaitColor(false))
                                 assertTrue("The seek delivers a new decoded image", playback.deliveredFrames > delivered)
+                                assertTrue("Final decoded frame must be at least 1.85 seconds: ${playback.lastDeliveredFrameSeconds}",
+                                    checkNotNull(playback.lastDeliveredFrameSeconds) >= 1.85)
                                 assertFalse(player.videos().single().wantsPlay)
                                 return
                             }

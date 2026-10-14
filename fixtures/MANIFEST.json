@@ -88,7 +88,7 @@
     "journeys/planes/text-input-navigation.json": "50164ac8db6b35f436a043b5d916533f96349a07f4821f65387d9d0a5a95a8c4",
     "journeys/planes/text-input-typography.json": "a9c6217a7eba1b0f8ee0f063fa3764880d0b6b0149160def566d5a1b331feae1",
     "journeys/planes/values.json": "e6f7b54cb33bb8d024638760c54221e858124affcbe182b4593924bfcca47bee",
-    "journeys/planes/video-admission.json": "19b83431097be7564edbcb3bb7a0996dccf03f999ea48c5c6ab21eeeaa683bf8",
+    "journeys/planes/video-admission.json": "c597d424dd23386b4f244cac4357782efcbcc76362a195315a8925a66cba1f01",
     "journeys/rendered-custom-transition/assets/sha256/3b95bcece1f913d2c1196cff9474497a2f4c0aa1745b1cd241cde5dd2817c82d.png": "3b95bcece1f913d2c1196cff9474497a2f4c0aa1745b1cd241cde5dd2817c82d",
     "journeys/rendered-custom-transition/assets/sha256/4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf.ttf": "4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf",
     "journeys/rendered-custom-transition/provenance.json": "37738ec1bedfc4e36e4943aa0cab45074315a9ac1253702f66e82c47f8822b35",
@@ -463,7 +463,7 @@
     "unicode/GraphemeBreakTest-16.0.0.txt": "ee2b9354d270ac061b29f09662cafea06341d77e704b8cc6bd72aaeeda363cb5",
     "unicode/LICENSE.txt": "e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96",
     "unicode/grapheme-properties-16.0.0.json": "84c942f0030116e6341c2fb3cd57a8d619b8cf82f613860766493b8b99498cf4",
-    "video/README.md": "814b767948d87452ab8f01362f5d567dd36404fc2f4a8294b2df07b34eaebcfb",
+    "video/README.md": "9c42dbf30994f62d708ac3fd5f5b921e94c00e74f4457ce31e2eaa3bba0c88d8",
     "video/caption-selection.json": "90d556cdeb581ac2cfbd67036e8b22a3963513acfda915074b9f769c00ce16ad",
     "video/captions-4k60.mp4": "600159824f081a7907b5c09eedc86318fd4005f5b40275f3f020ee3ff6b4b086",
     "video/captions-720p.mp4": "16b1362520eaf0be21545d16062606ff7782409e0ea784c2d94dae8d0135b113",
@@ -500,7 +500,7 @@
     "runtime/screen-exit-reason/field-absent/source/experience.json": "efb4d79e28a96d2b0fc607497faf5a49f9cc8f563fb20cd628a435cc9f33d9ac",
     "runtime/screen-exit-reason/field-absent/source/screens/tap/frame.json": "f9c44fca787efa3b0f44b1cd8a830e57dc522c338c4e2a31e091e178afa943dd",
     "runtime/screen-exit-reason/field-absent/source/screens/tap/index.html": "99d501281f685490d359c4dbfedf394296db847c2629ae7faa9ca361ac2a2f56",
-    "journeys/planes/unsupported-video-actions.json": "442f2a9f10a58221263fe8b15e31e2494e54d65617405a0c0e5c26891ff9be5f"
+    "journeys/planes/unsupported-video-actions.json": "3743b98350e7b9d0fedca38bd85a85ddf0edda7ff00714a09f56d4e10f6a9ed6"
   },
   "sourceCommitOverrides": {
     "README.md": "c0faf25cfd6e7c9316dc3182154b62c7d3811793",
@@ -812,12 +812,12 @@
     "runtime/screen-exit-reason/field-absent/source/experience.json": "ea4be62bf08895f388ea109b3931168b4d0aaea7",
     "runtime/screen-exit-reason/field-absent/source/screens/tap/frame.json": "ea4be62bf08895f388ea109b3931168b4d0aaea7",
     "runtime/screen-exit-reason/field-absent/source/screens/tap/index.html": "ea4be62bf08895f388ea109b3931168b4d0aaea7",
-    "journeys/planes/unsupported-video-actions.json": "422d4a00445197ca08846d7444ae305b84dec239",
+    "journeys/planes/unsupported-video-actions.json": "8d760b2a96b5c6229afd5fa060fdf9ba2828186d",
     "video/greeting.nux": "422d4a00445197ca08846d7444ae305b84dec239",
     "video/waiting.nux": "422d4a00445197ca08846d7444ae305b84dec239",
     "video/list.nux": "422d4a00445197ca08846d7444ae305b84dec239",
     "video/endpoint.nux": "422d4a00445197ca08846d7444ae305b84dec239",
     "video/endpoint-inventory.json": "422d4a00445197ca08846d7444ae305b84dec239",
-    "journeys/planes/video-admission.json": "60aa89c18d0b754c816ea5ee9f7a994d707e5b0f"
+    "journeys/planes/video-admission.json": "8d760b2a96b5c6229afd5fa060fdf9ba2828186d"
   }
 }

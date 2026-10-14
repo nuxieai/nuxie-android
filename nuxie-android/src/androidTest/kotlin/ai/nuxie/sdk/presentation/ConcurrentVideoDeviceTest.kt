@@ -74,7 +74,7 @@ class ConcurrentVideoDeviceTest {
             }
             assertTrue("Mounted lane presents its scene", first.await(15, TimeUnit.SECONDS))
             // Motion backgrounds are muted; audible greetings would compete for audio focus.
-            screens.last().surface.updateRuntimeValues(mapOf(
+            screens.last().surface.setVideoValuesChecked(mapOf(
                 "muted" to NuxieViewModelScalarValue.BooleanValue(true),
                 "paused" to NuxieViewModelScalarValue.BooleanValue(false),
             ))
@@ -125,7 +125,7 @@ class ConcurrentVideoDeviceTest {
                 repeat(10) { cycle ->
                     mount()
                     awaitPhases(setOf(0))
-                    screens.single().surface.updateRuntimeValues(mapOf(
+                    screens.single().surface.setVideoValuesChecked(mapOf(
                         "paused" to NuxieViewModelScalarValue.BooleanValue(true)))
                     val closed = CountDownLatch(1)
                     instrumentation.runOnMainSync {

@@ -393,16 +393,40 @@ internal class ExperienceSurfaceHost(
     private val reportedStatePaths = mutableSetOf<String>()
     private var screenRuntimeValues = ExperienceScreenRuntimeValues(false)
 
-    /** UI entry point; values submitted before loading are applied to the bound root before player creation. */
-    fun updateRuntimeValues(values: Map<String, NuxieViewModelScalarValue>) {
-        if (released.get()) return
-        val copied = values.toMap()
-        lane.enqueue {
-            if (released.get()) return@enqueue
-            runtimeValues.putAll(copied)
-            if (pendingPresentation) runtimeValuesPending = true
-            else applyRuntimeValues(copied)
+    private data class RuntimeWrite(
+        val values: Map<String, NuxieViewModelScalarValue>,
+        val completion: CompletableDeferred<Boolean>,
+    )
+    private val pendingRuntimeWrites = ArrayDeque<RuntimeWrite>()
+
+    private fun drainRuntimeWrites() {
+        if (artboard == null || pendingPresentation) return
+        while (pendingRuntimeWrites.isNotEmpty()) {
+            val write = pendingRuntimeWrites.removeFirst()
+            write.completion.complete(applyRuntimeValues(write.values))
         }
+    }
+
+    private fun cancelRuntimeWrites() {
+        while (pendingRuntimeWrites.isNotEmpty()) pendingRuntimeWrites.removeFirst().completion.complete(false)
+    }
+
+    /** Completes after writing the bound root; false means at least one path was rejected. */
+    fun updateRuntimeValues(values: Map<String, NuxieViewModelScalarValue>): kotlinx.coroutines.Deferred<Boolean> {
+        val completion = CompletableDeferred<Boolean>()
+        if (released.get() || failureReported.get()) return completion.apply { complete(false) }
+        val copied = values.toMap()
+        val accepted = lane.enqueue {
+            if (released.get() || failureReported.get()) {
+                completion.complete(false)
+                return@enqueue
+            }
+            runtimeValues.putAll(copied)
+            pendingRuntimeWrites.addLast(RuntimeWrite(copied, completion))
+            if (pendingPresentation) runtimeValuesPending = true else drainRuntimeWrites()
+        }
+        if (!accepted) completion.complete(false)
+        return completion
     }
 
     private data class TransitionWrite(
@@ -436,6 +460,7 @@ internal class ExperienceSurfaceHost(
             runtimeValues.putAll(write.values)
             applyRuntimeValues(runtimeValues)
             runtimeValuesPending = false
+            drainRuntimeWrites()
             presentedTransitionWrite = write
             return
         }
@@ -446,6 +471,7 @@ internal class ExperienceSurfaceHost(
         if (running || pendingPresentation) return
         if (released.get() || failureReported.get()) {
             cancelTransitionWrites()
+            cancelRuntimeWrites()
             return
         }
         // Retirement completed a frame whose phase was already stepped.
@@ -476,8 +502,9 @@ internal class ExperienceSurfaceHost(
         while (transitionWrites.isNotEmpty()) transitionWrites.removeFirst().completion.cancel()
     }
 
-    private fun applyRuntimeValues(values: Map<String, NuxieViewModelScalarValue>) {
-        val boundArtboard = artboard ?: return
+    private fun applyRuntimeValues(values: Map<String, NuxieViewModelScalarValue>): Boolean {
+        val boundArtboard = artboard ?: return false
+        var accepted = true
         screenRuntimeValues.apply(values, write = { path, value ->
             val globalPath = when (path) {
                 "env/reduceMotion" -> "reduceMotion"
@@ -501,10 +528,12 @@ internal class ExperienceSurfaceHost(
             }
             val projected = viewModelState
             if (projected != null) projected.setValue(path, value)
-            else boundArtboard.setDefaultViewModelValue(path, value)
+            else check(boundArtboard.setDefaultViewModelValue(path, value)) { "Experience has no bound view-model" }
         }, onRejected = { path, error ->
+            accepted = false
             if (reportedStatePaths.add(path)) Log.w(LOG_TAG, "Experience state path rejected", error, Log.sensitive("path", path))
         })
+        return accepted
     }
 
     /**
@@ -726,6 +755,7 @@ internal class ExperienceSurfaceHost(
                 return@enqueuePreparation
             }
             applyRuntimeValues(runtimeValues)
+            drainRuntimeWrites()
             try {
                 player = loadedFile.newExperiencePlayer(loadedArtboard, artboardName)
                 environment?.let { checkNotNull(player).bindGlobalViewModel("env", it) }
@@ -1221,6 +1251,7 @@ internal class ExperienceSurfaceHost(
                     if (runtimeValuesPending) {
                         applyRuntimeValues(runtimeValues)
                         runtimeValuesPending = false
+                        drainRuntimeWrites()
                     }
                     // Keep the clock on the lane: a resize queued ahead of this
                     // tick may have retired its pending submission. Polling does
@@ -1422,6 +1453,7 @@ internal class ExperienceSurfaceHost(
         lane.enqueue {
             pendingPresentation = false
             cancelTransitionWrites()
+            cancelRuntimeWrites()
             drainTextWrites() // Complete queued edits as failed before closing native handles.
             applyRuntimeValues(finalValues)
             // Capture on the original lane after input/exit writes and before releasing handles.
@@ -1473,6 +1505,7 @@ internal class ExperienceSurfaceHost(
         captionPublication.incrementAndGet()
         lane.enqueue {
             cancelTransitionWrites()
+            cancelRuntimeWrites()
             videoPlayback?.setVisible(false)
         }
         mainHandler.post { listener?.onVideoCaptions(emptyMap()) }
