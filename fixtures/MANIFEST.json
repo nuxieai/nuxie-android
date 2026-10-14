@@ -487,7 +487,21 @@
     "video/multilingual.mp4": "db01aede12e87d4357aabcc76ef7f518ec766a7684afe0e6da7229decf93196b",
     "video/waiting-inventory.json": "3c707b124011c110dad62acc0f16e6f09940326e2d6fa59e1afd3202595412e4",
     "video/waiting-journey.json": "8cc61bdb05b2d1f3bd9e8b616fd1f6848b49d794f63becda0d12929be57cca8b",
-    "video/waiting.nux": "0312918deeabae4853fc84e8a00ab7daf5f30e80e4c0dc14326aae4efb3872d2"
+    "video/waiting.nux": "0312918deeabae4853fc84e8a00ab7daf5f30e80e4c0dc14326aae4efb3872d2",
+    "runtime/screen-exit-reason/dismissed-only/mounted-screen.json": "bfec5d815af9bc7cb580fb80c065ed2d931a7ef54f467c152fdf95b3fa2eee5a",
+    "runtime/screen-exit-reason/dismissed-only/provenance.json": "aca18b10447924295e6d85ad295794a2c40af94ad67acd3541e4fedc4bd9f254",
+    "runtime/screen-exit-reason/dismissed-only/screen.nux": "c86296cc9a3f73112e1316fb79cc4b2c944891677a7bd8f1bef3ef5296513737",
+    "runtime/screen-exit-reason/dismissed-only/snapshot.json": "bc5f909fc901be80a06fee8e85b8448ddbb5934e2e9d85134d691e6c1d7ac9aa",
+    "runtime/screen-exit-reason/dismissed-only/source/experience.json": "efb4d79e28a96d2b0fc607497faf5a49f9cc8f563fb20cd628a435cc9f33d9ac",
+    "runtime/screen-exit-reason/dismissed-only/source/screens/tap/frame.json": "f9c44fca787efa3b0f44b1cd8a830e57dc522c338c4e2a31e091e178afa943dd",
+    "runtime/screen-exit-reason/dismissed-only/source/screens/tap/index.html": "bb700b3ce0352635e88cf650b4cddd8596bf7cb52d71d4f8e2fc9c84de5cee61",
+    "runtime/screen-exit-reason/field-absent/mounted-screen.json": "b8470efa544799306ba7a1599b68b7e62356bc34706f69ad8f97dec731354190",
+    "runtime/screen-exit-reason/field-absent/provenance.json": "9c022314ec15ad5a9f7451cecf3fcb4b0117acf342b7ced07dcdd6865f0f5288",
+    "runtime/screen-exit-reason/field-absent/screen.nux": "8c33b27eb695ca118106beb012a3b99a25006fa05228763f18e6b9e354f41c5b",
+    "runtime/screen-exit-reason/field-absent/snapshot.json": "f46c5ec350f95e52c77aa00b512ccebefa9eeae02fbcb7b4f767a24a19297256",
+    "runtime/screen-exit-reason/field-absent/source/experience.json": "efb4d79e28a96d2b0fc607497faf5a49f9cc8f563fb20cd628a435cc9f33d9ac",
+    "runtime/screen-exit-reason/field-absent/source/screens/tap/frame.json": "f9c44fca787efa3b0f44b1cd8a830e57dc522c338c4e2a31e091e178afa943dd",
+    "runtime/screen-exit-reason/field-absent/source/screens/tap/index.html": "99d501281f685490d359c4dbfedf394296db847c2629ae7faa9ca361ac2a2f56"
   },
   "sourceCommitOverrides": {
     "README.md": "c0faf25cfd6e7c9316dc3182154b62c7d3811793",
@@ -784,6 +798,20 @@
     "runtime/typing-probes/README.md": "ccaad4fe7f09685429a0159222a6332e3f29a13b",
     "runtime/typing-probes/f3-field-in-flow.riv": "ccaad4fe7f09685429a0159222a6332e3f29a13b",
     "video/README.md": "bc082e702f39ea2359ecbb28b15340eb40ad939b",
-    "journeys/planes/runtime-screen-lifecycle.json": "a2bbec176a96d0daed8deea45a0f5eb9408e6750"
+    "journeys/planes/runtime-screen-lifecycle.json": "45b1153878765ec83801c7c6414e31f9a5402dc4",
+    "runtime/screen-exit-reason/dismissed-only/mounted-screen.json": "45b1153878765ec83801c7c6414e31f9a5402dc4",
+    "runtime/screen-exit-reason/dismissed-only/provenance.json": "45b1153878765ec83801c7c6414e31f9a5402dc4",
+    "runtime/screen-exit-reason/dismissed-only/screen.nux": "45b1153878765ec83801c7c6414e31f9a5402dc4",
+    "runtime/screen-exit-reason/dismissed-only/snapshot.json": "45b1153878765ec83801c7c6414e31f9a5402dc4",
+    "runtime/screen-exit-reason/dismissed-only/source/experience.json": "45b1153878765ec83801c7c6414e31f9a5402dc4",
+    "runtime/screen-exit-reason/dismissed-only/source/screens/tap/frame.json": "45b1153878765ec83801c7c6414e31f9a5402dc4",
+    "runtime/screen-exit-reason/dismissed-only/source/screens/tap/index.html": "45b1153878765ec83801c7c6414e31f9a5402dc4",
+    "runtime/screen-exit-reason/field-absent/mounted-screen.json": "45b1153878765ec83801c7c6414e31f9a5402dc4",
+    "runtime/screen-exit-reason/field-absent/provenance.json": "45b1153878765ec83801c7c6414e31f9a5402dc4",
+    "runtime/screen-exit-reason/field-absent/screen.nux": "45b1153878765ec83801c7c6414e31f9a5402dc4",
+    "runtime/screen-exit-reason/field-absent/snapshot.json": "45b1153878765ec83801c7c6414e31f9a5402dc4",
+    "runtime/screen-exit-reason/field-absent/source/experience.json": "45b1153878765ec83801c7c6414e31f9a5402dc4",
+    "runtime/screen-exit-reason/field-absent/source/screens/tap/frame.json": "45b1153878765ec83801c7c6414e31f9a5402dc4",
+    "runtime/screen-exit-reason/field-absent/source/screens/tap/index.html": "45b1153878765ec83801c7c6414e31f9a5402dc4"
   }
 }

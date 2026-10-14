@@ -1,5 +1,8 @@
 package ai.nuxie.sdk.hostrender
 
+import ai.nuxie.sdk.presentation.ExperienceScreenLifecycle
+import ai.nuxie.sdk.presentation.ExperienceScreenLifecycle.ExitReason
+import ai.nuxie.sdk.presentation.ExperienceScreenLifecycle.Phase
 import ai.nuxie.sdk.runtime.FileAssetKind
 import ai.nuxie.sdk.runtime.NuxieRuntime
 import java.io.File
@@ -20,6 +23,126 @@ import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 class HostRenderSmokeTest {
+    @Test
+    fun `dismissal animates before native completion while navigation skips and the final pose stays hidden`() {
+        assertTrue("Native proof requires the configured host C API", !System.getenv("NUXIE_HOST_CAPI_LIB").isNullOrBlank())
+        val runtime = NuxieRuntime.shared
+        assertTrue("Pinned runtime and host JNI must load", runtime.isAvailable)
+        val bytes = File(System.getProperty("nuxie.repo.root"),
+            "fixtures/runtime/screen-exit-reason/dismissed-only/screen.nux").readBytes()
+        val event = "nuxie:screen-exit-complete:scr_screens_stap"
+        for (reason in listOf(ExitReason.NAVIGATION, ExitReason.DISMISSED)) {
+            val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(100, 100))
+            try {
+                val file = checkNotNull(runtime.importFile(renderer, bytes))
+                try {
+                    val artboard = checkNotNull(file.newArtboard("tap"))
+                    try {
+                        artboard.bindDefaultViewModel("Runtime", "root-sdk-id")
+                        val player = file.newExperiencePlayer(artboard, "tap")
+                        try {
+                            val state = ExperienceScreenLifecycle()
+                            fun move(phase: Phase, reason: ExitReason = ExitReason.NONE) {
+                                for ((path, value) in state.move(phase, exitReason = reason).filterKeys { it.startsWith("screen/") }) {
+                                    assertTrue("Native lifecycle write $path", artboard.setDefaultViewModelValue(path, value))
+                                }
+                            }
+                            fun green(): Int {
+                                val frame = renderer.renderToCpuFrame(player, 0xFF000000.toInt(), 1f)
+                                assertEquals(100, frame.width)
+                                assertEquals(100, frame.height)
+                                return frame.rgba[(50 * 100 + 50) * 4 + 1].toInt() and 255
+                            }
+                            move(Phase.ENTERING)
+                            player.stepTyped(elapsedSeconds = 0.0)
+                            move(Phase.ACTIVE)
+                            player.stepTyped(elapsedSeconds = 0.0)
+                            val activeGreen = green()
+                            assertTrue(activeGreen > 245)
+                            move(Phase.EXITING, reason)
+                            val start = player.stepTyped(elapsedSeconds = 0.0)
+                            if (reason == ExitReason.NAVIGATION) {
+                                assertEquals(1, start.events.count { it.name == event })
+                                assertEquals(activeGreen, green())
+                            } else {
+                                assertEquals(0, start.events.count { it.name == event })
+                                val middle = player.stepTyped(elapsedSeconds = 0.2)
+                                assertEquals(0, middle.events.count { it.name == event })
+                                val middleGreen = green()
+                                assertTrue("The actual native opacity must move between endpoints", middleGreen > 20 && middleGreen < activeGreen - 20)
+                                val beforeEnd = player.stepTyped(elapsedSeconds = 0.19)
+                                assertEquals(0, beforeEnd.events.count { it.name == event })
+                                val complete = player.stepTyped(elapsedSeconds = 0.02)
+                                assertEquals(1, complete.events.count { it.name == event })
+                                val finalGreen = green()
+                                assertTrue(finalGreen < 5)
+                                val settled = player.stepTyped(elapsedSeconds = 0.1)
+                                assertEquals(0, settled.events.count { it.name == event })
+                                assertEquals("Completion must preserve the terminal pose", finalGreen, green())
+                            }
+                        } finally { player.close() }
+                    } finally { artboard.close() }
+                } finally { file.close() }
+            } finally { renderer.close() }
+        }
+    }
+
+    @Test
+    fun `real native screen reasons accept both exits and preserve older lifecycle fields`() {
+        assertTrue("Native proof requires the configured host C API", !System.getenv("NUXIE_HOST_CAPI_LIB").isNullOrBlank())
+        val runtime = NuxieRuntime.shared
+        assertTrue("Pinned runtime and host JNI must load", runtime.isAvailable)
+        for (variant in listOf("dismissed-only", "field-absent")) {
+            val hasReason = variant == "dismissed-only"
+            val bytes = File(System.getProperty("nuxie.repo.root"),
+                "fixtures/runtime/screen-exit-reason/$variant/screen.nux").readBytes()
+            val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(100, 100))
+            try {
+                val file = checkNotNull(runtime.importFile(renderer, bytes))
+                try {
+                    val artboard = checkNotNull(file.newArtboard("tap"))
+                    try {
+                        artboard.bindDefaultViewModel("Runtime", "root-sdk-id")
+                        val player = file.newExperiencePlayer(artboard, "tap")
+                        try {
+                            val state = ExperienceScreenLifecycle()
+                            val visits = listOf(
+                                Triple(Phase.ENTERING, ExitReason.NONE, 0L),
+                                Triple(Phase.ACTIVE, ExitReason.NONE, 0L),
+                                Triple(Phase.EXITING, ExitReason.NAVIGATION, 2L),
+                                Triple(Phase.HIDDEN, ExitReason.NONE, 0L),
+                                Triple(Phase.ENTERING, ExitReason.NONE, 0L),
+                                Triple(Phase.ACTIVE, ExitReason.NONE, 0L),
+                                Triple(Phase.EXITING, ExitReason.DISMISSED, 1L),
+                            )
+                            for ((phase, reason, expected) in visits) {
+                                var missingReasonRejected = false
+                                for ((path, value) in state.move(phase, exitReason = reason).filterKeys { it.startsWith("screen/") }) {
+                                    try {
+                                        assertTrue("The signed native default must receive $path", artboard.setDefaultViewModelValue(path, value))
+                                    } catch (error: Exception) {
+                                        if (hasReason || path != "screen/exitReason") throw error
+                                        missingReasonRejected = true
+                                    }
+                                }
+                                assertEquals(!hasReason, missingReasonRejected)
+                                player.stepTyped(elapsedSeconds = 0.0)
+                                val snapshot = checkNotNull(artboard.defaultViewModelSnapshot())
+                                assertEquals(if (hasReason) expected else null, snapshot.resolveEnumOrdinal("screen/exitReason"))
+                            }
+                            val snapshot = checkNotNull(artboard.defaultViewModelSnapshot())
+                            assertEquals(3L, snapshot.resolveEnumOrdinal("screen/phase"))
+                            assertEquals(ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.NumberValue(2.0),
+                                snapshot.resolveScalar(listOf("screen", "appearances")))
+                            assertEquals(ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.StringValue(""),
+                                snapshot.resolveScalar(listOf("screen", "transition")))
+                        } finally { player.close() }
+                    } finally { artboard.close() }
+                } finally { file.close() }
+            } finally { renderer.close() }
+        }
+    }
+
     @Test
     fun `a real native placement tap moves the signed purchase target`() {
         assertTrue("Native proof requires the configured host C API", !System.getenv("NUXIE_HOST_CAPI_LIB").isNullOrBlank())
