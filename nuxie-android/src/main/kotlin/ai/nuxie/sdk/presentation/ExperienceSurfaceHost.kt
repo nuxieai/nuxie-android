@@ -457,10 +457,11 @@ internal class ExperienceSurfaceHost(
         while (transitionWrites.isNotEmpty()) {
             val write = transitionWrites.removeFirst()
             if (!write.completion.isActive) continue
+            // Older screen writes must settle before the transition phase wins.
+            drainRuntimeWrites()
             runtimeValues.putAll(write.values)
             applyRuntimeValues(runtimeValues)
             runtimeValuesPending = false
-            drainRuntimeWrites()
             presentedTransitionWrite = write
             return
         }
