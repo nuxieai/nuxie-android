@@ -13,7 +13,6 @@ internal enum class JourneyActionType(val wireValue: String) {
     WAIT_UNTIL("wait_until"),
     NAVIGATE("navigate"),
     BACK("back"),
-    VIDEO("video"),
     PURCHASE("purchase"),
     RESTORE("restore"),
     REQUEST_NOTIFICATIONS("request_notifications"),
@@ -40,7 +39,6 @@ internal enum class JourneyActionType(val wireValue: String) {
         private val PRESENTATION_OWNED = setOf(
             NAVIGATE,
             BACK,
-            VIDEO,
             PURCHASE,
             RESTORE,
             REQUEST_NOTIFICATIONS,

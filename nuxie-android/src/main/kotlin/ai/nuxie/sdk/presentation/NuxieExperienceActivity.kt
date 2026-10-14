@@ -188,8 +188,6 @@ internal class NuxieExperienceActivity : Activity() {
             mounted?.surface?.updateRuntimeValues(values)
         }
         override fun purchaseActivity(): Activity = this@NuxieExperienceActivity
-        override suspend fun applyVideoCommand(action: ai.nuxie.sdk.experiences.JourneyVideoAction): Boolean =
-            withContext(Dispatchers.Main.immediate) { mounted?.surface?.applyVideoCommand(action) ?: false }
         override suspend fun resolveJourneyPermission(request: JourneyPermissionRequest): Boolean =
             this@NuxieExperienceActivity.resolveJourneyPermission(request)
 

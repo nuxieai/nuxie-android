@@ -38,7 +38,7 @@ class ConfiguredImportSmokeTest {
             try {
                 val file = checkNotNull(runtime.importFile(renderer, bytes, catalog, videoEnabled = true))
                 try {
-                    val artboard = checkNotNull(file.newArtboard("Video Frame"))
+                    val artboard = checkNotNull(file.newArtboard("Video Frame")).apply { bindDefaultViewModel("screen") }
                     try {
                         val player = checkNotNull(artboard.newPlayer())
                         try {
@@ -66,7 +66,7 @@ class ConfiguredImportSmokeTest {
             val file = checkNotNull(runtime.importFile(renderer, bytes, catalog, videoEnabled = true))
             try {
                 for (authoredPause in listOf(false, true)) {
-                    val artboard = checkNotNull(file.newArtboard("Video Frame"))
+                    val artboard = checkNotNull(file.newArtboard("Video Frame")).apply { bindDefaultViewModel("screen") }
                     try {
                         val player = checkNotNull(artboard.newPlayer())
                         try {
@@ -74,7 +74,7 @@ class ConfiguredImportSmokeTest {
                             assertTrue(player.videoStep(video.componentId, 1, video.generation, 2.022)
                                 .any { it.kind == 0 })
                             player.videoStep(video.componentId, 2, video.generation)
-                            if (authoredPause) player.videoCommand(video.componentId, 1)
+                            if (authoredPause) setVideoValue(artboard, player, "paused", NuxieViewModelScalarValue.BooleanValue(true))
                             val actions = mutableListOf<NuxieVideoAction>()
                             // MediaPlayer has paused on loss; gain arrived before the next host poll.
                             assertFalse(player.reconcileVideoInterruption(video,
@@ -121,7 +121,7 @@ class ConfiguredImportSmokeTest {
     }
 
     @Test
-    fun videoCommandsAndDecoderActionsCrossJni() {
+    fun boundVideoPropertiesAndDecoderActionsCrossJni() {
         val bytes = InstrumentationRegistry.getInstrumentation().context.assets
             .open("video/greeting.nux").use { it.readBytes() }
         val runtime = NuxieRuntime.shared
@@ -130,7 +130,7 @@ class ConfiguredImportSmokeTest {
         try {
             val file = checkNotNull(runtime.importFile(renderer, bytes, catalog, videoEnabled = true))
             try {
-                val artboard = checkNotNull(file.newArtboard("Video Frame"))
+                val artboard = checkNotNull(file.newArtboard("Video Frame")).apply { bindDefaultViewModel("screen") }
                 try {
                     val player = checkNotNull(artboard.newPlayer())
                     try {
@@ -167,6 +167,19 @@ class ConfiguredImportSmokeTest {
                         assertTrue(NuxieRuntimeBridge.nativeVideoSetCaptions(player.requireHandle(), video.componentId,
                             "en".toByteArray(), doubleArrayOf(0.0, 1.0), intArrayOf(4), "bad".toByteArray()) != 0)
                         assertEquals("Hello 👋", player.videoCaption(video.componentId).text)
+                        fun boundActions(path: String, value: NuxieViewModelScalarValue): List<NuxieVideoAction> {
+                            setVideoValue(artboard, player, path, value)
+                            val current = player.videos().single()
+                            return player.videoStep(current.componentId, 0, current.generation)
+                        }
+                        assertTrue(boundActions("muted", NuxieViewModelScalarValue.BooleanValue(true))
+                            .any { it.kind == 4 && it.value == 0.0 })
+                        boundActions("volume", NuxieViewModelScalarValue.NumberValue(0.25))
+                        assertTrue(boundActions("muted", NuxieViewModelScalarValue.BooleanValue(false))
+                            .any { it.kind == 4 && it.value == 0.25 })
+                        assertTrue(boundActions("playback-rate", NuxieViewModelScalarValue.NumberValue(1.5))
+                            .any { it.kind == 3 && it.value == 1.5 })
+                        boundActions("playback-rate", NuxieViewModelScalarValue.NumberValue(1.0))
                         val redBytes = pixels(true)
                         player.videoPresent(renderer, video.componentId, NuxieVideoFrame(video.generation, 0.0, 64, 32, redBytes))
                         redBytes.fill(0)
@@ -182,11 +195,11 @@ class ConfiguredImportSmokeTest {
                             }
                         } finally { foreignRenderer.close() }
 
-                        player.videoCommand(video.componentId, 1)
+                        setVideoValue(artboard, player, "paused", NuxieViewModelScalarValue.BooleanValue(true))
                         player.videoStep(video.componentId, 0, video.generation)
                         assertEquals(false, player.videos().single().wantsPlay)
                         assertEquals(3, player.videos().single().state)
-                        player.videoCommand(video.componentId, 2, 1.0)
+                        setVideoValue(artboard, player, "current-time", NuxieViewModelScalarValue.NumberValue(1.0))
                         val seek = player.videoStep(video.componentId, 0, video.generation).single { it.kind == 2 }
                         assertEquals(1.0, seek.value, 0.001)
                         assertTrue(seek.generation > video.generation)
@@ -197,6 +210,18 @@ class ConfiguredImportSmokeTest {
                         assertEquals("Welcome", player.videoCaption(video.componentId).text)
                         player.videoSetCaptions(video.componentId, "", emptyList())
                         assertEquals("", player.videoCaption(video.componentId).text)
+                        // At source end, the bound loop value chooses end or restart.
+                        boundActions("loop", NuxieViewModelScalarValue.BooleanValue(false))
+                        var current = player.videos().single()
+                        player.videoStep(current.componentId, 3, current.generation)
+                        assertEquals(6, player.videos().single().state)
+                        boundActions("paused", NuxieViewModelScalarValue.BooleanValue(false))
+                        boundActions("loop", NuxieViewModelScalarValue.BooleanValue(true))
+                        current = player.videos().single()
+                        player.videoStep(current.componentId, 1, current.generation, 2.022)
+                        val loopActions = player.videoStep(current.componentId, 3, current.generation)
+                        assertTrue(loopActions.any { it.kind == 2 && it.value == 0.0 })
+
                         player.videoPresent(renderer, video.componentId, NuxieVideoFrame(video.generation, 0.0, 64, 32, pixels(true)))
                         assertVideoColor(false)
 
@@ -244,12 +269,12 @@ class ConfiguredImportSmokeTest {
                 val targets = ai.nuxie.sdk.experiences.JourneyRenderSchema.videoElements(
                     kotlinx.serialization.json.JsonObject(inventory + ("renderer" to kotlinx.serialization.json.JsonPrimitive("nux"))))
                 repeat(2) { index ->
-                    val artboard = checkNotNull(file.newArtboard("Video Frame")).also { artboards.add(it) }
+                    val artboard = checkNotNull(file.newArtboard("Video Frame")).apply { bindDefaultViewModel("screen") }.also { artboards.add(it) }
                     val player = checkNotNull(artboard.newPlayer()).also { players.add(it) }
                     val video = player.videos().single()
                     // One audible greeting plus one motion background. Two
                     // exclusive audio owners intentionally compete for focus.
-                    if (index == 1) player.videoCommand(video.componentId, 5, 1.0)
+                    if (index == 1) setVideoValue(artboard, player, "muted", NuxieViewModelScalarValue.BooleanValue(true))
                     playbacks.add(ExperienceVideoPlayback(instrumentation.targetContext, player,
                         listOf(ai.nuxie.sdk.experiences.ExperienceVideoAssetBinding(0, video.assetId,
                             video.sourceKey, local, true,
@@ -309,21 +334,25 @@ class ConfiguredImportSmokeTest {
         } finally { renderer.close(); local.delete() }
     }
 
-    private fun verifyDecodedVideo(frenchCaptions: Boolean, measurement: VideoMeasurement? = null, avClockMeasurement: Boolean = false) {
+    @Test fun boundEndpointSeekPresentsTheFinalDecodedImage() {
+        verifyDecodedVideo(false, endpointSeek = true)
+    }
+
+    private fun verifyDecodedVideo(frenchCaptions: Boolean, measurement: VideoMeasurement? = null, avClockMeasurement: Boolean = false, endpointSeek: Boolean = false) {
         val preparationStarted = System.nanoTime()
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val local = java.io.File.createTempFile("video-decoder-", ".mp4", instrumentation.targetContext.cacheDir)
-        instrumentation.context.assets.open("video/" + (measurement?.file ?: if (frenchCaptions) "multilingual.mp4" else "captions.mp4")).use { input ->
+        instrumentation.context.assets.open("video/" + (measurement?.file ?: if (endpointSeek) "endpoint-low-fps.mp4" else if (frenchCaptions) "multilingual.mp4" else "captions.mp4")).use { input ->
             local.outputStream().use { input.copyTo(it) }
         }
-        val bytes = instrumentation.context.assets.open("video/greeting.nux").use { it.readBytes() }
+        val bytes = instrumentation.context.assets.open("video/${if (endpointSeek) "endpoint" else "greeting"}.nux").use { it.readBytes() }
         val runtime = NuxieRuntime.shared
         assertTrue(runtime.isAvailable)
         val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(320, 640))
         try {
             val file = checkNotNull(runtime.importFile(renderer, bytes, checkNotNull(runtime.inspectFileAssets(bytes)), videoEnabled = true))
             try {
-                val artboard = checkNotNull(file.newArtboard("Video Frame"))
+                val artboard = checkNotNull(file.newArtboard("Video Frame")).apply { bindDefaultViewModel("screen") }
                 try {
                     val player = checkNotNull(artboard.newPlayer())
                     try {
@@ -402,6 +431,25 @@ class ConfiguredImportSmokeTest {
                                 }
                                 return color
                             }
+                            if (endpointSeek) {
+                                fun awaitColor(red: Boolean): Boolean {
+                                    val until = android.os.SystemClock.elapsedRealtime() + 10_000
+                                    while (android.os.SystemClock.elapsedRealtime() < until) {
+                                        player.step(0.0)
+                                        playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
+                                        if (renderedColor() == red) return true
+                                        Thread.sleep(16)
+                                    }
+                                    return false
+                                }
+                                assertTrue("Paused source starts with a decoded red image", awaitColor(true))
+                                val delivered = playback.deliveredFrames
+                                setVideoValue(artboard, player, "current-time", NuxieViewModelScalarValue.NumberValue(2.0))
+                                assertTrue("Seek to duration presents the final 1.9-second blue image", awaitColor(false))
+                                assertTrue("The seek delivers a new decoded image", playback.deliveredFrames > delivered)
+                                assertFalse(player.videos().single().wantsPlay)
+                                return
+                            }
                             while (android.os.SystemClock.elapsedRealtime() < deadline &&
                                 (colors.size < 4 || avClockMeasurement && transitionWindows.size < 2)) {
                                 player.step(0.0)
@@ -441,9 +489,6 @@ class ConfiguredImportSmokeTest {
                             assertTrue(seenCaptions.containsAll(if (frenchCaptions) listOf("Bonjour 👋", "Bienvenue") else listOf("Hello 👋", "Welcome")))
                             if (frenchCaptions) assertFalse(seenCaptions.contains("Hello 👋"))
                             assertEquals("Decoded frames must repeat through native loop commands", listOf(true, false, true, false), colors.take(4))
-                            fun command(type: String, view: String = "clip-view", extra: String = "") = ai.nuxie.sdk.experiences.JourneyVideoAction.parse(
-                                kotlinx.serialization.json.Json.parseToJsonElement("""{"type":"video","target":{"artboardId":"screen","viewNodeId":"$view"},"command":{"type":"$type"$extra}}"""))
-                            assertThrows(IllegalArgumentException::class.java) { playback.apply(command("pause", "missing")) }
                             if (frenchCaptions) {
                                 // The fixture has a deliberate 0.9–1.0s cue gap. Reach an
                                 // active cue before freezing playback for language replacement.
@@ -456,14 +501,14 @@ class ConfiguredImportSmokeTest {
                                 }
                                 assertTrue(player.videoCaption(initial.componentId).text.isNotEmpty())
                             }
-                            playback.apply(command("pause"))
+                            setVideoValue(artboard, player, "paused", NuxieViewModelScalarValue.BooleanValue(true))
                             playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
                             assertEquals(false, player.videos().single().wantsPlay)
                             if (avClockMeasurement) {
                                 println("NUXIE_AV_CLOCK_LOOPS windows=$transitionWindows mismatches=$phaseMismatches firstVideoClock=$firstVideoClock")
                                 assertEquals(setOf(true, false), clockPhases)
                                 assertTrue("Both loops have independently bracketed phase transitions", transitionWindows.size >= 2)
-                                playback.apply(command("seek", extra = ",\"seconds\":0.25"))
+                                setVideoValue(artboard, player, "current-time", NuxieViewModelScalarValue.NumberValue(0.25))
                                 var settled = false
                                 val seekDeadline = android.os.SystemClock.elapsedRealtime() + 5_000
                                 while (!settled && android.os.SystemClock.elapsedRealtime() < seekDeadline) {
@@ -477,7 +522,7 @@ class ConfiguredImportSmokeTest {
                                 assertTrue("Paused seek restores the red frame at the media clock", settled)
                                 lastRedClock = null
                                 previousClock = null
-                                playback.apply(command("play"))
+                                setVideoValue(artboard, player, "paused", NuxieViewModelScalarValue.BooleanValue(false))
                                 var resumed = false
                                 val resumeDeadline = android.os.SystemClock.elapsedRealtime() + 5_000
                                 while (!resumed && android.os.SystemClock.elapsedRealtime() < resumeDeadline) {
@@ -499,7 +544,7 @@ class ConfiguredImportSmokeTest {
                                     })).put("physicalSpeakerLatencyMeasured", false)
                                     .put("phaseMismatches", org.json.JSONArray(phaseMismatches)))
                                 assertTrue("Composed phases outside fixture boundary exclusion: $phaseMismatches", phaseMismatches.isEmpty())
-                                playback.apply(command("pause"))
+                                setVideoValue(artboard, player, "paused", NuxieViewModelScalarValue.BooleanValue(true))
                                 playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
                             }
                             if (frenchCaptions) {
@@ -528,7 +573,7 @@ class ConfiguredImportSmokeTest {
                             assertTrue(player.videos().single().generation > retired.generation)
                             assertEquals(false, player.videos().single().wantsPlay)
                             playback.setVisible(false)
-                            playback.apply(command("play"))
+                            setVideoValue(artboard, player, "paused", NuxieViewModelScalarValue.BooleanValue(false))
                             playback.advance(renderer, System.nanoTime() / 1_000_000_000.0)
                             assertTrue(player.videos().single().wantsPlay)
                             assertTrue(player.videos().single().state != 2)

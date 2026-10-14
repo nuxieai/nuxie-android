@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.NuxieViewModelScalarValue
 import ai.nuxie.sdk.runtime.NuxieRuntime
 import ai.nuxie.sdk.runtime.ExperienceVideoDecoderPool
 import ai.nuxie.sdk.runtime.NuxieVideoDecoderBudget
@@ -18,31 +19,29 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.serialization.json.*
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 import org.junit.Assert.*
 import org.junit.Test
 
 class PublishedVideoDeviceTest {
     @Test
     fun mountedPublishedVideoPresentsPixelsCaptionsAndRetiresThemWhenHidden() {
-        verifyPublishedVideo("greeting", "clip-view", 1, 100, 80)
+        verifyPublishedVideo("greeting", 1, 100, 80)
     }
 
     @Test
-    fun mountedListVideosPresentAndAcceptJourneyCommands() {
-        verifyPublishedVideo("list", "item-card", 2, 20, 30)
+    fun mountedListVideosPresentAndAcceptBoundValues() {
+        verifyPublishedVideo("list", 2, 20, 30)
     }
 
     @Test fun firstPresentationWaitsForDecodedVideo() {
-        verifyPublishedVideo("waiting", "clip-view", 1, 100, 80)
+        verifyPublishedVideo("waiting", 1, 100, 80)
     }
 
     @Test fun mountedVideoRelinquishesSharedCapacityAndResumes() {
-        verifyPublishedVideo("greeting", "clip-view", 1, 100, 80, sharedCapacity = true)
+        verifyPublishedVideo("greeting", 1, 100, 80, sharedCapacity = true)
     }
 
-    private fun verifyPublishedVideo(sceneName: String, viewNodeId: String, expectedOwners: Int,
+    private fun verifyPublishedVideo(sceneName: String, expectedOwners: Int,
         sampleX: Int, sampleY: Int, sharedCapacity: Boolean = false) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         assertTrue(NuxieRuntime.shared.isAvailable)
@@ -67,7 +66,7 @@ class PublishedVideoDeviceTest {
         val descriptor = buildJsonObject {
             put("render", JsonObject(inventory + mapOf("renderer" to JsonPrimitive("nux"), "assets" to JsonArray(listOf(asset)))))
             put("leg", instrumentation.context.assets.open("video/$sceneName-journey.json").bufferedReader().use {
-                Json.parseToJsonElement(it.readText())
+                videoLegWithBoundValues(Json.parseToJsonElement(it.readText()).jsonObject)
             })
         }
         val screen = inventory.getValue("screens").jsonArray.single().jsonObject
@@ -185,11 +184,11 @@ class PublishedVideoDeviceTest {
             assertTrue("Accessibility tree captions: $accessibleCaptions", accessibleCaptions.any { it == "Hello 👋" || it == "Welcome" })
             assertTrue("Screenshot captured", screenshotSaved)
             assertTrue("Caption layout must be measured", layoutChecks > 0)
-            fun command(type: String, extra: String = "", view: String = viewNodeId): Boolean = runBlocking {
-                withTimeout(5_000) {
-                    mounted.surface.applyVideoCommand(ai.nuxie.sdk.experiences.JourneyVideoAction.parse(
-                        Json.parseToJsonElement("""{"type":"video","target":{"artboardId":"screen","viewNodeId":"$view"},"command":{"type":"$type"$extra}}""")))
-                }
+            fun setBoolean(path: String, value: Boolean) {
+                mounted.surface.updateRuntimeValues(mapOf(path to NuxieViewModelScalarValue.BooleanValue(value)))
+            }
+            fun setNumber(path: String, value: Double) {
+                mounted.surface.updateRuntimeValues(mapOf(path to NuxieViewModelScalarValue.NumberValue(value)))
             }
             fun pixelMatches(expectRed: Boolean = true): Boolean {
                 var matches = false
@@ -229,9 +228,8 @@ class PublishedVideoDeviceTest {
                 }
                 assertTrue("$label must retain ${if (red) "red" else "blue"}; elapsedMs=${SystemClock.elapsedRealtime() - started}", stable)
             }
-            assertFalse("Unknown targets must fail without affecting playback", command("pause", view = "missing"))
-            assertTrue("Pause must acknowledge native application", command("pause"))
-            assertTrue("Seek must acknowledge native application", command("seek", ",\"seconds\":0.1"))
+            setBoolean("paused", true)
+            setNumber("current-time", 0.1)
             awaitStablePausedFrame(true, "Initial paused seek")
             Thread.sleep(1_200)
             assertTrue("Paused video must retain its frame", pixelMatches())
@@ -241,10 +239,10 @@ class PublishedVideoDeviceTest {
             repeat(if (sharedCapacity) 0 else seekIterations) { index ->
                 val red = index % 2 != 0
                 val seconds = if (red) 0.1 else 1.2
-                assertTrue(command("seek", ",\"seconds\":$seconds"))
+                setNumber("current-time", seconds)
                 awaitStablePausedFrame(red, "Paused seek $index")
             }
-            assertTrue("Play must acknowledge native application", command("play"))
+            setBoolean("paused", false)
             if (sharedCapacity) {
                 val otherOwner = UUID.randomUUID()
                 val demand = listOf(NuxieVideoDecoderRequest(id = 100, pixelsPerSecond = 64L * 32 * 31,
@@ -321,8 +319,8 @@ class PublishedVideoDeviceTest {
                     Thread.sleep(30)
                 }
                 assertTrue("Shown screen reacquires a decoder and resumes actual video", red && blue)
-                assertTrue(command("pause"))
-                assertTrue(command("seek", ",\"seconds\":1.2"))
+                setBoolean("paused", true)
+                setNumber("current-time", 1.2)
                 awaitStablePausedFrame(false, "Paused frame before hiding")
                 instrumentation.runOnMainSync { mounted.setVisible(false) }
                 Thread.sleep(250)
