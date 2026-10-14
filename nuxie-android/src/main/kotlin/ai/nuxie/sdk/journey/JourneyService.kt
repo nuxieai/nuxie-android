@@ -2779,6 +2779,19 @@ internal class JourneyService(
                                 }
                                 is JourneyPresentationActionResult.Advanced -> {
                                     pendingPresentationPurchasePlacements.remove(run.id)
+                                    if (actionType.isCommerce) {
+                                        val step = leg.getValue("steps").jsonArray.map(JsonElement::jsonObject)
+                                            .first { it.text("id") == result.stepId }
+                                        val nextStepId = (step["outlets"] as? JsonObject)?.text(presentationResult.outlet)
+                                        val settled = publishJournalIfCurrent(executionToken, identityScope) {
+                                            target.settlePresentationCommerce(run.id, result.stepId, effectId, nextStepId)
+                                        } ?: return
+                                        if (nextStepId != null) {
+                                            execute(initial = settled, release = release, executionToken = executionToken,
+                                                signal = JourneyControlExecutor.Signal(), initialCheckpoint = null, target = target)
+                                        }
+                                        return
+                                    }
                                     JourneyDispatchResult.Outlet(presentationResult.outlet)
                                 }
                                 is JourneyPresentationActionResult.PermissionResolved -> {
