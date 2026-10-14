@@ -444,7 +444,8 @@ class ConfiguredImportSmokeTest {
                                     }
                                     return false
                                 }
-                                assertTrue("Paused source starts with a decoded red image", awaitColor(true))
+                                setVideoValue(artboard, player, "current-time", NuxieViewModelScalarValue.NumberValue(0.1))
+                                assertTrue("Bound seek to 0.1 presents a decoded red image", awaitColor(true))
                                 val delivered = playback.deliveredFrames
                                 setVideoValue(artboard, player, "current-time", NuxieViewModelScalarValue.NumberValue(2.0))
                                 assertTrue("Seek to duration presents the final 1.9-second blue image", awaitColor(false))
