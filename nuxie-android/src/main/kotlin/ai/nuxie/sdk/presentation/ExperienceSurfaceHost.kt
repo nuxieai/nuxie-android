@@ -6,7 +6,6 @@ import ai.nuxie.sdk.runtime.NuxieFocusState
 import ai.nuxie.sdk.runtime.ExperienceVideoPlayback
 import ai.nuxie.sdk.experiences.ExperienceVideoAssetBinding
 import ai.nuxie.sdk.experiences.ExperienceVideoElement
-import ai.nuxie.sdk.experiences.JourneyVideoAction
 import kotlinx.coroutines.CompletableDeferred
 import ai.nuxie.sdk.experiences.ExperienceAssetImportBuilder
 import ai.nuxie.sdk.experiences.ExperienceViewModelBinding
@@ -109,31 +108,6 @@ internal class ExperienceSurfaceHost(
     private var window: NuxieRuntimeWindow? = null
     private var player: NuxieRuntimePlayer? = null
     private var videoPlayback: ExperienceVideoPlayback? = null
-    private data class VideoCommand(val action: JourneyVideoAction, val generation: Long, val result: CompletableDeferred<Boolean>)
-    private val videoCommands = ArrayDeque<VideoCommand>()
-
-    suspend fun applyVideoCommand(action: JourneyVideoAction): Boolean {
-        val result = CompletableDeferred<Boolean>()
-        val generation = frameGeneration.get()
-        if (!lane.enqueue {
-            if (released.get() || failureReported.get() || videoCommands.size >= 64) result.complete(false)
-            else {
-                videoCommands.addLast(VideoCommand(action, generation, result))
-                drainVideoCommands()
-            }
-        }) return false
-        return try { result.await() } finally { result.cancel() }
-    }
-
-    private fun drainVideoCommands() {
-        if (pendingPresentation) return
-        while (videoCommands.isNotEmpty()) {
-            val command = videoCommands.removeFirst()
-            val applied = command.result.isActive && !released.get() && !failureReported.get() && command.generation == frameGeneration.get() &&
-                runCatching { checkNotNull(videoPlayback).apply(command.action) }.isSuccess
-            command.result.complete(applied)
-        }
-    }
     private var file: NuxieRuntimeFile? = null
     private var artboard: NuxieRuntimeArtboard? = null
     private var viewModelState: NuxieRuntimeViewModelState? = null
@@ -1137,7 +1111,6 @@ internal class ExperienceSurfaceHost(
                 }
                 player?.let(::applyLayoutSize)
                 if (layout == null) videoPlayback?.setViewport(ai.nuxie.sdk.runtime.VideoViewport(0f, 0f, 0f, 0f))
-                drainVideoCommands()
             }
         }
     }
@@ -1166,7 +1139,6 @@ internal class ExperienceSurfaceHost(
                     window = null
                 }
                 runValues?.setPresentationPending(saveFrameOwner, false)
-                drainVideoCommands()
             } finally {
                 releaseTexture()
             }
@@ -1403,12 +1375,10 @@ internal class ExperienceSurfaceHost(
                     presentedTransitionWrite = null
                     drainTextWrites()
                     drainSemanticAction()
-                    drainVideoCommands()
                 }
             } finally {
                 runValues?.setPresentationPending(saveFrameOwner, pendingPresentation)
                 framePending.set(false)
-                drainVideoCommands()
             }
         }
         if (!accepted) framePending.set(false)
@@ -1479,7 +1449,6 @@ internal class ExperienceSurfaceHost(
             renderer = null
             unpublishedSteps.clear()
             pendingPresentation = false
-            drainVideoCommands()
             submittedSnapshot = null
             submittedCaptions = null
             closeHandles.forEach { close ->
@@ -1504,7 +1473,6 @@ internal class ExperienceSurfaceHost(
         captionPublication.incrementAndGet()
         lane.enqueue {
             cancelTransitionWrites()
-            while (videoCommands.isNotEmpty()) videoCommands.removeFirst().result.complete(false)
             videoPlayback?.setVisible(false)
         }
         mainHandler.post { listener?.onVideoCaptions(emptyMap()) }

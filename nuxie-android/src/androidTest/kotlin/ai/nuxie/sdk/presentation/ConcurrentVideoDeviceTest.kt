@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.runtime.ExperienceVideoDecoderPool
+import ai.nuxie.sdk.runtime.NuxieViewModelScalarValue
 import ai.nuxie.sdk.runtime.NuxieRuntime
 import android.content.Intent
 import android.graphics.Color
@@ -17,8 +18,6 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.serialization.json.*
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -48,7 +47,7 @@ class ConcurrentVideoDeviceTest {
         val descriptor = buildJsonObject {
             put("render", JsonObject(inventory + mapOf("renderer" to JsonPrimitive("nux"), "assets" to JsonArray(listOf(asset)))))
             put("leg", instrumentation.context.assets.open("video/greeting-journey.json").bufferedReader().use {
-                Json.parseToJsonElement(it.readText())
+                videoLegWithBoundValues(Json.parseToJsonElement(it.readText()).jsonObject)
             })
         }
         val prepared = PreparedPresentation(scene, "Video Frame", Color.BLACK, PresentationShell.FullScreen,
@@ -75,13 +74,10 @@ class ConcurrentVideoDeviceTest {
             }
             assertTrue("Mounted lane presents its scene", first.await(15, TimeUnit.SECONDS))
             // Motion backgrounds are muted; audible greetings would compete for audio focus.
-            runBlocking {
-                for (command in listOf("{\"type\":\"mute\",\"muted\":true}", "{\"type\":\"play\"}")) {
-                    assertTrue(withTimeout(5_000) { screens.last().surface.applyVideoCommand(
-                        ai.nuxie.sdk.experiences.JourneyVideoAction.parse(Json.parseToJsonElement(
-                            """{"type":"video","target":{"artboardId":"screen","viewNodeId":"clip-view"},"command":$command}"""))) })
-                }
-            }
+            screens.last().surface.updateRuntimeValues(mapOf(
+                "muted" to NuxieViewModelScalarValue.BooleanValue(true),
+                "paused" to NuxieViewModelScalarValue.BooleanValue(false),
+            ))
         }
         fun colors(): List<Boolean?> {
             failure.get()?.let { throw AssertionError("Concurrent screen failed", it) }
@@ -129,11 +125,8 @@ class ConcurrentVideoDeviceTest {
                 repeat(10) { cycle ->
                     mount()
                     awaitPhases(setOf(0))
-                    runBlocking {
-                        assertTrue(withTimeout(5_000) { screens.single().surface.applyVideoCommand(
-                            ai.nuxie.sdk.experiences.JourneyVideoAction.parse(Json.parseToJsonElement(
-                                """{"type":"video","target":{"artboardId":"screen","viewNodeId":"clip-view"},"command":{"type":"pause"}}"""))) })
-                    }
+                    screens.single().surface.updateRuntimeValues(mapOf(
+                        "paused" to NuxieViewModelScalarValue.BooleanValue(true)))
                     val closed = CountDownLatch(1)
                     instrumentation.runOnMainSync {
                         retired += 0

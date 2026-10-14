@@ -337,23 +337,13 @@ class JourneyReleaseTest {
         }
     }
 
-    @Test fun `video commands match shared wire grammar and runtime operation codes`() {
+    @Test fun `Journey video steps are refused`() {
         val corpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
-            .resolve("journeys/planes/video-actions.json").readText()).jsonObject
+            .resolve("journeys/planes/unsupported-video-actions.json").readText()).jsonObject
         for (item in corpus.getValue("cases").jsonArray) {
             val case = item.jsonObject
-            val action = case.getValue("action")
-            if (case.getValue("valid").jsonPrimitive.boolean) {
-                JourneyGrammar.action(action, emptySet(), emptySet())
-                val parsed = JourneyVideoAction.parse(action)
-                assertEquals(case.getValue("kind").jsonPrimitive.int, parsed.commandKind)
-                assertEquals(case.getValue("value").jsonPrimitive.double, parsed.commandValue, 0.0)
-                assertEquals("frame", parsed.artboardId)
-                assertEquals("greeting", parsed.viewNodeId)
-            } else {
-                assertThrows(case.getValue("name").jsonPrimitive.content, Exception::class.java) {
-                    JourneyGrammar.action(action, emptySet(), emptySet())
-                }
+            assertThrows(case.getValue("name").jsonPrimitive.content, Exception::class.java) {
+                JourneyGrammar.action(case.getValue("action"), emptySet(), emptySet())
             }
         }
     }

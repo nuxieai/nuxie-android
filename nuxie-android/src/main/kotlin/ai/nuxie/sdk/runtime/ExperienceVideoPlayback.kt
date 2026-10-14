@@ -2,7 +2,6 @@ package ai.nuxie.sdk.runtime
 
 import ai.nuxie.sdk.experiences.ExperienceVideoAssetBinding
 import ai.nuxie.sdk.experiences.ExperienceVideoElement
-import ai.nuxie.sdk.experiences.JourneyVideoAction
 import android.content.Context
 import java.util.UUID
 
@@ -129,19 +128,6 @@ internal class ExperienceVideoPlayback(
         entry.decoder?.close()
         entry.decoder = null
         decoderPool?.release(decoderOwner, componentId)
-    }
-
-    fun apply(action: JourneyVideoAction) {
-        check(!closed)
-        val matches = targets.filter { it.artboardId == action.artboardId && it.viewNodeId == action.viewNodeId }
-        val live = player.videos().filter { occurrence ->
-            matches.any { target ->
-                target.sourceArtboardIndex == occurrence.sourceArtboardIndex &&
-                    target.componentId == occurrence.sourceComponentId
-            }
-        }
-        require(live.isNotEmpty()) { "Video target is not mounted in this screen" }
-        for (occurrence in live) player.videoCommand(occurrence.componentId, action.commandKind, action.commandValue)
     }
 
     /** Stop audio immediately even when a submitted Vulkan frame is still pending. */

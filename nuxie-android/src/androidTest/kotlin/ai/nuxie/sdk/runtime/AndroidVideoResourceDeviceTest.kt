@@ -191,14 +191,14 @@ class AndroidVideoResourceDeviceTest {
             val file = checkNotNull(runtime.importFile(renderer, bytes,
                 checkNotNull(runtime.inspectFileAssets(bytes)), videoEnabled = true))
             try {
-                val artboard = checkNotNull(file.newArtboard("Video Frame"))
+                val artboard = checkNotNull(file.newArtboard("Video Frame")).apply { bindDefaultViewModel("screen") }
                 try {
                     val player = checkNotNull(artboard.newPlayer())
                     try {
                         val video = player.videos().single()
                         player.videoStep(video.componentId, 1, video.generation, 2.022)
-                        player.videoCommand(video.componentId, 1)
-                        player.videoCommand(video.componentId, 2, 1.0)
+                        setVideoValue(artboard, player, "paused", NuxieViewModelScalarValue.BooleanValue(true))
+                        setVideoValue(artboard, player, "current-time", NuxieViewModelScalarValue.NumberValue(1.0))
                         player.videoStep(video.componentId, 0, video.generation)
                         val oldGeneration = player.videos().single().generation
                         val denied = player.videoReclaimDecoder(video.componentId, true)
