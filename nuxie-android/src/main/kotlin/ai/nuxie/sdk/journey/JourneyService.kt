@@ -941,6 +941,10 @@ internal class JourneyService(
                 target.settlePresentationCommerce(candidate.id, stepId, effectId, nextStepId)
             } ?: continue
             pendingPresentationPurchasePlacements.remove(candidate.id)
+            val errorCode = if (route.second == "failed") sequenceOf("error_code", "errorCode", "code", "error")
+                .mapNotNull(event.properties::text).firstOrNull(String::isNotEmpty).orEmpty() else ""
+            presenter?.projectCommerceOutcome(JourneyPresentationOwner(candidate.journeyId, target.distinctId),
+                route.first, route.second, errorCode, effectId)
             if (nextStepId != null) {
                 execute(initial = settled, release = release, executionToken = executionToken,
                     signal = JourneyControlExecutor.Signal(), initialCheckpoint = null, target = target)

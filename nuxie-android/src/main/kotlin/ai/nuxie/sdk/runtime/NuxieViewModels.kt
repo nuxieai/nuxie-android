@@ -231,6 +231,9 @@ internal class NuxieViewModelSnapshot private constructor(
     /** Resolve a `/`- or `.`-separated path through nested view-model references. */
     fun resolveString(path: String): String? = (resolveValue(path) as? Value.StringValue)?.value
 
+    /** Presence at the exact root-relative path, including declared enum fields. */
+    fun containsValue(path: String): Boolean = resolveValue(path) != null
+
     /** Resolve an authored scope without substituting another model or instance. */
     fun resolveScopedString(
         path: String,
