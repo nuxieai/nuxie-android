@@ -74,7 +74,11 @@ class ExperiencePresentationServiceTest {
         var requestedReason: CloseReason? = null
         var finished = false
         val screenValues = mutableMapOf<String, ai.nuxie.sdk.runtime.NuxieViewModelScalarValue>()
-        override suspend fun updateRuntimeValues(values: Map<String, ai.nuxie.sdk.runtime.NuxieViewModelScalarValue>) { screenValues.putAll(values) }
+        val valueWrites = mutableListOf<Map<String, ai.nuxie.sdk.runtime.NuxieViewModelScalarValue>>()
+        override suspend fun updateRuntimeValues(values: Map<String, ai.nuxie.sdk.runtime.NuxieViewModelScalarValue>) {
+            valueWrites += values.toMap()
+            screenValues.putAll(values)
+        }
 
         override fun requestCloseFromService(reason: CloseReason): Boolean {
             requestedReason = reason
@@ -139,12 +143,95 @@ class ExperiencePresentationServiceTest {
         val host = AttachedHost()
         assertTrue(PresentationRegistry.attach(launched.single(), host))
         val owner = JourneyPresentationOwner("journey-1", "customer-1")
+        reportCommerceSnapshot(launched.single())
         val action = Json.parseToJsonElement("""{"type":"purchase","placementId":""}""").jsonObject
         assertEquals(JourneyPresentationActionResult.Advanced(expected.getValue("outlet").jsonPrimitive.content), service.dispatchJourneyAction(owner, action, "buy-no-selection"))
         assertEquals(ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.StringValue(purchase.getValue("status").jsonPrimitive.content), host.screenValues["paywall/purchase/status"])
         assertEquals(ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.StringValue(purchase.getValue("errorCode").jsonPrimitive.content), host.screenValues["paywall/purchase/errorCode"])
         assertTrue(service.ownsJourney(owner))
         PresentationRegistry.detach(launched.single(), host)
+        service.shutdownOwnedBy("customer-1")
+    }
+
+    private fun reportCommerceSnapshot(id: String) {
+        val values = listOf(
+            NativeViewModelSnapshotValue(1, 0, "paywall", NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue, byteArrayOf(), 2),
+            NativeViewModelSnapshotValue(2, 0, "purchase", NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue, byteArrayOf(), 3),
+            NativeViewModelSnapshotValue(2, 1, "restore", NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue, byteArrayOf(), 4),
+        ) + (3L..4L).flatMap { owner -> listOf(
+            NativeViewModelSnapshotValue(owner, 0, "status", NuxieViewModelPropertyKind.ENUM.nativeValue, byteArrayOf(), 0),
+            NativeViewModelSnapshotValue(owner, 1, "errorCode", NuxieViewModelPropertyKind.STRING.nativeValue, "prior-error".encodeToByteArray(), 0),
+            NativeViewModelSnapshotValue(owner, 2, "invocationId", NuxieViewModelPropertyKind.STRING.nativeValue, "prior-attempt".encodeToByteArray(), 0),
+        ) }
+        val snapshot = NuxieViewModelSnapshot.fromNative(NativeViewModelSnapshot(1,
+            arrayOf(NativeViewModelSnapshotInstance(1, 0), NativeViewModelSnapshotInstance(2, 1),
+                NativeViewModelSnapshotInstance(3, 2), NativeViewModelSnapshotInstance(4, 2)), values.toTypedArray()))
+        PresentationRegistry.reportRuntimeStep(id,
+            ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome(true, emptyList(), emptyList(), emptyList(), emptyList()), 1uL, snapshot)
+    }
+
+    @Test
+    fun `empty Buy clears previous feedback and ignores a later stale outcome`() = runTest {
+        val release = renderedJourneyRelease()
+        val launched = mutableListOf<String>()
+        val service = service(this, launch = launched::add)
+        val presentation = async {
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) }, onOutcome = {})
+        }
+        runCurrent()
+        val id = launched.single()
+        PresentationRegistry.reportFirstFrame(id)
+        presentation.await()
+        val host = AttachedHost()
+        assertTrue(PresentationRegistry.attach(id, host))
+        reportCommerceSnapshot(id)
+        val owner = JourneyPresentationOwner("journey-1", "customer-1")
+        val action = Json.parseToJsonElement("""{"type":"purchase","placementId":""}""").jsonObject
+        service.dispatchJourneyAction(owner, action, "attempt-1")
+        service.dispatchJourneyAction(owner, action, "attempt-2")
+        fun string(value: String) = ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.StringValue(value)
+        assertEquals(listOf("idle", "error", "idle", "error"), host.valueWrites.map { (it["paywall/purchase/status"] as ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.StringValue).value })
+        assertEquals(string(""), host.valueWrites[2]["paywall/purchase/errorCode"])
+        assertEquals(string("attempt-2"), host.screenValues["paywall/purchase/invocationId"])
+        val writesBeforeStale = host.valueWrites.size
+        service.projectJourneyCommerceOutcome(owner, ai.nuxie.sdk.journey.JourneyActionType.PURCHASE, "completed", "", "attempt-1")
+        assertEquals(writesBeforeStale, host.valueWrites.size)
+        PresentationRegistry.detach(id, host)
+        service.shutdownOwnedBy("customer-1")
+    }
+
+    @Test
+    fun `released screens without operation feedback remain supported`() = runTest {
+        val release = renderedJourneyRelease()
+        val launched = mutableListOf<String>()
+        val service = service(this, launch = launched::add)
+        val presentation = async {
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) }, onOutcome = {})
+        }
+        runCurrent()
+        val id = launched.single()
+        PresentationRegistry.reportFirstFrame(id)
+        presentation.await()
+        val host = AttachedHost()
+        assertTrue(PresentationRegistry.attach(id, host))
+        val owner = JourneyPresentationOwner("journey-1", "customer-1")
+        val legacy = NuxieViewModelSnapshot.fromNative(NativeViewModelSnapshot(1,
+            arrayOf(NativeViewModelSnapshotInstance(1, 0), NativeViewModelSnapshotInstance(3, 1)),
+            arrayOf(
+                NativeViewModelSnapshotValue(1, 0, "purchase", NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue, byteArrayOf(), 3),
+                NativeViewModelSnapshotValue(3, 0, "status", NuxieViewModelPropertyKind.ENUM.nativeValue, byteArrayOf(), 0),
+                NativeViewModelSnapshotValue(3, 1, "errorCode", NuxieViewModelPropertyKind.STRING.nativeValue, byteArrayOf(), 0),
+                NativeViewModelSnapshotValue(3, 2, "invocationId", NuxieViewModelPropertyKind.STRING.nativeValue, byteArrayOf(), 0),
+            )))
+        PresentationRegistry.reportRuntimeStep(id,
+            ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome(true, emptyList(), emptyList(), emptyList(), emptyList()), 1uL, legacy)
+        val action = Json.parseToJsonElement("""{"type":"purchase","placementId":""}""").jsonObject
+        assertEquals(JourneyPresentationActionResult.Advanced("failed"), service.dispatchJourneyAction(owner, action, "legacy-attempt"))
+        assertTrue(host.valueWrites.isEmpty())
+        assertTrue(service.ownsJourney(owner))
+        PresentationRegistry.detach(id, host)
         service.shutdownOwnedBy("customer-1")
     }
 

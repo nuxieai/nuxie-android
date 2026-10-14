@@ -84,6 +84,7 @@ internal class ExperienceMountedScreen(
 
     fun mount(): View {
         lifecycle.updateFontScale(activity.resources.configuration.fontScale)
+        surface.updateRuntimeValues(prepared.commerceValues.get())
         surface.updateRuntimeValues(if (lifecycle.phase == ExperienceScreenLifecycle.Phase.HIDDEN)
             lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING) else lifecycle.snapshot())
         reducedMotion = ExperienceReducedMotion(activity) { reduced ->

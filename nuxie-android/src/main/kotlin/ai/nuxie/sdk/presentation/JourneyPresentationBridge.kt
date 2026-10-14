@@ -160,6 +160,9 @@ internal interface JourneyPresenting {
             JourneyPresentationActionResult.Declined
         }
 
+    suspend fun projectCommerceOutcome(owner: JourneyPresentationOwner, type: JourneyActionType,
+        outlet: String, errorCode: String, effectId: String) = Unit
+
     fun cancelBackNavigation(owner: JourneyPresentationOwner) = Unit
 
     suspend fun shutdownPresentation(ownerDistinctId: String, journeyId: String) {

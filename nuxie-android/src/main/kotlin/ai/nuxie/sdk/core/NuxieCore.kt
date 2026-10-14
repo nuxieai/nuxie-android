@@ -402,6 +402,11 @@ internal class NuxieCore(
         ): JourneyPresentationActionResult =
             presentations.dispatchJourneyAction(owner, action, effectId)
 
+        override suspend fun projectCommerceOutcome(owner: JourneyPresentationOwner, type: ai.nuxie.sdk.journey.JourneyActionType,
+            outlet: String, errorCode: String, effectId: String) {
+            presentations.projectJourneyCommerceOutcome(owner, type, outlet, errorCode, effectId)
+        }
+
         override fun cancelBackNavigation(owner: JourneyPresentationOwner) {
             presentations.cancelBackNavigation(owner)
         }

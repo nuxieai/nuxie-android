@@ -92,6 +92,7 @@ internal data class PreparedPresentation(
     val transition: JsonObject? = null,
     val retainedViewModel: AtomicReference<NuxieViewModelSnapshot?> = AtomicReference(),
     val runValues: ExperienceRunValues? = null,
+    val commerceValues: AtomicReference<Map<String, ai.nuxie.sdk.runtime.NuxieViewModelScalarValue>> = AtomicReference(emptyMap()),
 )
 
 internal sealed interface PresentationShell {
@@ -655,6 +656,8 @@ internal class ExperiencePresentationService(
         var textInputsByScreen: MutableMap<String, ExperienceTextInputState> = mutableMapOf(),
         var viewModelsByScreen: MutableMap<String, AtomicReference<NuxieViewModelSnapshot?>> = mutableMapOf(),
         var commerce: JourneyCommerceSession? = null,
+        var commerceFeedback: JourneyCommerceFeedback = JourneyCommerceFeedback(),
+        var commerceValuesByScreen: MutableMap<String, AtomicReference<Map<String, ai.nuxie.sdk.runtime.NuxieViewModelScalarValue>>> = mutableMapOf(),
     )
 
     private data class NavigationDismissal(
@@ -1050,7 +1053,9 @@ internal class ExperiencePresentationService(
                     }.also { PresentationRegistry.endNavigationRecovery(existing.id, navigationRecoveryToken) }
                 }
                 val source = destination.source
-                val preparedContent = destination.content
+                val preparedContent = destination.content.copy(commerceValues =
+                    existing?.takeIf { it.acquired.identity == source.identity }?.journey?.commerceValuesByScreen
+                        ?.get(journey.screenId) ?: AtomicReference(emptyMap()))
                 val textInputState = preparedContent.textInputState
                 navigation = destination.navigation
                 journey.commerce = source.commerceSession
@@ -1061,7 +1066,11 @@ internal class ExperiencePresentationService(
                 }?.let {
                     journey.textInputsByScreen = it.journey.textInputsByScreen
                     journey.lifecycleByScreen = it.journey.lifecycleByScreen
-                    if (it.acquired.identity == source.identity) journey.viewModelsByScreen = it.journey.viewModelsByScreen
+                    if (it.acquired.identity == source.identity) {
+                        journey.viewModelsByScreen = it.journey.viewModelsByScreen
+                        journey.commerceFeedback = it.journey.commerceFeedback
+                        journey.commerceValuesByScreen = it.journey.commerceValuesByScreen
+                    }
                 }
                 val ref = ExperienceRef(source.identity.experienceId, source.identity.experienceVersionId, journeyId)
                 val pending = ActivePresentation(id = id, ref = ref, acquired = source.acquired,
@@ -1132,6 +1141,7 @@ internal class ExperiencePresentationService(
                         journey.textInputsByScreen[journey.screenId] = preparedContent.textInputState
                         journey.lifecycleByScreen[journey.screenId] = preparedContent.screenLifecycle
                         journey.viewModelsByScreen[journey.screenId] = preparedContent.retainedViewModel
+                        journey.commerceValuesByScreen[journey.screenId] = preparedContent.commerceValues
                         current = pending
                         try {
                             PresentationRegistry.register(
@@ -1312,15 +1322,13 @@ internal class ExperiencePresentationService(
             }
             JourneyActionType.BACK -> prepareBackNavigation(owner, active, action)
             JourneyActionType.PURCHASE -> {
+                writeCommerceFeedback(active, active.journey.commerceFeedback.begin(
+                    JourneyActionType.PURCHASE, active.journey.screenId, effectId))
                 val placementId = action.string("placementId")
                 if (placementId.isNullOrEmpty()) {
-                    val screen = PresentationRegistry.currentScreen(active.id)
-                        ?: return JourneyPresentationActionResult.NoPresentation
-                    screen.updateRuntimeValues(mapOf(
-                        "paywall/purchase/status" to ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.StringValue("error"),
-                        "paywall/purchase/errorCode" to ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.StringValue("failed"),
-                        "paywall/purchase/invocationId" to ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.StringValue(effectId),
-                    ))
+                    if (PresentationRegistry.currentScreen(active.id) == null) return JourneyPresentationActionResult.NoPresentation
+                    writeCommerceFeedback(active, active.journey.commerceFeedback.outcome(
+                        JourneyActionType.PURCHASE, "failed", "failed", effectId))
                     return if (synchronized(stateLock) { current === active }) JourneyPresentationActionResult.Advanced("failed")
                     else JourneyPresentationActionResult.NoPresentation
                 }
@@ -1331,6 +1339,7 @@ internal class ExperiencePresentationService(
                 }
                 val activity = PresentationRegistry.currentScreen(active.id)?.purchaseActivity()
                     ?: return JourneyPresentationActionResult.NoPresentation
+                writeCommerceFeedback(active, active.journey.commerceFeedback.running(JourneyActionType.PURCHASE, effectId))
                 scope.launch {
                     session.purchase(
                         activity,
@@ -1343,6 +1352,9 @@ internal class ExperiencePresentationService(
             JourneyActionType.RESTORE -> {
                 val session = active.journey.commerce
                     ?: return JourneyPresentationActionResult.ProductsUnavailable
+                writeCommerceFeedback(active, active.journey.commerceFeedback.begin(
+                    JourneyActionType.RESTORE, active.journey.screenId, effectId))
+                writeCommerceFeedback(active, active.journey.commerceFeedback.running(JourneyActionType.RESTORE, effectId))
                 scope.launch {
                     session.restore(CommerceOutcomeCorrelation(effectId, owner.distinctId))
                 }
@@ -1376,6 +1388,30 @@ internal class ExperiencePresentationService(
                 action.string("reason")?.takeIf(String::isNotEmpty) ?: "completed",
             )
             else -> JourneyPresentationActionResult.Failed
+        }
+    }
+
+    suspend fun projectJourneyCommerceOutcome(owner: JourneyPresentationOwner, type: JourneyActionType,
+        outlet: String, errorCode: String, effectId: String) {
+        val active = synchronized(stateLock) { current?.takeIf { it.isOwnedBy(owner.journeyId, owner.distinctId) } } ?: return
+        writeCommerceFeedback(active, active.journey.commerceFeedback.outcome(type, outlet, errorCode, effectId))
+    }
+
+    private suspend fun writeCommerceFeedback(active: ActivePresentation, write: JourneyCommerceFeedback.Write?) {
+        if (write == null) return
+        val values = synchronized(stateLock) {
+            if (current !== active) return
+            val snapshot = if (write.screenId == active.journey.screenId) active.latestViewModelSnapshot.get()
+                ?: active.journey.viewModelsByScreen[write.screenId]?.get()
+                else active.journey.viewModelsByScreen[write.screenId]?.get()
+            // Released screens may omit these fields; never add them to another screen.
+            val declared = write.values.filterKeys { snapshot?.containsValue(it) == true }
+            active.journey.commerceValuesByScreen.getOrPut(write.screenId) { AtomicReference(emptyMap()) }
+                .updateAndGet { it + declared }
+            declared
+        }
+        if (write.screenId == active.journey.screenId && values.isNotEmpty()) {
+            PresentationRegistry.currentScreen(active.id)?.updateRuntimeValues(values)
         }
     }
 
