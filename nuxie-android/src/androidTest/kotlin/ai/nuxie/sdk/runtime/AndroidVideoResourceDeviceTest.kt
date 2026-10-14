@@ -191,7 +191,7 @@ class AndroidVideoResourceDeviceTest {
             val file = checkNotNull(runtime.importFile(renderer, bytes,
                 checkNotNull(runtime.inspectFileAssets(bytes)), videoEnabled = true))
             try {
-                val artboard = checkNotNull(file.newArtboard("Video Frame")).apply { bindDefaultViewModel("screen") }
+                val artboard = checkNotNull(file.newArtboard("Video Frame")).apply { bindDefaultViewModel("Runtime") }
                 try {
                     val player = checkNotNull(artboard.newPlayer())
                     try {

@@ -38,7 +38,7 @@ class ConfiguredImportSmokeTest {
             try {
                 val file = checkNotNull(runtime.importFile(renderer, bytes, catalog, videoEnabled = true))
                 try {
-                    val artboard = checkNotNull(file.newArtboard("Video Frame")).apply { bindDefaultViewModel("screen") }
+                    val artboard = checkNotNull(file.newArtboard("Video Frame")).apply { bindDefaultViewModel("Runtime") }
                     try {
                         val player = checkNotNull(artboard.newPlayer())
                         try {
@@ -66,7 +66,7 @@ class ConfiguredImportSmokeTest {
             val file = checkNotNull(runtime.importFile(renderer, bytes, catalog, videoEnabled = true))
             try {
                 for (authoredPause in listOf(false, true)) {
-                    val artboard = checkNotNull(file.newArtboard("Video Frame")).apply { bindDefaultViewModel("screen") }
+                    val artboard = checkNotNull(file.newArtboard("Video Frame")).apply { bindDefaultViewModel("Runtime") }
                     try {
                         val player = checkNotNull(artboard.newPlayer())
                         try {
@@ -125,12 +125,13 @@ class ConfiguredImportSmokeTest {
         val bytes = InstrumentationRegistry.getInstrumentation().context.assets
             .open("video/greeting.nux").use { it.readBytes() }
         val runtime = NuxieRuntime.shared
+        assertTrue("Engine library must load on the test device", runtime.isAvailable)
         val catalog = checkNotNull(runtime.inspectFileAssets(bytes))
         val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(320, 640))
         try {
             val file = checkNotNull(runtime.importFile(renderer, bytes, catalog, videoEnabled = true))
             try {
-                val artboard = checkNotNull(file.newArtboard("Video Frame")).apply { bindDefaultViewModel("screen") }
+                val artboard = checkNotNull(file.newArtboard("Video Frame")).apply { bindDefaultViewModel("Runtime") }
                 try {
                     val player = checkNotNull(artboard.newPlayer())
                     try {
@@ -269,7 +270,7 @@ class ConfiguredImportSmokeTest {
                 val targets = ai.nuxie.sdk.experiences.JourneyRenderSchema.videoElements(
                     kotlinx.serialization.json.JsonObject(inventory + ("renderer" to kotlinx.serialization.json.JsonPrimitive("nux"))))
                 repeat(2) { index ->
-                    val artboard = checkNotNull(file.newArtboard("Video Frame")).apply { bindDefaultViewModel("screen") }.also { artboards.add(it) }
+                    val artboard = checkNotNull(file.newArtboard("Video Frame")).apply { bindDefaultViewModel("Runtime") }.also { artboards.add(it) }
                     val player = checkNotNull(artboard.newPlayer()).also { players.add(it) }
                     val video = player.videos().single()
                     // One audible greeting plus one motion background. Two
@@ -352,7 +353,7 @@ class ConfiguredImportSmokeTest {
         try {
             val file = checkNotNull(runtime.importFile(renderer, bytes, checkNotNull(runtime.inspectFileAssets(bytes)), videoEnabled = true))
             try {
-                val artboard = checkNotNull(file.newArtboard("Video Frame")).apply { bindDefaultViewModel("screen") }
+                val artboard = checkNotNull(file.newArtboard("Video Frame")).apply { bindDefaultViewModel("Runtime") }
                 try {
                     val player = checkNotNull(artboard.newPlayer())
                     try {
@@ -363,7 +364,8 @@ class ConfiguredImportSmokeTest {
                             kotlinx.serialization.json.JsonObject(inventory + ("renderer" to kotlinx.serialization.json.JsonPrimitive("nux"))))
                         var slots = 1
                         val pool = ExperienceVideoDecoderPool { NuxieVideoDecoderBudget(slots, slots, 0, measurement?.let { it.width.toLong() * it.height * it.cadence } ?: 100_000, 0) }
-                        val tracks = mutableListOf(ai.nuxie.sdk.experiences.ExperienceVideoCaptionTrack(2, "eng"))
+                        val tracks = mutableListOf<ai.nuxie.sdk.experiences.ExperienceVideoCaptionTrack>()
+                        if (!endpointSeek) tracks.add(ai.nuxie.sdk.experiences.ExperienceVideoCaptionTrack(2, "eng"))
                         if (frenchCaptions) tracks.add(ai.nuxie.sdk.experiences.ExperienceVideoCaptionTrack(3, "fra"))
                         val playback = ExperienceVideoPlayback(instrumentation.targetContext, player,
                             listOf(ai.nuxie.sdk.experiences.ExperienceVideoAssetBinding(0, initial.assetId, initial.sourceKey, local, true,

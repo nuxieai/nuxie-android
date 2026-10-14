@@ -88,7 +88,7 @@
     "journeys/planes/text-input-navigation.json": "50164ac8db6b35f436a043b5d916533f96349a07f4821f65387d9d0a5a95a8c4",
     "journeys/planes/text-input-typography.json": "a9c6217a7eba1b0f8ee0f063fa3764880d0b6b0149160def566d5a1b331feae1",
     "journeys/planes/values.json": "e6f7b54cb33bb8d024638760c54221e858124affcbe182b4593924bfcca47bee",
-    "journeys/planes/video-admission.json": "1b00e4e1f58f9b75af3ac5bc7212541d620ca33ec8f7e28207c6ce8bcd442258",
+    "journeys/planes/video-admission.json": "19b83431097be7564edbcb3bb7a0996dccf03f999ea48c5c6ab21eeeaa683bf8",
     "journeys/rendered-custom-transition/assets/sha256/3b95bcece1f913d2c1196cff9474497a2f4c0aa1745b1cd241cde5dd2817c82d.png": "3b95bcece1f913d2c1196cff9474497a2f4c0aa1745b1cd241cde5dd2817c82d",
     "journeys/rendered-custom-transition/assets/sha256/4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf.ttf": "4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf",
     "journeys/rendered-custom-transition/provenance.json": "37738ec1bedfc4e36e4943aa0cab45074315a9ac1253702f66e82c47f8822b35",
@@ -817,6 +817,7 @@
     "video/waiting.nux": "422d4a00445197ca08846d7444ae305b84dec239",
     "video/list.nux": "422d4a00445197ca08846d7444ae305b84dec239",
     "video/endpoint.nux": "422d4a00445197ca08846d7444ae305b84dec239",
-    "video/endpoint-inventory.json": "422d4a00445197ca08846d7444ae305b84dec239"
+    "video/endpoint-inventory.json": "422d4a00445197ca08846d7444ae305b84dec239",
+    "journeys/planes/video-admission.json": "60aa89c18d0b754c816ea5ee9f7a994d707e5b0f"
   }
 }

@@ -66,7 +66,8 @@ class PublishedVideoDeviceTest {
         val descriptor = buildJsonObject {
             put("render", JsonObject(inventory + mapOf("renderer" to JsonPrimitive("nux"), "assets" to JsonArray(listOf(asset)))))
             put("leg", instrumentation.context.assets.open("video/$sceneName-journey.json").bufferedReader().use {
-                videoLegWithBoundValues(Json.parseToJsonElement(it.readText()).jsonObject)
+                videoLegWithBoundValues(Json.parseToJsonElement(it.readText()).jsonObject,
+                    if (sceneName == "list") "Root" else "Runtime")
             })
         }
         val screen = inventory.getValue("screens").jsonArray.single().jsonObject
