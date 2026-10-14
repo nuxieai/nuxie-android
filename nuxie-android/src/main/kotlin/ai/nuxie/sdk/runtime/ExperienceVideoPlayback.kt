@@ -114,6 +114,8 @@ internal class ExperienceVideoPlayback(
     private var closed = false
     var deliveredFrames = 0L
         private set
+    var lastDeliveredFrameSeconds: Double? = null
+        private set
     val activeDecoderCount: Int get() = entries.values.count { it.decoder != null }
 
     init {
@@ -322,6 +324,7 @@ internal class ExperienceVideoPlayback(
                         frame.cropRight, frame.cropBottom, frame.rotationDegrees, frame.displayWidth,
                         frame.displayHeight, frame.colorMatrix, frame.colorRange))
                     deliveredFrames++
+                    lastDeliveredFrameSeconds = frame.seconds
                 } finally {
                     frame.close()
                 }

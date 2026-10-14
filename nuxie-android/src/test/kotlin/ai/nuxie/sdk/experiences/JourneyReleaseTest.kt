@@ -342,7 +342,7 @@ class JourneyReleaseTest {
             .resolve("journeys/planes/unsupported-video-actions.json").readText()).jsonObject
         for (item in corpus.getValue("cases").jsonArray) {
             val case = item.jsonObject
-            assertThrows(case.getValue("name").jsonPrimitive.content, Exception::class.java) {
+            assertThrows(case.getValue("name").jsonPrimitive.content, JourneyReleaseAuthenticationException::class.java) {
                 JourneyGrammar.action(case.getValue("action"), emptySet(), emptySet())
             }
         }
