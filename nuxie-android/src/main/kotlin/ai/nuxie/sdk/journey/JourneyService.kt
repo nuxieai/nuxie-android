@@ -2586,7 +2586,9 @@ internal class JourneyService(
                         }
                         val presentation = presenter
                         val actionType = JourneyActionType.from(result.action)
-                        if (actionType == JourneyActionType.DISMISS &&
+                        val closesLayer = actionType == JourneyActionType.DISMISS && result.action.text("scope") != "all" &&
+                            presentation?.hasPresentedLayer(JourneyPresentationOwner(run.journeyId, target.distinctId)) == true
+                        if (actionType == JourneyActionType.DISMISS && !closesLayer &&
                             (run.pendingCommerce != null || presentation?.owns(JourneyPresentationOwner(run.journeyId, target.distinctId)) != true)) {
                             val outcome = result.action.text("reason")?.takeIf(String::isNotEmpty) ?: "completed"
                             if (run.pendingCommerce != null) closeWhileCommercePending(run, outcome)

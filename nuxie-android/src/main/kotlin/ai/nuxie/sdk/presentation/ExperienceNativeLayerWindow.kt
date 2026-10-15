@@ -113,8 +113,8 @@ internal class ExperienceNativeLayerWindow(
         }
     }
 
-    fun setInputEnabled(enabled: Boolean) {
-        inputEnabled = enabled && shell.dismissible
+    fun setInputEnabled(enabled: Boolean, allowDismissalDuringLoading: Boolean = false) {
+        inputEnabled = enabled && (shell.dismissible || allowDismissalDuringLoading)
         dialog.setCancelable(inputEnabled)
         dialog.setCanceledOnTouchOutside(inputEnabled && shell !is PresentationShell.FullScreen)
         (dialog as? BottomSheetDialog)?.behavior?.isDraggable = inputEnabled

@@ -131,6 +131,20 @@ class ExperienceNativeLayerWindowTest {
         } finally { activity.finish() }
     }
 
+    @Test fun `loading permits leaving a closedby none sheet before content is revealed`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        var closes = 0
+        val window = ExperienceNativeLayerWindow(activity, FrameLayout(activity),
+            PresentationShell.Sheet(PresentationShell.Sheet.Detent.LARGE, false)) { closes++ }
+        try {
+            window.setInputEnabled(true, allowDismissalDuringLoading = true)
+            window.show()
+            window.closeFromUser()
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(1, closes)
+        } finally { window.retire(); activity.finish() }
+    }
+
     @Test fun `packaged looks match the shared vector`() {
         val data = checkNotNull(javaClass.getResourceAsStream("presentation-looks.json")).use { it.readBytes() }
         assertArrayEquals(File("../fixtures/journeys/planes/presentation-looks.json").readBytes(), data)

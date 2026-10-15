@@ -12,7 +12,7 @@ References: [AndroidX Browser releases](https://developer.android.com/jetpack/an
 
 ## 2026-10-06: modal layers use Material bottom sheets
 
-Levi approved Material's bottom sheet in Q2 of brief 10, confirmed by `10-start.md`. The native sheet owns its slide, dimming, back handling and drag to close. Covered layers keep their mounted screen and disable input until revealed.
+Levi approved Material's bottom sheet in Q2 of brief 10, confirmed by `10-start.md`. The native sheet owns its slide, dimming, back handling and drag to close. Covered layers keep their mounted screen active and playing, and disable input until revealed. Authored dismiss closes the top layer after its exit completes; scope all closes the Experience. Android back uses the native window's close policy, including full-screen layers, and respects closedby none.
 
 Use the implementation-scoped `com.google.android.material:material:1.12.0` dependency. This is the explicit dependency decision required by `AGENTS.md`. Appearance uses Material's theme defaults; no custom corner, shadow or scrim values are introduced here.
 
