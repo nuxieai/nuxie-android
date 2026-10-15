@@ -1,0 +1,178 @@
+{
+  "compilerSource": "69790050f3fc53da4e890bcde7eb7b67c1149902",
+  "cleanParentHead": "69790050f3fc53da4e890bcde7eb7b67c1149902",
+  "source": "tests/fixtures/e2e-experience-files/presentation-sheets",
+  "sources": {
+    "tests/fixtures/e2e-experience-files/presentation-sheets/experience.json": {
+      "sha256": "0c27fbdf67ead572dbc7ca5929c12140611bfeef9b5569b1bc87263651234932",
+      "sizeBytes": 1233
+    },
+    "tests/fixtures/e2e-experience-files/presentation-sheets/screens/lesson/frame.json": {
+      "sha256": "7ea8c1740dbd076245100bf18c9b7dd69f6a2a6bb81e22a723906a209276d5a9",
+      "sizeBytes": 137
+    },
+    "tests/fixtures/e2e-experience-files/presentation-sheets/screens/lesson/index.html": {
+      "sha256": "19e602376a445f6270beefdd0e6440d2ade3007291d24b3f9bf8d42679e441fb",
+      "sizeBytes": 566
+    },
+    "tests/fixtures/e2e-experience-files/presentation-sheets/screens/lesson/style.css": {
+      "sha256": "cdaa93a0789bb98af34ac850eff1ae9f9b1598ab928d918ede774fd72b1aa20b",
+      "sizeBytes": 345
+    },
+    "tests/fixtures/e2e-experience-files/presentation-sheets/screens/offer/frame.json": {
+      "sha256": "e8f453a26863b3f81017f281752c901e2637c5354d660a42bf94ae7bc4169f2a",
+      "sizeBytes": 136
+    },
+    "tests/fixtures/e2e-experience-files/presentation-sheets/screens/offer/index.html": {
+      "sha256": "b23095e1b035b5c258c224d67c0b24e347d6c0468c0922549544a0894fc8c6e5",
+      "sizeBytes": 485
+    },
+    "tests/fixtures/e2e-experience-files/presentation-sheets/screens/offer/style.css": {
+      "sha256": "3c20d02e40cb4387a2403e28865bf44606ef727236712fcae1aad7b87dbac650",
+      "sizeBytes": 192
+    },
+    "tests/fixtures/e2e-experience-files/presentation-sheets/screens/saved/frame.json": {
+      "sha256": "6f2b76b136fadbc584dcf26d4e4c737616abeb42d31f651c517a44f081d6a698",
+      "sizeBytes": 136
+    },
+    "tests/fixtures/e2e-experience-files/presentation-sheets/screens/saved/index.html": {
+      "sha256": "e67d7587fa69d794a19de33f2133072eee42d48834a183c19f353fb92b22351e",
+      "sizeBytes": 324
+    },
+    "tests/fixtures/e2e-experience-files/presentation-sheets/screens/saved/style.css": {
+      "sha256": "c348d1a55120ee078d8daea985e0b5ee9860928c4dd09a5b2df0e164a0b0a8f3",
+      "sizeBytes": 78
+    },
+    "tests/fixtures/e2e-experience-files/presentation-sheets/styles/common.css": {
+      "sha256": "adf438ce267bafa336c84c4a6bbf234f85b5868ab26d0c77f85c86efe06bc318",
+      "sizeBytes": 661
+    },
+    "tools/sdk-fixtures/sheets/parla-large/experience.json": {
+      "sha256": "8de24a5eb47447eea880a440c1b5847cd8d47ccf24aadd83abed0a1dc0987bcb",
+      "sizeBytes": 1241
+    },
+    "apps/nuxie-dashboard/tests/visual/style-parity/fonts/InterVariable.ttf": {
+      "sha256": "4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf",
+      "sizeBytes": 879708
+    }
+  },
+  "command": [
+    "node",
+    "--import",
+    "tsx",
+    "apps/nuxie-experience-authority/tests/workerd/sdk-sheets-export-run.mjs",
+    "tests/fixtures/e2e-experience-files/presentation-sheets",
+    "tools/sdk-fixtures/sheets/published-fit-content",
+    "tools/sdk-fixtures/sheets/parla-large/experience.json",
+    "<output-root>",
+    "69790050f3fc53da4e890bcde7eb7b67c1149902"
+  ],
+  "commands": [
+    [
+      "node",
+      "--import",
+      "tsx",
+      "apps/nuxie-experience-authority/tests/workerd/sdk-sheets-export-run.mjs",
+      "tests/fixtures/e2e-experience-files/presentation-sheets",
+      "tools/sdk-fixtures/sheets/published-fit-content",
+      "tools/sdk-fixtures/sheets/parla-large/experience.json",
+      "<output-root>",
+      "69790050f3fc53da4e890bcde7eb7b67c1149902"
+    ]
+  ],
+  "signing": {
+    "kind": "test-signed-wrapper",
+    "keyId": "TEST_ONLY_DEV_KEYPAIR",
+    "keySource": "packages/view-compiler/src/journey-release-test-signing.ts"
+  },
+  "qualification": "Production Journey publisher output with explicit test-only fixture signing. Test-signed wrappers, not a production release or native qualification.",
+  "facts": {
+    "baseline": [
+      {
+        "eventName": "offer",
+        "screen": "screens/offer",
+        "transition": {
+          "type": "modal",
+          "present": "sheet",
+          "height": "medium",
+          "closedby": "any"
+        }
+      },
+      {
+        "eventName": "save",
+        "screen": "screens/saved",
+        "transition": {
+          "type": "modal",
+          "present": "sheet",
+          "height": "fit-content",
+          "closedby": "any"
+        }
+      }
+    ],
+    "large": [
+      {
+        "eventName": "offer",
+        "screen": "screens/offer",
+        "transition": {
+          "type": "modal",
+          "present": "sheet",
+          "height": "large",
+          "closedby": "none"
+        }
+      },
+      {
+        "eventName": "save",
+        "screen": "screens/saved",
+        "transition": {
+          "type": "modal",
+          "present": "sheet",
+          "height": "fit-content",
+          "closedby": "any"
+        }
+      }
+    ]
+  },
+  "files": {
+    "release-entry.json": {
+      "sha256": "0735910c30db48cf09e04b91b06215ac3295fba770f530e0308853dcd6338c7e",
+      "sizeBytes": 13017
+    },
+    "descriptor.json": {
+      "sha256": "82537357395114cbb57d61a63061ff204890650b4551527021b9a001ff72c9de",
+      "sizeBytes": 9112
+    },
+    "publish-source.json": {
+      "sha256": "6c203efba1b8fbccc20e5a3ccac29efa40538c81db1fe873d58856afa956bc50",
+      "sizeBytes": 71841
+    },
+    "renders/sha256/bb591c1be8fc988d44d760bb9d153e6fd074d4f8cf21b56365c973f858ff93eb.nux": {
+      "sha256": "bb591c1be8fc988d44d760bb9d153e6fd074d4f8cf21b56365c973f858ff93eb",
+      "sizeBytes": 12300
+    },
+    "assets/sha256/4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf.ttf": {
+      "sha256": "4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf",
+      "sizeBytes": 879708
+    },
+    "variants/large/release-entry.json": {
+      "sha256": "cbaf2178499dcb0bb6364f6e0ce130d71298cf37e169f6a89b34163090bf4f37",
+      "sizeBytes": 13017
+    },
+    "variants/large/descriptor.json": {
+      "sha256": "5c9357145f917913bbc1189e34acecd20c0f1d156009c34ac2406efe1bb49524",
+      "sizeBytes": 9112
+    },
+    "variants/large/publish-source.json": {
+      "sha256": "dc00e9375d6e59902a307c5673cf00a71cd5927e4ab05b4ad0505bb2793faf7e",
+      "sizeBytes": 72483
+    },
+    "variants/large/renders/sha256/bb591c1be8fc988d44d760bb9d153e6fd074d4f8cf21b56365c973f858ff93eb.nux": {
+      "sha256": "bb591c1be8fc988d44d760bb9d153e6fd074d4f8cf21b56365c973f858ff93eb",
+      "sizeBytes": 12300
+    },
+    "variants/large/assets/sha256/4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf.ttf": {
+      "sha256": "4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf",
+      "sizeBytes": 879708
+    }
+  },
+  "inventoryNote": "export-manifest.json additionally hashes this provenance file; a file cannot contain its own hash."
+}
