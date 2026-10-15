@@ -59,7 +59,8 @@ class ExperienceScreenTransitionPlanTest {
             val action = JsonObject(mapOf("type" to JsonPrimitive("navigate"), "screenId" to JsonPrimitive("one"), "transition" to transition))
             ai.nuxie.sdk.experiences.JourneyGrammar.action(action, setOf("one"), emptySet())
             val plan = ExperienceScreenTransitionPlan.resolve(transition, JsonArray(emptyList()), "one", "two")
-            val shell = checkNotNull(plan.presentation)
+            assertEquals(ExperienceScreenTransitionPlan.Kind.MODAL, plan.kind)
+            val shell = PresentationShell.fromTransition(transition)
             assertTrue(item.getValue("available").jsonPrimitive.boolean)
             assertEquals(item.getValue("closedby").jsonPrimitive.content == "any", shell.dismissible)
             when (item.getValue("present").jsonPrimitive.content) {

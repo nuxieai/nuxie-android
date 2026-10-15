@@ -7,9 +7,6 @@ import android.view.View
 import android.view.ViewGroup
 import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 
 /** Each modal owns a native window; the platform owns its scrim, animation and back handling. */
 internal class ExperienceNativeLayerWindow(
@@ -27,12 +24,8 @@ internal class ExperienceNativeLayerWindow(
     private val layoutListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateBounds() }
 
     init {
-        val looks = checkNotNull(javaClass.getResourceAsStream("presentation-looks.json")) {
-            "Missing presentation looks resource"
-        }.use { Json.parseToJsonElement(it.bufferedReader().readText()).jsonObject.getValue("android").jsonObject }
         dialog = when (shell) {
             is PresentationShell.Sheet -> {
-                check(looks.getValue("sheet").jsonPrimitive.content == "material")
                 BottomSheetDialog(activity, com.google.android.material.R.style.Theme_MaterialComponents_DayNight_BottomSheetDialog).apply {
                     setContentView(content, ViewGroup.LayoutParams(-1, -1))
                     behavior.skipCollapsed = true
