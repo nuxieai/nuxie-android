@@ -188,6 +188,7 @@ internal object PresentationRegistry {
     private class Entry(initial: PresentationContentState, var callbacks: Callbacks) {
         val state = MutableStateFlow(initial)
         val terminal = AtomicBoolean(false)
+        val outcomeReported = AtomicBoolean(false)
         val firstFrame = AtomicBoolean(false)
         var revealAdmitted = false
         var visible = false
@@ -443,7 +444,9 @@ internal object PresentationRegistry {
     }
 
     fun reportFailure(id: String, error: Throwable) {
-        val outcome = synchronized(lock) { entries[id]?.callbacks?.onOutcome }
+        val outcome = synchronized(lock) {
+            entries[id]?.takeIf { it.outcomeReported.compareAndSet(false, true) }?.callbacks?.onOutcome
+        }
         dismiss(id, CloseReason.Error(error))
         outcome?.invoke(CloseReason.Error(error))
     }
@@ -452,7 +455,7 @@ internal object PresentationRegistry {
         var outcome: ((CloseReason) -> Unit)? = null
         val completion = synchronized(lock) {
             val entry = entries[id] ?: return
-            outcome = entry.callbacks.onOutcome
+            if (entry.outcomeReported.compareAndSet(false, true)) outcome = entry.callbacks.onOutcome
             if (entry.dismissalReason == null) entry.dismissalReason = reason
             completionIfReady(id, entry)
         }
@@ -461,7 +464,9 @@ internal object PresentationRegistry {
     }
 
     fun reportOutcome(id: String, reason: CloseReason) {
-        val callback = synchronized(lock) { entries[id]?.callbacks?.onOutcome } ?: return
+        val callback = synchronized(lock) {
+            entries[id]?.takeIf { it.outcomeReported.compareAndSet(false, true) }?.callbacks?.onOutcome
+        } ?: return
         callback(reason)
     }
 
