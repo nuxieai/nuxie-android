@@ -257,7 +257,8 @@ class HostRenderSmokeTest {
         // This is fixtures/p2d/scripted_interpolator.riv from nuxie-runtime
         // 1067ffa0. Its ScriptInputNumber has parent 0, as the exporter writes
         // a non-Component owner's inputs; upstream 439ffe0c drops inputs with
-        // any other parent, so the script's init would fail. Its transform is factor² + (calls - 1) * 0.005. Pinned C++
+        // any other parent, so the script's init would fail. Its transform is
+        // factor² + (calls - 1) * 0.005. Pinned C++
         // 4ac7b327 keyframe_color.cpp uses the stateful interpolator and
         // shapes/paint/color.cpp rounds colorLerp to bytes: at 16/32 ms,
         // round(255 * .016²) = 0; round(255 * (.032² + .005)) = 2.
