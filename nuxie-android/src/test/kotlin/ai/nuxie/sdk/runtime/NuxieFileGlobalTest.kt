@@ -4,25 +4,29 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class NuxieFileGlobalTest {
-    @Test fun `file owns one schema default global and ignores ordinary models`() {
+    @Test fun `each caller gets its own global instance and ordinary models are not globals`() {
         val native = RecordingNative()
         val file = NuxieRuntimeFile(1, native)
-        assertNull(file.globalViewModel("missing"))
-        assertNull(file.globalViewModel("Root"))
-        val env = checkNotNull(file.globalViewModel("env"))
-        assertSame(env, file.globalViewModel("env"))
-        assertEquals(listOf(Triple(1L, 0, null)), native.created)
+        assertNull(file.newGlobalViewModel("missing"))
+        assertNull(file.newGlobalViewModel("Root"))
+        val first = checkNotNull(file.newGlobalViewModel("env"))
+        val second = checkNotNull(file.newGlobalViewModel("env"))
+        // Two screens sharing one import never share their env values.
+        assertNotSame(first, second)
+        assertEquals(listOf(Triple(1L, 0, null), Triple(1L, 0, null)), native.created)
+        first.close()
+        second.close()
+        assertEquals(listOf(30L, 31L), native.freed)
         file.close()
-        assertEquals(listOf(30L, 1L), native.freed)
-        assertThrows(IllegalStateException::class.java) { file.globalViewModel("env") }
-        assertThrows(IllegalStateException::class.java) { env.requireHandle() }
+        assertEquals(listOf(30L, 31L, 1L), native.freed)
+        assertThrows(IllegalStateException::class.java) { file.newGlobalViewModel("env") }
     }
 
     @Test fun `global binds every state machine including auxiliary and propagates refusal`() {
         for (kind in listOf(0, 1, 2)) {
             val native = RecordingNative().apply { primaryKind = kind }
             val file = NuxieRuntimeFile(1, native)
-            val env = checkNotNull(file.globalViewModel("env"))
+            val env = checkNotNull(file.newGlobalViewModel("env"))
             val player = NuxieRuntimePlayer(10, native)
             player.installInteractionPlayer(NuxieRuntimePlayer(11, native))
             player.bindGlobalViewModel("env", env)
@@ -31,6 +35,7 @@ class NuxieFileGlobalTest {
             native.status = 4
             assertThrows(NuxieRuntimeCallException::class.java) { player.bindGlobalViewModel("env", env) }
             player.close()
+            env.close()
             file.close()
         }
     }
@@ -46,7 +51,7 @@ class NuxieFileGlobalTest {
                 NativeViewModelSchema(1, "Root", 0, 0, 0, 0, -1, false)), emptyArray(), emptyArray()))
         override fun newViewModel(fileHandle: Long, schemaIndex: Int, authoredInstanceIndex: Int?): NativeCallResult<Long> {
             created += Triple(fileHandle, schemaIndex, authoredInstanceIndex)
-            return NativeCallResult(0, 30L)
+            return NativeCallResult(0, 29L + created.size)
         }
         override fun freeViewModel(handle: Long): Int { freed += handle; return 0 }
         override fun freeFile(handle: Long) { freed += handle }

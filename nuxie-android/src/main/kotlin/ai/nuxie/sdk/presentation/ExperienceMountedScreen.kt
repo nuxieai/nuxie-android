@@ -125,6 +125,11 @@ internal class ExperienceMountedScreen(
         }.also { content = it }
     }
 
+    /** Before a new layer's window exists, lay the screen out for the space that layer gives it. */
+    fun assumeLayerInsets(shell: PresentationShell) {
+        surface.updateRuntimeValues(ExperienceWindowInsets.forLayer(activity, shell).stateValues())
+    }
+
     /** Install after attaching content, so projection uses the real window geometry. */
     fun observeWindow() {
         captionInsets?.close()

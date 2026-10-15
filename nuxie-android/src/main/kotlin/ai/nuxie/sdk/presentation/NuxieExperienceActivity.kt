@@ -434,6 +434,7 @@ internal class NuxieExperienceActivity : Activity() {
                     layers += layer
                     contentRoot = root
                     installLayerWindow(layer)
+                    target.mounted?.observeWindow()
                 } else {
                     layers.lastOrNull()?.let {
                         it.screen = target
@@ -489,7 +490,10 @@ internal class NuxieExperienceActivity : Activity() {
                     FrameLayout.LayoutParams((size.width * density).toInt(), (size.height * density).toInt())
                 } else FrameLayout.LayoutParams(-1, -1)
                 contentRoot.addView(targetView, 0, params)
-                target.mounted?.observeWindow()
+                // A new layer's screen is parked in its presenter until its own window shows it:
+                // it is laid out for that layer's space, and observes real insets once installed.
+                if (prepared.opensLayer) target.mounted?.assumeLayerInsets(prepared.shell)
+                else target.mounted?.observeWindow()
                 target.mounted?.setVisible(visible)
                 target.ready.await()
                 candidate

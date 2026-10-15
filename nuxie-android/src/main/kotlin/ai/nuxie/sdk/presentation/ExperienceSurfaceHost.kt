@@ -523,18 +523,10 @@ internal class ExperienceSurfaceHost(
                 else -> null
             }
             if (globalPath != null) {
-                val write = {
-                    if (!released.get()) {
-                        try { environment?.setValue(globalPath, value) }
-                        catch (error: Exception) {
-                            if (error is kotlinx.coroutines.CancellationException) throw error
-                            if (reportedStatePaths.add(path)) Log.w(LOG_TAG, "Experience state path rejected", error,
-                                Log.sensitive("path", path))
-                        }
-                    }
-                }
-                val shared = runValues
-                if (shared == null) write() else shared.mutateWhenPresented(write, {})
+                // This screen's own env instance: like its other screen values, it is written
+                // between this screen's frames and never waits on another screen's frame. A write
+                // that throws is reported through onRejected and is not counted as accepted.
+                if (!released.get()) environment?.setValue(globalPath, value)
                 accepted += path
                 return@apply
             }
@@ -725,7 +717,8 @@ internal class ExperienceSurfaceHost(
                 return@enqueuePreparation
             }
             try {
-                environment = loadedFile.globalViewModel("env")
+                // Each screen owns its env: a covered layer keeps the values of its own space.
+                environment = loadedFile.newGlobalViewModel("env")
                 val retained = retainedViewModel?.get()
                 if (retained != null) {
                     viewModelState = runtime.restoreViewModel(loadedFile, loadedArtboard, retained)
@@ -759,6 +752,8 @@ internal class ExperienceSurfaceHost(
                 // contract failure. The renderer remains available for retry.
                 artboard = null
                 file = null
+                runCatching { environment?.close() }.exceptionOrNull()?.let(error::addSuppressed)
+                environment = null
                 runCatching { loadedArtboard.close() }.exceptionOrNull()?.let(error::addSuppressed)
                 if (ownsRuntimeFile) runCatching { loadedFile.close() }.exceptionOrNull()?.let(error::addSuppressed)
                 reportFailure(
@@ -785,6 +780,8 @@ internal class ExperienceSurfaceHost(
                 runCatching { failedPlayer?.close() }.exceptionOrNull()?.let(error::addSuppressed)
                 artboard = null
                 file = null
+                runCatching { environment?.close() }.exceptionOrNull()?.let(error::addSuppressed)
+                environment = null
                 runCatching { loadedArtboard.close() }.exceptionOrNull()?.let(error::addSuppressed)
                 if (ownsRuntimeFile) runCatching { loadedFile.close() }.exceptionOrNull()?.let(error::addSuppressed)
                 reportFailure(
@@ -1525,6 +1522,7 @@ internal class ExperienceSurfaceHost(
                 videoPlayback?.let { owner -> { owner.closeAfterRetirement(onMediaReleased) } } ?: onMediaReleased,
                 player?.let { it::close },
                 presentationHeight::close,
+                environment?.let { it::close },
                 viewModelState?.let { it::close },
                 artboard?.let { it::close },
                 file?.takeIf { ownsRuntimeFile }?.let { it::close },
