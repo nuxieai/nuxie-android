@@ -92,7 +92,11 @@ class PublishedScreenExitReasonDeviceTest {
                 dismissed.countDown()
                 retired.countDown()
             },
-            onOutcome = { outcomeReason.set(it); outcomeCount.incrementAndGet() },
+            onOutcome = {
+                outcomeReason.set(it)
+                outcomeCount.incrementAndGet()
+                if (it is CloseReason.Error) failure.set(it.cause)
+            },
         )
         try {
             instrumentation.targetContext.startActivity(Intent(instrumentation.targetContext, NuxieExperienceActivity::class.java).apply {
