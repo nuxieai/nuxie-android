@@ -113,7 +113,7 @@ class AndroidVideoResourceDeviceTest {
         assertEquals(setOf(5L), pool.update(background, low))
     }
 
-    @Test fun sharedPoolRetainsRemovedAndResizedClaimsUntilDisposal() {
+    @Test fun sharedPoolRetainsRemovedClaimsUntilDisposal() {
         assertTrue(NuxieRuntime.shared.isAvailable)
         val pool = ExperienceVideoDecoderPool { NuxieVideoDecoderBudget(3, 3, 0, 100, 0) }
         val first = java.util.UUID.randomUUID()
@@ -124,11 +124,33 @@ class AndroidVideoResourceDeviceTest {
         assertEquals(emptySet<Long>(), pool.update(second, next))
         pool.release(first, 1)
         assertEquals(setOf(2L), pool.update(second, next))
-        val resized = listOf(NuxieVideoDecoderRequest(2, 60, 10, true))
-        assertEquals(emptySet<Long>(), pool.update(second, resized))
-        pool.release(second, 2)
-        assertEquals(setOf(2L), pool.update(second, resized))
-        assertEquals(setOf(1L), pool.update(first, listOf(NuxieVideoDecoderRequest(1, 40, 0, true))))
+        assertEquals(setOf(1L), pool.update(first, listOf(NuxieVideoDecoderRequest(1, 70, 0, true))))
+    }
+
+    @Test fun runningDecoderClaimsResizeInPlace() {
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val pool = ExperienceVideoDecoderPool { NuxieVideoDecoderBudget(3, 3, 0, 100, 0) }
+        val playing = java.util.UUID.randomUUID()
+        val other = java.util.UUID.randomUUID()
+        val late = java.util.UUID.randomUUID()
+        fun request(id: Long, pixels: Long, priority: Long = 0) = listOf(NuxieVideoDecoderRequest(id, pixels, priority, true))
+        assertEquals(setOf(2L), pool.update(playing, request(2, 30, 10)))
+        // A faster rate grows the running decoder's claim in place when it fits.
+        assertEquals(setOf(2L), pool.update(playing, request(2, 60, 10)))
+        assertEquals("The grown claim holds its capacity", emptySet<Long>(), pool.update(other, request(1, 41)))
+        assertEquals(setOf(1L), pool.update(other, request(1, 40)))
+        // Growth that does not fit keeps the decoder admitted on its current claim,
+        // and no new claim can take the capacity it is waiting for.
+        assertEquals(setOf(2L), pool.update(playing, request(2, 90, 10)))
+        assertEquals(emptySet<Long>(), pool.update(late, request(3, 1)))
+        pool.remove(other)
+        assertEquals(setOf(2L), pool.update(playing, request(2, 90, 10)))
+        assertEquals(setOf(3L), pool.update(late, request(3, 10)))
+        assertEquals("The full claim leaves no room", emptySet<Long>(), pool.update(other, request(1, 1)))
+        // A slower rate shrinks the claim at once and frees its capacity.
+        assertEquals(setOf(2L), pool.update(playing, request(2, 30, 10)))
+        assertEquals(setOf(1L), pool.update(other, request(1, 60)))
+        listOf(playing, other, late).forEach(pool::remove)
     }
 
     @Test fun concurrentOwnerLanesCannotDoubleReserveCapacity() {

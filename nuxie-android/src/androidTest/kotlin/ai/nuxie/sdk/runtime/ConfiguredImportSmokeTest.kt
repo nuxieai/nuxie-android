@@ -5,6 +5,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertSame
 import org.junit.Test
 
 /** Exercises the scripted import path on the device architecture. */
@@ -343,7 +344,11 @@ class ConfiguredImportSmokeTest {
         verifyDecodedVideo(false, hostSettings = true)
     }
 
-    private fun verifyDecodedVideo(frenchCaptions: Boolean, measurement: VideoMeasurement? = null, avClockMeasurement: Boolean = false, endpointSeek: Boolean = false, hostSettings: Boolean = false) {
+    @Test fun boundRateChangedOnConsecutiveFramesKeepsOneDecoderPlaying() {
+        verifyDecodedVideo(false, rateAnimation = true)
+    }
+
+    private fun verifyDecodedVideo(frenchCaptions: Boolean, measurement: VideoMeasurement? = null, avClockMeasurement: Boolean = false, endpointSeek: Boolean = false, hostSettings: Boolean = false, rateAnimation: Boolean = false) {
         val preparationStarted = System.nanoTime()
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val local = java.io.File.createTempFile("video-decoder-", ".mp4", instrumentation.targetContext.cacheDir)
@@ -437,7 +442,7 @@ class ConfiguredImportSmokeTest {
                                 }
                                 return color
                             }
-                            if (hostSettings) {
+                            if (hostSettings || rateAnimation) {
                                 fun decoder(): AndroidVideoDecoder? {
                                     val field = ExperienceVideoPlayback::class.java.getDeclaredField("entries").apply { isAccessible = true }
                                     val entry = (field.get(playback) as Map<*, *>).values.singleOrNull() ?: return null
@@ -450,7 +455,7 @@ class ConfiguredImportSmokeTest {
                                 }
                                 val until = android.os.SystemClock.elapsedRealtime() + 10_000
                                 while (decoder()?.playing() != true && android.os.SystemClock.elapsedRealtime() < until) tick()
-                                var live = checkNotNull(decoder())
+                                val live = checkNotNull(decoder())
                                 assertTrue("Bound settings are changed during real playback", live.playing())
                                 fun onDecoder(block: () -> Unit) {
                                     val handler = AndroidVideoDecoder::class.java.getDeclaredField("handler").apply { isAccessible = true }.get(live) as android.os.Handler
@@ -462,20 +467,34 @@ class ConfiguredImportSmokeTest {
                                     assertEquals("Decoder settings finish while the host keeps consuming frames", 0L, done.count)
                                     failure.get()?.let { throw AssertionError("Decoder settings", it) }
                                 }
+                                fun assertPlayer(expectedVolume: Float?, expectedSpeed: Float) = onDecoder {
+                                    val volume = AndroidVideoDecoder::class.java.getDeclaredField("volume").apply { isAccessible = true }.getFloat(live)
+                                    val media = AndroidVideoDecoder::class.java.getDeclaredField("player").apply { isAccessible = true }.get(live) as android.media.MediaPlayer
+                                    assertTrue("MediaPlayer stays playing during a bound change", media.isPlaying)
+                                    expectedVolume?.let { assertEquals("Effective decoder volume", it, volume, 0.001f) }
+                                    assertEquals("Actual MediaPlayer speed", expectedSpeed, media.playbackParams.speed, 0.001f)
+                                }
+                                if (rateAnimation) {
+                                    // Rates up to 1.5 fit this pool's 100,000 pixels per second; faster ones do not.
+                                    val cost = ExperienceVideoDecodeCost.read(local)
+                                    assertTrue("Fixture decode cost $cost", cost * 1.5 <= 100_000 && cost * 2.0 > 100_000)
+                                    // One bound rate per frame, as an animation or a dragged slider writes it.
+                                    for (step in (1..10) + (9 downTo 0)) {
+                                        val rate = 1.0 + step / 10.0
+                                        setVideoValue(artboard, player, "playback-rate", NuxieViewModelScalarValue.NumberValue(rate))
+                                        tick()
+                                        assertSame("Rate $rate keeps the playing decoder", live, decoder())
+                                        assertTrue("Rate $rate keeps the decoder playing", live.playing())
+                                        if (step == 10) assertPlayer(null, 2f)
+                                    }
+                                    assertPlayer(null, 1f)
+                                    return
+                                }
                                 fun settings(path: String, value: NuxieViewModelScalarValue, expectedVolume: Float, expectedSpeed: Float) {
                                     setVideoValue(artboard, player, path, value)
-                                    // A rate change can resize the pool claim and replace its decoder.
-                                    val deadline = android.os.SystemClock.elapsedRealtime() + 10_000
-                                    do { tick() } while (decoder()?.playing() != true && android.os.SystemClock.elapsedRealtime() < deadline)
-                                    live = checkNotNull(decoder())
-                                    assertTrue("The current decoder is playing after a bound change", live.playing())
-                                    onDecoder {
-                                        val volume = AndroidVideoDecoder::class.java.getDeclaredField("volume").apply { isAccessible = true }.getFloat(live)
-                                        val media = AndroidVideoDecoder::class.java.getDeclaredField("player").apply { isAccessible = true }.get(live) as android.media.MediaPlayer
-                                        assertTrue("Bound settings reach a playing MediaPlayer", media.isPlaying)
-                                        assertEquals("Effective decoder volume", expectedVolume, volume, 0.001f)
-                                        assertEquals("Actual MediaPlayer speed", expectedSpeed, media.playbackParams.speed, 0.001f)
-                                    }
+                                    tick()
+                                    assertSame("A bound change keeps the playing decoder", live, decoder())
+                                    assertPlayer(expectedVolume, expectedSpeed)
                                 }
                                 settings("muted", NuxieViewModelScalarValue.BooleanValue(true), 0f, 1f)
                                 settings("volume", NuxieViewModelScalarValue.NumberValue(0.25), 0f, 1f)
