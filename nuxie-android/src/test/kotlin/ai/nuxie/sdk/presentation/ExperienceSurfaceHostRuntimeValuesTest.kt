@@ -24,6 +24,7 @@ import org.robolectric.RuntimeEnvironment
 @RunWith(RobolectricTestRunner::class)
 class ExperienceSurfaceHostRuntimeValuesTest {
     @Test fun `write without a bound model reports rejection`() {
+        org.robolectric.shadows.ShadowLog.clear()
         val lane = NuxieRuntimeLane()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane)
         val native = object : NuxieTypedRuntimeNative {
@@ -38,6 +39,9 @@ class ExperienceSurfaceHostRuntimeValuesTest {
                 }
                 assertFalse(withTimeout(5_000) { host.updateRuntimeValues(values).await() })
             }
+            // Ordinary screens without a default view model ignore writes quietly.
+            assertTrue(org.robolectric.shadows.ShadowLog.getLogsForTag("Nuxie")
+                .none { it.msg.startsWith("Experience state path rejected") })
         } finally {
             host.release()
             lane.shutdown()

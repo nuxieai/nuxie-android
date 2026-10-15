@@ -528,9 +528,12 @@ internal class ExperienceSurfaceHost(
                 return@apply
             }
             val projected = viewModelState
-            if (projected != null) projected.setValue(path, value)
-            else check(boundArtboard.setDefaultViewModelValue(path, value)) { "Experience has no bound view-model" }
-            accepted += path
+            if (projected != null) {
+                projected.setValue(path, value)
+                accepted += path
+            } else if (boundArtboard.setDefaultViewModelValue(path, value)) accepted += path
+            // A screen without a default view model ignores the write without a
+            // warning; the write's result still reports it as not accepted.
         }, onRejected = { path, error ->
             // Reserved environment fields are optional in older releases. One
             // rejected field must not prevent valid siblings or close the screen.
