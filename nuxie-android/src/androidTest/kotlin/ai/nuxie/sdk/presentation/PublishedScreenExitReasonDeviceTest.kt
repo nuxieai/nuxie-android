@@ -164,7 +164,11 @@ class PublishedScreenExitReasonDeviceTest {
             assertTrue("Cleanup must await terminal native retirement", retired.await(5, TimeUnit.SECONDS))
             instrumentation.removeMonitor(monitor)
             scene.delete()
-            frames?.save()
+            frames?.let { capture ->
+                runCatching { capture.save() }.onFailure { error ->
+                    android.util.Log.w("ScreenMotionTest", "Could not save optional screen motion pictures", error)
+                }
+            }
         }
     }
 }
