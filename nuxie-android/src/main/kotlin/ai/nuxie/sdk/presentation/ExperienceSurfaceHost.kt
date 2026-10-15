@@ -1295,6 +1295,11 @@ internal class ExperienceSurfaceHost(
                 // a type-level guard, never a reachable behavior change.
                 val window = window ?: return@enqueue
                 val layout = surfaceLayout ?: return@enqueue
+                // Covered layers keep rendering through the Journey's one renderer. While
+                // another screen's frame is queued, skip this tick entirely: the clock keeps
+                // running for the next step, and no pending presentation is claimed, so run
+                // writes (including the next screen's preparation) are not held back.
+                if (renderer.isPresentingAnotherWindow(window)) return@enqueue
                 if (!applyLayoutSize(player)) return@enqueue
                 if (!pendingPresentation) {
                     drainTextWrites()

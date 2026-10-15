@@ -143,6 +143,37 @@ class ExperienceSurfaceLayoutTest {
         }
     }
 
+    @Test fun `a screen waits without stepping while another screen's frame is queued on the shared renderer`() {
+        withHost(3f) { host, texture, lane, native, _ ->
+            host.onSurfaceTextureAvailable(texture, 1179, 2556)
+            drain(lane)
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            host.onSurfaceTextureUpdated(texture)
+            drain(lane)
+            fun field(name: String) = ExperienceSurfaceHost::class.java.getDeclaredField(name).apply { isAccessible = true }
+            val renderer = field("renderer").get(host) as NuxieAndroidVulkanRenderer
+            val player = field("player").get(host) as NuxieRuntimePlayer
+            // A covered screen of the same Journey submits a frame to its own window.
+            val other = NuxieRuntimeWindow(9L, native)
+            native.presentation = 4
+            lane.enqueue { assertEquals(4, renderer.renderAndPresent(player, other, 0, 3f)) }
+            drain(lane)
+            native.calls.clear()
+            host.doFrame(1_016_000_000L)
+            drain(lane)
+            assertEquals("No step or render while another window's frame is queued", emptyList<String>(), native.calls)
+            assertFalse("Nothing of this screen's is pending", field("pendingPresentation").getBoolean(host))
+            native.presentation = 1
+            lane.enqueue { assertEquals(1, renderer.renderAndPresent(player, other, 0, 3f)) }
+            drain(lane)
+            native.calls.clear()
+            host.doFrame(1_032_000_000L)
+            drain(lane)
+            assertEquals("The skipped tick's time is not lost", listOf("step:0.032", "render:3.0"), native.calls)
+        }
+    }
+
     @Test fun `fit-content height retries after input activation invalidates its queued delivery`() =
         heightDeliveryRetries { host -> host.setInputEnabled(false); host.setInputEnabled(true) }
 
