@@ -48,7 +48,25 @@ class PublishedScreenExitReasonDeviceTest {
     fun journeyDismissKeepsTheScreenMountedUntilItsCompiledDismissalCompletes() =
         verifyCompiledDismissal(CloseReason.JourneyDismissed)
 
-    private fun verifyCompiledDismissal(reason: CloseReason, capture: Boolean = false) {
+    @Test
+    fun repeatedCloseDuringTheExitIsAbsorbed() =
+        verifyCompiledDismissal(CloseReason.UserDismissed, repeatClose = true)
+
+    @Test
+    fun backPressWaitsForCompletionAndReportsOneOutcome() =
+        verifyCompiledDismissal(CloseReason.UserDismissed, backPress = true, repeatClose = true)
+
+    @Test
+    fun missingCompletionUsesTheBoundedFallbackOnAnOlderScreen() =
+        verifyCompiledDismissal(CloseReason.HostDismissed, neverCompletes = true)
+
+    private fun verifyCompiledDismissal(
+        reason: CloseReason,
+        capture: Boolean = false,
+        repeatClose: Boolean = false,
+        backPress: Boolean = false,
+        neverCompletes: Boolean = false,
+    ) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val frames = if (capture && InstrumentationRegistry.getArguments().getString("captureScreenMotionFrames") == "true")
             ScreenExitFrameCapture(instrumentation) else null
@@ -56,7 +74,7 @@ class PublishedScreenExitReasonDeviceTest {
             Settings.Global.getFloat(instrumentation.targetContext.contentResolver,
                 Settings.Global.ANIMATOR_DURATION_SCALE, 1f) > 0f)
         val assets = instrumentation.context.assets
-        val fixture = "runtime/screen-exit-reason/dismissed-only"
+        val fixture = "runtime/screen-exit-reason/${if (neverCompletes) "field-absent" else "dismissed-only"}"
         val id = UUID.randomUUID().toString()
         val scene = File(instrumentation.targetContext.cacheDir, "screen-exit-$id.nux")
         assets.open("$fixture/screen.nux").use { input -> scene.outputStream().use(input::copyTo) }
@@ -65,11 +83,16 @@ class PublishedScreenExitReasonDeviceTest {
         }
         val render = descriptor.getValue("render").jsonObject
         val screen = render.getValue("screens").jsonArray.single().jsonObject
-        val exit = screen.getValue("exit").jsonObject
+        // The older committed scene has no completion event. Give its host the same
+        // 400 ms declaration so a missing native completion must use the watchdog.
+        val exit = if (neverCompletes) assets.open("runtime/screen-exit-reason/dismissed-only/mounted-screen.json")
+            .bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject }
+            .getValue("render").jsonObject.getValue("screens").jsonArray.single().jsonObject.getValue("exit").jsonObject
+            else screen.getValue("exit").jsonObject
         assertEquals(400, exit.getValue("durationMs").jsonPrimitive.int)
         // The native fade remains 400 ms. This generous host watchdog makes
         // the two-second bound prove a native event, not a timeout fallback.
-        val hostExit = JsonObject(exit + ("durationMs" to JsonPrimitive(4000)))
+        val hostExit = JsonObject(exit + ("durationMs" to JsonPrimitive(if (neverCompletes) 400 else 4000)))
         val hostScreen = JsonObject(screen + ("exit" to hostExit))
         val hostRender = JsonObject(render + ("screens" to JsonArray(listOf(hostScreen))))
         val hostDescriptor = JsonObject(descriptor + ("render" to hostRender))
@@ -124,12 +147,33 @@ class PublishedScreenExitReasonDeviceTest {
             assertTrue("Native first frame: ${failure.get()}", firstFrame.await(30, TimeUnit.SECONDS))
             assertNull(failure.get())
             assertEquals(NuxieViewModelScalarValue.BooleanValue(false), prepared.screenLifecycle.snapshot()["env/reduceMotion"])
+            if (neverCompletes) {
+                fun find(view: View): ExperienceSurfaceHost? {
+                    if (view is ExperienceSurfaceHost) return view
+                    if (view is ViewGroup) for (index in 0 until view.childCount) {
+                        find(view.getChildAt(index))?.let { return it }
+                    }
+                    return null
+                }
+                var surface: ExperienceSurfaceHost? = null
+                instrumentation.runOnMainSync { surface = find(host.window.decorView) }
+                val mounted = checkNotNull(surface)
+                fun field(name: String): Any = checkNotNull(ExperienceSurfaceHost::class.java
+                    .getDeclaredField(name).apply { isAccessible = true }.get(mounted))
+                runBlocking { (field("lane") as NuxieRuntimeLane).call {
+                    val snapshot = checkNotNull((field("artboard") as ai.nuxie.sdk.runtime.NuxieRuntimeArtboard).defaultViewModelSnapshot())
+                    assertEquals(2L, snapshot.resolveEnumOrdinal("screen/phase"))
+                    assertNull(snapshot.resolveEnumOrdinal("screen/exitReason"))
+                    assertFalse("Older screens must skip the unsupported lifecycle field without a rejection",
+                        (field("reportedStatePaths") as Set<*>).contains("screen/exitReason"))
+                } }
+            }
             instrumentation.runOnMainSync { frames?.observeCompletion(host) }
             frames?.capture("active")
             instrumentation.runOnMainSync {
                 assertTrue(PresentationRegistry.currentScreen(id) != null)
                 closeStartedAt.set(SystemClock.elapsedRealtime())
-                PresentationRegistry.dismiss(id, reason)
+                if (backPress) host.onBackPressed() else PresentationRegistry.dismiss(id, reason)
                 assertFalse("Active Close must keep the Activity through the native exit", host.isFinishing)
                 assertEquals(NuxieViewModelScalarValue.StringValue("dismissed"), prepared.screenLifecycle.snapshot()["screen/exitReason"])
             }
@@ -137,6 +181,12 @@ class PublishedScreenExitReasonDeviceTest {
             instrumentation.runOnMainSync {
                 assertFalse("The 400 ms authored fade is still in progress", host.isFinishing)
                 assertTrue(PresentationRegistry.currentScreen(id) != null)
+                if (repeatClose) {
+                    PresentationRegistry.dismiss(id, reason)
+                    if (backPress) host.onBackPressed()
+                    PresentationRegistry.dismiss(id, CloseReason.HostDismissed)
+                    assertFalse("Repeated Close must not finish an exit already in progress", host.isFinishing)
+                }
             }
             assertEquals(0, dismissalCount.get())
             frames?.capture("middle")
@@ -146,6 +196,9 @@ class PublishedScreenExitReasonDeviceTest {
                 dismissed.await(remaining, TimeUnit.MILLISECONDS))
             assertTrue("A 4250 ms watchdog cannot satisfy the native completion oracle",
                 dismissedAt.get() - closeStartedAt.get() < 2000L)
+            if (neverCompletes) assertTrue("Missing native completion must wait for the 650 ms watchdog",
+                dismissedAt.get() - closeStartedAt.get() >= 650L)
+            assertTrue(host.isFinishing)
             assertEquals(reason, dismissalReason.get())
             assertEquals(1, dismissalCount.get())
             assertEquals(reason, outcomeReason.get())
