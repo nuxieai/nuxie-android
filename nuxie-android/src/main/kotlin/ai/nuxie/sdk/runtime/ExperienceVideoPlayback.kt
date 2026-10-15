@@ -25,7 +25,6 @@ internal class ExperienceVideoPlayback(
         var interrupted = false
         var resourceBlocked = false
         var retiredForVisibility = false
-        var rate = 1.0
     }
     private var captionLanguages = preferredCaptionLanguages ?: ExperienceVideoCaptionSelection.preferredLanguages(context)
     private val pendingCaptionLanguages = java.util.concurrent.atomic.AtomicReference<List<String>?>(null)
@@ -168,7 +167,6 @@ internal class ExperienceVideoPlayback(
             if (entry.interrupted) player.videoCommand(video.componentId, 6, 0.0, 4)
             // Commit queued pause/seek/rate/dispose intent before rebuilding the decoder.
             for (action in player.videoStep(video.componentId, 0, video.generation)) {
-                if (action.kind == 3) entry.rate = action.value
                 if (action.kind == 5) entry.failed = true
             }
             if (video.state == 7 || video.state == 8) entry.failed = true
@@ -214,9 +212,9 @@ internal class ExperienceVideoPlayback(
                     0L
                 }
             } ?: 0L
-            val scaled = kotlin.math.ceil(cost * maxOf(1.0, entry.rate))
-            val pixels = if (scaled >= Long.MAX_VALUE.toDouble()) Long.MAX_VALUE else scaled.toLong()
-            NuxieVideoDecoderRequest(video.componentId, pixels, video.priority.toLong() and 0xffff_ffffL,
+            // The claim is the media's own decode cost. Playback rate never changes
+            // it, as on the canvas, so a rate change keeps the playing decoder.
+            NuxieVideoDecoderRequest(video.componentId, cost, video.priority.toLong() and 0xffff_ffffL,
                 !hidden && video.componentId in visibleOccurrences && !entry.failed && entry.binding.file != null)
         }
         val choices = if (decoderPool != null) {
@@ -331,7 +329,6 @@ internal class ExperienceVideoPlayback(
 
     private fun dispatchActions(component: Long, entry: Entry, actions: List<NuxieVideoAction>) {
         for (action in actions) {
-            if (action.kind == 3) entry.rate = action.value
             if (action.kind == 5) {
                 retire(component, entry)
                 entry.failed = true
