@@ -133,25 +133,78 @@ class AndroidVideoResourceDeviceTest {
         val playing = java.util.UUID.randomUUID()
         val other = java.util.UUID.randomUUID()
         val late = java.util.UUID.randomUUID()
-        fun request(id: Long, pixels: Long, priority: Long = 0) = listOf(NuxieVideoDecoderRequest(id, pixels, priority, true))
         assertEquals(setOf(2L), pool.update(playing, request(2, 30, 10)))
         // A faster rate grows the running decoder's claim in place when it fits.
         assertEquals(setOf(2L), pool.update(playing, request(2, 60, 10)))
+        assertEquals(listOf(60L), claims(pool))
         assertEquals("The grown claim holds its capacity", emptySet<Long>(), pool.update(other, request(1, 41)))
         assertEquals(setOf(1L), pool.update(other, request(1, 40)))
         // Growth that does not fit keeps the decoder admitted on its current claim,
-        // and no new claim can take the capacity it is waiting for.
+        // and no video behind it can take the capacity it is waiting for.
         assertEquals(setOf(2L), pool.update(playing, request(2, 90, 10)))
+        assertEquals(listOf(40L, 60L), claims(pool))
         assertEquals(emptySet<Long>(), pool.update(late, request(3, 1)))
-        pool.remove(other)
+        // Priority decides with the grown demand: the lower-priority video is revoked.
+        assertEquals(emptySet<Long>(), pool.update(other, request(1, 40)))
+        pool.release(other, 1)
         assertEquals(setOf(2L), pool.update(playing, request(2, 90, 10)))
+        assertEquals(listOf(90L), claims(pool))
         assertEquals(setOf(3L), pool.update(late, request(3, 10)))
         assertEquals("The full claim leaves no room", emptySet<Long>(), pool.update(other, request(1, 1)))
         // A slower rate shrinks the claim at once and frees its capacity.
         assertEquals(setOf(2L), pool.update(playing, request(2, 30, 10)))
         assertEquals(setOf(1L), pool.update(other, request(1, 60)))
+        assertEquals(listOf(10L, 30L, 60L), claims(pool))
         listOf(playing, other, late).forEach(pool::remove)
     }
+
+    @Test fun waitingGrowthNeverBlocksAHigherPriorityVideo() {
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val pool = ExperienceVideoDecoderPool { NuxieVideoDecoderBudget(3, 3, 0, 100, 0) }
+        val other = java.util.UUID.randomUUID()
+        val low = java.util.UUID.randomUUID()
+        val high = java.util.UUID.randomUUID()
+        val top = java.util.UUID.randomUUID()
+        assertEquals(setOf(1L), pool.update(other, request(1, 40)))
+        assertEquals(setOf(2L), pool.update(low, request(2, 30)))
+        assertEquals("Growth that does not fit keeps playing", setOf(2L), pool.update(low, request(2, 90)))
+        assertEquals("A higher-priority video plays beside the waiting growth", setOf(3L), pool.update(high, request(3, 30, 10)))
+        // Nothing of higher priority is waiting, so the growing video keeps its current claim.
+        assertEquals(setOf(2L), pool.update(low, request(2, 90)))
+        assertEquals(listOf(30L, 30L, 40L), claims(pool))
+        // A waiting higher-priority video that needs the capacity revokes it.
+        assertEquals(emptySet<Long>(), pool.update(top, request(4, 30, 20)))
+        assertEquals(emptySet<Long>(), pool.update(low, request(2, 90)))
+        pool.release(low, 2)
+        assertEquals(setOf(4L), pool.update(top, request(4, 30, 20)))
+        listOf(other, low, high, top).forEach(pool::remove)
+    }
+
+    @Test fun waitingGrowthsResolveInPriorityThenAgeOrder() {
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val pool = ExperienceVideoDecoderPool { NuxieVideoDecoderBudget(3, 3, 0, 100, 0) }
+        val a = java.util.UUID.randomUUID()
+        val b = java.util.UUID.randomUUID()
+        assertEquals(setOf(1L), pool.update(a, request(1, 30)))
+        assertEquals(setOf(2L), pool.update(b, request(2, 30)))
+        assertEquals(setOf(2L), pool.update(b, request(2, 80)))
+        assertEquals("The newer growth waits", listOf(30L, 30L), claims(pool))
+        assertEquals(setOf(1L), pool.update(a, request(1, 60)))
+        assertEquals("The older growth fits and is not blocked by the newer one", listOf(30L, 60L), claims(pool))
+        assertEquals(setOf(2L), pool.update(b, request(2, 60)))
+        assertEquals("Sixty more still does not fit beside it", listOf(30L, 60L), claims(pool))
+        assertEquals(setOf(2L), pool.update(b, request(2, 40)))
+        assertEquals(listOf(40L, 60L), claims(pool))
+        listOf(a, b).forEach(pool::remove)
+    }
+
+    private fun request(id: Long, pixels: Long, priority: Long = 0) =
+        listOf(NuxieVideoDecoderRequest(id, pixels, priority, true))
+
+    /** The pool's recorded claim sizes, smallest first. */
+    private fun claims(pool: ExperienceVideoDecoderPool): List<Long> =
+        (ExperienceVideoDecoderPool::class.java.getDeclaredField("claims").apply { isAccessible = true }
+            .get(pool) as Map<*, *>).values.map { it as Long }.sorted()
 
     @Test fun concurrentOwnerLanesCannotDoubleReserveCapacity() {
         assertTrue(NuxieRuntime.shared.isAvailable)
