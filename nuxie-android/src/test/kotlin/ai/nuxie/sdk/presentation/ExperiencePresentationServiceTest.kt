@@ -589,7 +589,7 @@ class ExperiencePresentationServiceTest {
                 assertEquals(0uL, content.screenLifecycle.appearances)
                 assertNull(content.textInputState.bind().read("probe"))
                 if (attempts == 1) {
-                    content.screenLifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING)
+                    content.screenLifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING, exitReason = ExperienceScreenLifecycle.ExitReason.NONE)
                     content.textInputState.bind().write("probe", ExperienceTextInputState.Value("retired", 0, 0))
                     error("Provisional native failure")
                 }

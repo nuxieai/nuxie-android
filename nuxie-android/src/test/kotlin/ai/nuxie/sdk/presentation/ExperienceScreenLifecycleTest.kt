@@ -20,11 +20,11 @@ class ExperienceScreenLifecycleTest {
         assertEquals(NuxieViewModelScalarValue.StringValue("navigation"),
             state.move(ExperienceScreenLifecycle.Phase.EXITING, exitReason = ExperienceScreenLifecycle.ExitReason.NAVIGATION)[key])
         assertEquals(NuxieViewModelScalarValue.StringValue("navigation"), state.updateReduceMotion(true)[key])
-        assertEquals(NuxieViewModelScalarValue.StringValue("none"), state.move(ExperienceScreenLifecycle.Phase.HIDDEN)[key])
-        assertEquals(NuxieViewModelScalarValue.StringValue("none"), state.move(ExperienceScreenLifecycle.Phase.ENTERING)[key])
+        assertEquals(NuxieViewModelScalarValue.StringValue("none"), state.move(ExperienceScreenLifecycle.Phase.HIDDEN, exitReason = ExperienceScreenLifecycle.ExitReason.NONE)[key])
+        assertEquals(NuxieViewModelScalarValue.StringValue("none"), state.move(ExperienceScreenLifecycle.Phase.ENTERING, exitReason = ExperienceScreenLifecycle.ExitReason.NONE)[key])
         assertEquals(NuxieViewModelScalarValue.StringValue("dismissed"),
             state.move(ExperienceScreenLifecycle.Phase.EXITING, exitReason = ExperienceScreenLifecycle.ExitReason.DISMISSED)[key])
-        assertEquals(NuxieViewModelScalarValue.StringValue("none"), state.move(ExperienceScreenLifecycle.Phase.ACTIVE)[key])
+        assertEquals(NuxieViewModelScalarValue.StringValue("none"), state.move(ExperienceScreenLifecycle.Phase.ACTIVE, exitReason = ExperienceScreenLifecycle.ExitReason.NONE)[key])
     }
 
     @Test
@@ -32,8 +32,8 @@ class ExperienceScreenLifecycleTest {
         val contract = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("runtime/font-scale-policy/cases.json").readText()).jsonObject
         val source = ExperienceScreenLifecycle()
-        source.move(ExperienceScreenLifecycle.Phase.ENTERING)
-        source.move(ExperienceScreenLifecycle.Phase.ACTIVE)
+        source.move(ExperienceScreenLifecycle.Phase.ENTERING, exitReason = ExperienceScreenLifecycle.ExitReason.NONE)
+        source.move(ExperienceScreenLifecycle.Phase.ACTIVE, exitReason = ExperienceScreenLifecycle.ExitReason.NONE)
         for (item in contract.getValue("cases").jsonArray) {
             val scale = item.jsonObject.getValue("scale").jsonPrimitive.double.toFloat()
             val values = source.updateFontScale(scale)
@@ -55,11 +55,11 @@ class ExperienceScreenLifecycleTest {
         val contract = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/navigation-input-handoff-android.json").readText()).jsonObject
         val source = ExperienceScreenLifecycle()
-        source.move(ExperienceScreenLifecycle.Phase.ENTERING)
-        source.move(ExperienceScreenLifecycle.Phase.ACTIVE)
+        source.move(ExperienceScreenLifecycle.Phase.ENTERING, exitReason = ExperienceScreenLifecycle.ExitReason.NONE)
+        source.move(ExperienceScreenLifecycle.Phase.ACTIVE, exitReason = ExperienceScreenLifecycle.ExitReason.NONE)
         val target = source.copyForPreparation()
         assertEquals(ExperienceScreenLifecycle.Phase.HIDDEN, target.phase)
-        target.move(ExperienceScreenLifecycle.Phase.ENTERING)
+        target.move(ExperienceScreenLifecycle.Phase.ENTERING, exitReason = ExperienceScreenLifecycle.ExitReason.NONE)
         target.beginPreparedTransition("self")
         assertEquals(contract.getValue("destinationAppearances").jsonPrimitive.content.toULong(), target.appearances)
         assertEquals(contract.getValue("initialAppearances").jsonPrimitive.content.toULong(), source.appearances)
@@ -79,7 +79,10 @@ class ExperienceScreenLifecycleTest {
             val transition = step.getValue("transition").jsonPrimitive.content
             val reduced = step.getValue("reduceMotion").jsonPrimitive.boolean
             val values = if (step.getValue("action").jsonPrimitive.content == "reduceMotion") state.updateReduceMotion(reduced)
-                else state.move(ExperienceScreenLifecycle.Phase.entries.single { it.wireValue == phase }, transition)
+                else state.move(ExperienceScreenLifecycle.Phase.entries.single { it.wireValue == phase }, transition,
+                    exitReason = ExperienceScreenLifecycle.ExitReason.entries.single {
+                        it.wireValue == step.getValue("exitReason").jsonPrimitive.content
+                    })
             assertEquals(mapOf(
                 "screen/phase" to NuxieViewModelScalarValue.StringValue(phase),
                 "screen/appearances" to NuxieViewModelScalarValue.NumberValue(step.getValue("appearances").jsonPrimitive.double),
