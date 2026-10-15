@@ -158,6 +158,7 @@ java_test(
     data = glob([
         "nuxie-android/src/androidTest/assets/**",
         "example-app/src/debug/assets/asset-smoke/**",
+        "fixtures/runtime/paywall-placement-selection/**",
         "fixtures/runtime/screen-exit-reason/**",
     ]),
     target_compatible_with = HOST_COMPATIBILITY,
