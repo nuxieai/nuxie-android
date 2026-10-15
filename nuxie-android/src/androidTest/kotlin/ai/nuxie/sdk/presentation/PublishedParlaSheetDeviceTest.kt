@@ -7,6 +7,7 @@ import ai.nuxie.sdk.experiences.JourneyReleaseIdentity
 import ai.nuxie.sdk.experiences.JourneyReleaseReplayPolicy
 import ai.nuxie.sdk.experiences.JourneyReleaseVerifier
 import ai.nuxie.sdk.experiences.JourneyTrustRoots
+import ai.nuxie.sdk.runtime.NuxieRuntime
 import ai.nuxie.sdk.runtime.nuxieRuntimeSourceRevision
 import android.app.Instrumentation
 import android.content.Intent
@@ -77,7 +78,7 @@ class PublishedParlaSheetDeviceTest {
             val dismissed = CountDownLatch(1)
             val closes = AtomicInteger()
             var window: ExperienceNativeLayerWindow? = null
-            val bounds = Rect()
+            var onScreen = Rect()
             try {
                 instrumentation.runOnMainSync {
                     val content = FrameLayout(activity)
@@ -97,13 +98,17 @@ class PublishedParlaSheetDeviceTest {
                     val sheet = window!!.dialog.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)
                     val parent = sheet.parent as View
                     val visibleArea = Rect()
+                    val bounds = Rect()
                     assertTrue(parent.getGlobalVisibleRect(visibleArea))
                     assertTrue(sheet.getGlobalVisibleRect(bounds))
                     assertEquals("The entire authored surface is reachable above system bars", sheet.height, bounds.height())
                     assertTrue(visibleArea.contains(bounds))
                     assertEquals(if (large) parent.height else parent.height / 2, sheet.height)
+                    onScreen = screenRect(sheet)
+                    // The visible rectangle is in the dialog window's coordinates; touches use the screen's.
+                    android.util.Log.i("ParlaSheet", "sheet in window $bounds, on screen $onScreen")
                 }
-                swipeDown(instrumentation, bounds, activity.resources.displayMetrics.density)
+                swipeDown(instrumentation, onScreen, activity.resources.displayMetrics.density)
                 if (large) {
                     SystemClock.sleep(750)
                     instrumentation.runOnMainSync {
@@ -130,7 +135,7 @@ class PublishedParlaSheetDeviceTest {
             SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         val dismissed = CountDownLatch(1)
         val laidOut = CountDownLatch(1)
-        val bounds = Rect()
+        var onScreen = Rect()
         var window: ExperienceNativeLayerWindow? = null
         try {
             instrumentation.runOnMainSync {
@@ -144,10 +149,13 @@ class PublishedParlaSheetDeviceTest {
                 window!!.show()
             }
             assertTrue(laidOut.await(10, TimeUnit.SECONDS))
+            instrumentation.waitForIdleSync()
             instrumentation.runOnMainSync {
-                assertTrue(window!!.dialog.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet).getGlobalVisibleRect(bounds))
+                val sheet = window!!.dialog.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)
+                assertTrue(sheet.getGlobalVisibleRect(Rect()))
+                onScreen = screenRect(sheet)
             }
-            swipeDown(instrumentation, bounds, activity.resources.displayMetrics.density) {
+            swipeDown(instrumentation, onScreen, activity.resources.displayMetrics.density) {
                 instrumentation.runOnMainSync { window!!.updateContentHeight(152f) }
             }
             assertTrue("Frame measurements must not settle a dragging sheet back to expanded", dismissed.await(10, TimeUnit.SECONDS))
@@ -155,6 +163,8 @@ class PublishedParlaSheetDeviceTest {
     }
 
     private fun authenticate(instrumentation: Instrumentation, large: Boolean): AuthenticatedJourneyRelease {
+        // The runtime revision is read from the native library, so load it first.
+        assertTrue("The pinned native runtime loads", NuxieRuntime.shared.isAvailable)
         val prefix = "journeys/parla-sheets/" + if (large) "variants/large/" else ""
         fun read(path: String) = instrumentation.context.assets.open(prefix + path).use { it.readBytes() }
         val entry = Json.parseToJsonElement(read("release-entry.json").decodeToString()).jsonObject
@@ -188,22 +198,37 @@ class PublishedParlaSheetDeviceTest {
         }.jsonObject.getValue("action").jsonObject.getValue("transition").jsonObject
     }
 
-    private fun swipeDown(instrumentation: Instrumentation, bounds: Rect, density: Float, onFrame: () -> Unit = {}) {
-        val x = bounds.exactCenterX()
-        val startY = bounds.top + minOf(bounds.height() * 0.15f, 64f * density)
-        val endY = bounds.bottom - 24f * density
+    /** The view's rectangle in screen coordinates, where injected touches land. */
+    private fun screenRect(view: View): Rect {
+        val location = IntArray(2)
+        view.getLocationOnScreen(location)
+        return Rect(location[0], location[1], location[0] + view.width, location[1] + view.height)
+    }
+
+    /**
+     * A finger drag down a sheet whose rectangle is in screen coordinates: it starts just inside
+     * the sheet's top edge, moves past the touch slop on the first sample and keeps a steady
+     * hand speed to just above the sheet's bottom edge, then lifts. Every event goes through
+     * the system input dispatcher, so the window under the finger receives it as a real touch.
+     */
+    private fun swipeDown(instrumentation: Instrumentation, sheet: Rect, density: Float, onFrame: () -> Unit = {}) {
+        val x = sheet.exactCenterX()
+        val startY = sheet.top + 24f * density
+        val endY = sheet.bottom - 8f * density
         assertTrue(endY > startY)
+        val automation = instrumentation.uiAutomation
         val down = SystemClock.uptimeMillis()
         fun send(action: Int, y: Float) {
             val event = MotionEvent.obtain(down, SystemClock.uptimeMillis(), action, x, y, 0)
             event.source = android.view.InputDevice.SOURCE_TOUCHSCREEN
-            try { instrumentation.sendPointerSync(event) } finally { event.recycle() }
+            try { assertTrue(automation.injectInputEvent(event, true)) } finally { event.recycle() }
         }
         send(MotionEvent.ACTION_DOWN, startY)
-        for (step in 1..20) {
-            SystemClock.sleep(25)
+        val steps = 12
+        for (step in 1..steps) {
+            SystemClock.sleep(16)
             onFrame()
-            send(MotionEvent.ACTION_MOVE, startY + (endY - startY) * step / 20f)
+            send(MotionEvent.ACTION_MOVE, startY + (endY - startY) * step / steps)
         }
         send(MotionEvent.ACTION_UP, endY)
         instrumentation.waitForIdleSync()
