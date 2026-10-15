@@ -8,6 +8,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -198,10 +199,14 @@ class NuxieOwnedRuntimeTest {
             native.presentation = 4
             assertEquals(4, renderer.renderAndPresent(player, first, 0, 1f))
             assertEquals(0, renderer.resizeIfIdle(320, 100))
-            assertEquals(4, renderer.renderAndPresent(player, second, 0, 1f))
+            assertTrue(renderer.isPresentingAnotherWindow(second))
+            assertFalse(renderer.isPresentingAnotherWindow(first))
+            // Nothing was submitted for the second window, so it must not read as its pending frame.
+            assertEquals(0, renderer.renderAndPresent(player, second, 0, 1f))
             assertEquals(listOf("attach:40"), native.surfaceCalls)
             native.presentation = 1
             assertEquals(1, renderer.renderAndPresent(player, first, 0, 1f))
+            assertFalse(renderer.isPresentingAnotherWindow(second))
             assertEquals(1, renderer.renderAndPresent(player, second, 0, 1f))
             assertEquals(listOf("attach:40", "detach", "attach:41"), native.surfaceCalls)
             assertEquals(0, renderer.detachSurface(first))

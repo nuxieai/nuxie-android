@@ -914,6 +914,14 @@ internal class NuxieAndroidVulkanRenderer internal constructor(
     fun detachSurface(window: NuxieRuntimeWindow): Int =
         if (attachedWindow == window.requireHandle()) detachSurface() else NUX_STATUS_OK
 
+    /**
+     * Screens of one Journey share this renderer, and it holds one surface at a time.
+     * While another window's frame is still queued, this window has nothing in flight:
+     * its host waits for a later frame instead of stepping or claiming a presentation.
+     */
+    fun isPresentingAnotherWindow(window: NuxieRuntimeWindow): Boolean =
+        pendingWindow != null && pendingWindow != window.requireHandle()
+
     fun detachSurface(): Int {
         val handle = owned.require()
         if (attachedWindow == null) return NUX_STATUS_OK
@@ -962,8 +970,9 @@ internal class NuxieAndroidVulkanRenderer internal constructor(
         val rendererHandle = owned.require()
         val playerHandle = player.requireHandle()
         val windowHandle = window.requireHandle()
-        // A native pending frame must complete on its original surface.
-        if (pendingWindow != null && pendingWindow != windowHandle) return 4
+        // A native pending frame must complete on its original surface. Nothing was
+        // submitted for this window, so it must not read as this window's pending frame.
+        if (pendingWindow != null && pendingWindow != windowHandle) return 0
         if (pendingWindow == null && pixelWidth != null && pixelHeight != null) {
             val resized = ensureSize(pixelWidth, pixelHeight)
             if (resized != NUX_STATUS_OK) return -resized
