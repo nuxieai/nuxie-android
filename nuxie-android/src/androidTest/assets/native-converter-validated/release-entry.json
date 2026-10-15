@@ -20,7 +20,7 @@
       "version": 1,
       "algorithm": "ed25519",
       "keyId": "TEST_ONLY_DEV_KEYPAIR",
-      "signatureBase64": "RGGILWqDrGFwYlhYsvCRWrRfD0EK2NtnyENf3jOiwK5o1v5GU2lX/kt2D/fJKcdcWIwPFaGzEM4jo0nFiKn+AA=="
+      "signatureBase64": "TF6McWMty7iaEY1vDpmnb47CDzg6/FbMNk3h5uYTLxS+Sr7jX25Z3O6fUAlg5ENMqrNrHAFXdxxB+2F/WbfRBg=="
     }
   }
 }
