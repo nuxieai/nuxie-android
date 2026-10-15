@@ -93,20 +93,19 @@ if invalid_source_overrides:
         print(f"Invalid source commit override in manifest: {path}", file=sys.stderr)
     raise SystemExit(1)
 
-repository_owned = manifest.get("repositoryOwned", [])
-if (
-    not isinstance(repository_owned, list)
-    or len(set(map(str, repository_owned))) != len(repository_owned)
-    or any(
-        not isinstance(path, str)
-        or path not in expected_files
-        or path in source_commit_overrides
-        for path in repository_owned
-    )
+# Files this repository owns, each with the SHA-256 of the iOS copy it last saw
+# (null when iOS had none). An iOS sync keeps their local contents.
+repository_owned = manifest.get("repositoryOwned", {})
+if not isinstance(repository_owned, dict) or any(
+    not isinstance(path, str)
+    or path not in expected_files
+    or path in source_commit_overrides
+    or not (ios_checksum is None or (isinstance(ios_checksum, str) and re.fullmatch(r"[0-9a-f]{64}", ios_checksum)))
+    for path, ios_checksum in repository_owned.items()
 ):
     fail(
-        "Fixture manifest repositoryOwned must list distinct manifest files "
-        "without a source commit override."
+        "Fixture manifest repositoryOwned must map manifest files without a source "
+        "commit override to the iOS copy's SHA-256 or null."
     )
 
 actual_files = {}
