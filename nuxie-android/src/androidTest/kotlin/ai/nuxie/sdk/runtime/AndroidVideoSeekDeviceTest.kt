@@ -15,6 +15,42 @@ class AndroidVideoSeekDeviceTest {
 
     @Test fun pausedAfterPlaybackWithClockPollingDeliversEverySeekGeneration() = verifySeeks(true)
 
+    @Test fun pausedSeekToDurationDeliversTheLastVideoSample() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val file = File.createTempFile("decoder-endpoint-", ".mp4", instrumentation.targetContext.cacheDir)
+        instrumentation.context.assets.open("video/endpoint-low-fps.mp4").use { input ->
+            file.outputStream().use { input.copyTo(it) }
+        }
+        val decoder = AndroidVideoDecoder(instrumentation.targetContext, file, 1, 64 * 1024 * 1024, 1)
+        val probe = ComposedColorProbe()
+        try {
+            val prepared = SystemClock.elapsedRealtime() + 10_000
+            while (!decoder.ready() && SystemClock.elapsedRealtime() < prepared) Thread.sleep(5)
+            assertTrue(decoder.ready())
+            fun seek(seconds: Double, generation: Long, red: Boolean): Double {
+                decoder.action(2, seconds, generation)
+                val deadline = SystemClock.elapsedRealtime() + 5_000
+                while (SystemClock.elapsedRealtime() < deadline) {
+                    assertNull(decoder.failure())
+                    decoder.takeFrame()?.let { frame ->
+                        try {
+                            if (frame.generation == generation && probe.color(frame) == red) return frame.seconds
+                        } finally { frame.close() }
+                    }
+                    Thread.sleep(5)
+                }
+                throw AssertionError("Paused decoder must deliver the requested image at $seconds seconds")
+            }
+            seek(0.1, 2, true)
+            assertTrue("The final decoded video sample is at least 1.85 seconds", seek(2.0, 3, false) >= 1.85)
+            assertFalse(decoder.playing())
+        } finally {
+            decoder.close()
+            probe.close()
+            file.delete()
+        }
+    }
+
     private fun verifySeeks(afterPlayback: Boolean) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val file = File(instrumentation.targetContext.cacheDir, "decoder-seek-fixture.mp4")
