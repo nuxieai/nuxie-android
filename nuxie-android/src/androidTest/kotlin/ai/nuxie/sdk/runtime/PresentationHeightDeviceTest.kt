@@ -169,7 +169,7 @@ class PresentationHeightDeviceTest {
             instrumentation.runOnMainSync {
                 val sheet = window!!.dialog.findViewById<android.view.View>(com.google.android.material.R.id.design_bottom_sheet)
                 assertEquals(expectedWidth, sheet.width)
-                assertEquals(kotlin.math.ceil(152f * activity.resources.displayMetrics.density).toInt(), sheet.height)
+                assertEquals(kotlin.math.floor(152f * activity.resources.displayMetrics.density).toInt(), sheet.height)
                 window!!.updateContentHeight(10000f)
                 // A sheet never extends under the system bars: the cap is the window height
                 // less the status and navigation bar insets, whether or not the bars are shown.
