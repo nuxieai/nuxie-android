@@ -83,12 +83,12 @@ class ExperienceCustomTransitionTest {
 
     @Test fun `prepared custom entry preserves its existing appearance`() {
         val lifecycle = ExperienceScreenLifecycle()
-        lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING)
+        lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING, exitReason = ExperienceScreenLifecycle.ExitReason.NONE)
         val values = lifecycle.beginPreparedTransition(plan.id)
         assertEquals(contract.getValue("preparedAppearances").jsonPrimitive.long.toULong(), lifecycle.appearances)
         assertEquals(NuxieViewModelScalarValue.StringValue(plan.id), values["screen/transition"])
         assertEquals(ExperienceScreenLifecycle.Phase.ENTERING, lifecycle.phase)
-        lifecycle.move(ExperienceScreenLifecycle.Phase.ACTIVE)
+        lifecycle.move(ExperienceScreenLifecycle.Phase.ACTIVE, exitReason = ExperienceScreenLifecycle.ExitReason.NONE)
         assertEquals(NuxieViewModelScalarValue.StringValue(""), lifecycle.snapshot()["screen/transition"])
     }
 }

@@ -16,7 +16,7 @@ internal class ExperienceScreenLifecycle {
     private var fontScale = 1.0
 
     @Synchronized
-    fun move(phase: Phase, transition: String = "", exitReason: ExitReason = ExitReason.NAVIGATION): Map<String, NuxieViewModelScalarValue> {
+    fun move(phase: Phase, transition: String = "", exitReason: ExitReason): Map<String, NuxieViewModelScalarValue> {
         if (phase == Phase.ENTERING) appearances += 1uL
         this.phase = phase
         this.exitReason = if (phase == Phase.EXITING) exitReason else ExitReason.NONE

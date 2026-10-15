@@ -742,13 +742,13 @@ class PublishedTextInputDeviceTest {
                                     artboard.setDefaultViewModelValue("fontScale", NuxieViewModelScalarValue.NumberValue(1.0))
                                 }.exceptionOrNull() is IllegalArgumentException)
                                 val lifecycle = ExperienceScreenLifecycle()
-                                verify(lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING))
-                                verify(lifecycle.move(ExperienceScreenLifecycle.Phase.ACTIVE))
+                                verify(lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING, exitReason = ExperienceScreenLifecycle.ExitReason.NONE))
+                                verify(lifecycle.move(ExperienceScreenLifecycle.Phase.ACTIVE, exitReason = ExperienceScreenLifecycle.ExitReason.NONE))
                                 verify(lifecycle.updateReduceMotion(true))
                                 verify(ExperienceSafeAreaInsets(24.5, 12.0, 3.0, 7.0).stateValues())
-                                verify(lifecycle.move(ExperienceScreenLifecycle.Phase.EXITING, "checkout"))
-                                verify(lifecycle.move(ExperienceScreenLifecycle.Phase.HIDDEN))
-                                verify(lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING, "return"))
+                                verify(lifecycle.move(ExperienceScreenLifecycle.Phase.EXITING, "checkout", exitReason = ExperienceScreenLifecycle.ExitReason.NAVIGATION))
+                                verify(lifecycle.move(ExperienceScreenLifecycle.Phase.HIDDEN, exitReason = ExperienceScreenLifecycle.ExitReason.NONE))
+                                verify(lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING, "return", exitReason = ExperienceScreenLifecycle.ExitReason.NONE))
                                 assertEquals(1, defaultsCreated)
                             } finally { player.close() }
                         } finally { artboard.close() }
