@@ -168,6 +168,7 @@ final class AndroidVideoDecoder {
   private volatile boolean ready, playing, ended, closed;
   private volatile String failure;
   private volatile double duration;
+  private double lastVideoSampleSeconds = Double.NaN;
   private Frame latest;
   private MediaPlayer player;
   private ImageReader reader;
@@ -358,6 +359,24 @@ final class AndroidVideoDecoder {
         colorMatrix = matrix(integer(format, MediaFormat.KEY_COLOR_STANDARD, 0), width, height);
         colorRange = integer(format, MediaFormat.KEY_COLOR_RANGE, 0) ==
                              MediaFormat.COLOR_RANGE_FULL ? 2 : 1;
+        if (format.containsKey(MediaFormat.KEY_DURATION)) {
+          long durationUs = format.getLong(MediaFormat.KEY_DURATION);
+          if (durationUs > 0) {
+            extractor.selectTrack(track);
+            extractor.seekTo(durationUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
+            long lastSampleUs = -1;
+            int samples = 0;
+            while (extractor.getSampleTrackIndex() >= 0) {
+              if (++samples > 100_000)
+                throw new IllegalArgumentException("video sample limit exceeded");
+              lastSampleUs = Math.max(lastSampleUs, extractor.getSampleTime());
+              if (!extractor.advance())
+                break;
+            }
+            if (lastSampleUs >= 0)
+              lastVideoSampleSeconds = lastSampleUs / 1_000_000.0;
+          }
+        }
         return new int[] {Math.max(1, width), Math.max(1, height)};
       }
       throw new IllegalArgumentException("source has no video track");
@@ -547,10 +566,14 @@ final class AndroidVideoDecoder {
       latchedDuringSeek = null;
     }
     generation = token;
+    // MediaPlayer can finish a paused seek to duration without producing an
+    // image. Seek to the final video sample when the requested time is later.
+    double target = Double.isNaN(lastVideoSampleSeconds)
+                        ? seconds : Math.min(seconds, lastVideoSampleSeconds);
     if (android.os.Build.VERSION.SDK_INT >= 26)
-      player.seekTo((long)(seconds * 1000), MediaPlayer.SEEK_CLOSEST);
+      player.seekTo((long)(target * 1000), MediaPlayer.SEEK_CLOSEST);
     else
-      player.seekTo((int)Math.min(Integer.MAX_VALUE, seconds * 1000));
+      player.seekTo((int)Math.min(Integer.MAX_VALUE, target * 1000));
   }
   private void fail(String message) {
     invalidateClock();
