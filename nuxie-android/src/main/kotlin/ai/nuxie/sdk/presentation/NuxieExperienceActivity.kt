@@ -285,8 +285,10 @@ internal class NuxieExperienceActivity : Activity() {
             }
         }
         fun finishTerminal(reason: CloseReason) {
-            if (closeState.select(reason)) finishAfterServiceClose()
-            PresentationRegistry.reportOutcome(id, reason)
+            if (closeState.select(reason)) {
+                finishAfterServiceClose()
+                PresentationRegistry.reportOutcome(id, reason)
+            }
         }
     }
 
