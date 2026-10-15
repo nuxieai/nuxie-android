@@ -211,7 +211,6 @@ internal class NuxieRuntimeFile(
     private val native: NuxieTypedRuntimeNative,
 ) {
     private val owned = NuxieOwnedHandle(handle, "file", native::freeFile)
-    private val globals = mutableMapOf<String, NuxieRuntimeViewModelState>()
 
     fun installValueMarkers(entries: List<NuxieValueMarker>) = requireNativeSuccess(
         native.installValueMarkers(owned.require(), entries.map { it.toNative() }.toTypedArray()),
@@ -282,18 +281,18 @@ internal class NuxieRuntimeFile(
         return NuxieRuntimeViewModelState(root, emptyList(), native, catalog, schemaIndex)
     }
 
-    /** One file-authored global, shared by all screens using this import. */
-    fun globalViewModel(name: String): NuxieRuntimeViewModelState? {
+    /**
+     * A new instance of a file-authored global, owned by the caller. Each mounted screen
+     * binds its own copy (for example env), so one screen's values never reach another
+     * screen that shares this import.
+     */
+    fun newGlobalViewModel(name: String): NuxieRuntimeViewModelState? {
         owned.require()
-        globals[name]?.let { return it }
         val schema = viewModelCatalog().schemas.singleOrNull { it.name == name && it.isGlobal } ?: return null
-        return newSchemaViewModel(schema.index).also { globals[name] = it }
+        return newSchemaViewModel(schema.index)
     }
 
-    fun close() {
-        try { globals.values.forEach { it.close() } }
-        finally { globals.clear(); owned.close() }
-    }
+    fun close() = owned.close()
 
     internal fun requireHandle(): Long = owned.require()
 }

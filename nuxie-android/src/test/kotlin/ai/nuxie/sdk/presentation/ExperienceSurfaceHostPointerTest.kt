@@ -66,22 +66,29 @@ class ExperienceSurfaceHostPointerTest {
         } finally { run.retire() }
     }
 
-    @Test fun `shared environment update waits for another screens semantic capture`() =
-        sharedEnvironmentFence(initializing = false)
+    @Test fun `a sibling screen's env update stays in its own env`() =
+        siblingEnvironment(initializing = false)
 
-    @Test fun `shared environment initialization waits for another screens semantic capture`() =
-        sharedEnvironmentFence(initializing = true)
+    @Test fun `a sibling screen's env initialization stays in its own env`() =
+        siblingEnvironment(initializing = true)
 
-    private fun sharedEnvironmentFence(initializing: Boolean) = kotlinx.coroutines.runBlocking {
+    /**
+     * Screens of one Journey share the file and renderer, but each owns its env instance:
+     * a covered layer keeps the values for its own space while a sibling writes its own.
+     */
+    private fun siblingEnvironment(initializing: Boolean) = kotlinx.coroutines.runBlocking {
         val base = RecordingNative().apply { nativeInput = true }
-        var revision = 0
-        var reduceMotion = false
+        val revisions = mutableMapOf<Long, Int>()
+        val reduceMotion = mutableMapOf<Long, Boolean>()
+        val envByPlayer = mutableMapOf<Long, Long>()
+        var envInstances = 0L
         var imports = 0
         var renderers = 0
         var players = 0L
         val submitted = mutableMapOf<Long, Pair<Int, Boolean>>()
         val presented = mutableMapOf<Long, Pair<Int, Boolean>>()
         val captured = mutableListOf<Boolean>()
+        fun revision(player: Long) = revisions[envByPlayer[player]] ?: 0
         val native = object : NuxieTypedRuntimeNative by base {
             override fun newFile(rendererHandle: Long, bytes: ByteArray,
                 expectedAssets: List<ai.nuxie.sdk.runtime.ExpectedFileAsset>, externalAssets: Map<Int, ByteArray>,
@@ -95,16 +102,16 @@ class ExperienceSurfaceHostPointerTest {
                     NativeViewModelSchema(2, "env", 0, 1, 0, 0, -1, true)),
                 arrayOf(NativeViewModelProperty(2, 0, "reduceMotion", 3, -1, emptyArray())), emptyArray()))
             override fun newViewModel(fileHandle: Long, schemaIndex: Int, authoredInstanceIndex: Int?) =
-                NativeCallResult(0, 50L + schemaIndex)
+                NativeCallResult(0, if (schemaIndex == 2) 60L + envInstances++ else 50L + schemaIndex)
             override fun snapshotViewModel(viewModelHandle: Long) = NativeCallResult(0,
                 ai.nuxie.sdk.runtime.NativeViewModelSnapshot(viewModelHandle,
                     arrayOf(ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(viewModelHandle,
                         if (viewModelHandle == 51L) 1L else 2L)), emptyArray()))
             override fun mutateViewModel(handle: Long, write: NativeViewModelWrite): Int {
-                assertEquals(52L, handle)
+                assertTrue("Only env instances are written here", handle >= 60L)
                 assertEquals("reduceMotion", write.path)
-                reduceMotion = write.boolValue
-                revision++
+                reduceMotion[handle] = write.boolValue
+                revisions[handle] = (revisions[handle] ?: 0) + 1
                 return 0
             }
             override fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int): Long {
@@ -113,12 +120,15 @@ class ExperienceSurfaceHostPointerTest {
             }
             override fun newDefaultPlayer(artboardHandle: Long) = ++players
             override fun setPlayerGlobalViewModel(playerHandle: Long, name: ByteArray, viewModelHandle: Long): Int {
-                assertEquals(52L, viewModelHandle)
+                assertEquals("env", name.decodeToString())
+                envByPlayer[playerHandle] = viewModelHandle
                 return 0
             }
             override fun renderAndPresent(rendererHandle: Long, playerHandle: Long, windowHandle: Long,
                 clearColor: Int, layoutScaleFactor: Float): Int {
-                val frame = submitted.getOrPut(playerHandle) { revision to reduceMotion }
+                val frame = submitted.getOrPut(playerHandle) {
+                    revision(playerHandle) to (reduceMotion[envByPlayer[playerHandle]] ?: false)
+                }
                 if (base.presentation == 1) {
                     presented[playerHandle] = frame
                     submitted.remove(playerHandle)
@@ -126,9 +136,9 @@ class ExperienceSurfaceHostPointerTest {
                 return base.presentation
             }
             override fun captureSemantics(player: Long): NativeCallResult<Long> {
-                // The runtime refuses semantics from a newer global revision than the pixels.
+                // The runtime refuses semantics from a newer revision of the player's own env than its pixels.
                 val frame = checkNotNull(presented[player])
-                if (frame.first != revision) return NativeCallResult(9, null)
+                if (frame.first != revision(player)) return NativeCallResult(9, null)
                 captured += frame.second
                 return base.captureSemantics(player)
             }
@@ -173,9 +183,12 @@ class ExperienceSurfaceHostPointerTest {
             first.onSurfaceTextureUpdated(texture)
             first.doFrame(1_032_000_000L)
             drain(run.lane)
-            assertTrue("The newer env frame must capture successfully: $failures", failures.isEmpty())
-            assertEquals(listOf(false, true), captured)
-            assertEquals("Both screens use the same native file and env", 1, imports)
+            assertTrue(failures.toString(), failures.isEmpty())
+            assertEquals("The first screen keeps its own env", listOf(false, false), captured)
+            assertEquals("Each screen binds its own env", 2, envByPlayer.values.toSet().size)
+            assertEquals(true, reduceMotion[envByPlayer.getValue(2L)])
+            assertEquals(null, reduceMotion[envByPlayer.getValue(1L)])
+            assertEquals("Both screens use the same native file", 1, imports)
             assertEquals("Deferred mounting must use the run renderer", 1, renderers)
         } finally {
             first.release(); second.release(); drain(run.lane)
@@ -797,7 +810,7 @@ class ExperienceSurfaceHostPointerTest {
     }
 
     @Test
-    fun `environment state queues before loading and updates the file global`() {
+    fun `environment state queues before loading and updates the screen env`() {
         val native = RecordingNative(globalEnvironment = true)
         val lane = NuxieRuntimeLane()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
@@ -817,7 +830,7 @@ class ExperienceSurfaceHostPointerTest {
             host.release(ExperienceSafeAreaInsets.ZERO.stateValues())
             host.updateRuntimeValues(ExperienceSafeAreaInsets.ZERO.stateValues())
             drain(lane)
-            assertEquals("A retired screen cannot overwrite the shared environment", listOf(24f, 12f), native.stateWrites)
+            assertEquals("A retired screen no longer writes its environment", listOf(24f, 12f), native.stateWrites)
             assertTrue(native.boundStateFreed)
         } finally {
             host.release()

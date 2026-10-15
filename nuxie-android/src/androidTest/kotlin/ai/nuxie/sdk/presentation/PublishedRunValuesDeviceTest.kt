@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.runtime.NuxieRuntime
+import ai.nuxie.sdk.runtime.NuxieRuntimeViewModelState
 import ai.nuxie.sdk.runtime.NuxieViewModelScalarValue
 import android.content.Intent
 import android.graphics.Bitmap
@@ -25,15 +26,18 @@ class PublishedRunValuesDeviceTest {
         val run = ExperienceRunValues()
         val frames = mutableListOf<Bitmap>()
         try {
-            val env = run.lane.call {
+            run.lane.call {
                 val file = run.prepare(PublishedRunValuesFixture.bytes, PublishedRunValuesFixture.descriptor, emptyMap()).file
                 val schema = file.viewModelCatalog().schemas.single { it.name == "env" }
                 assertTrue(schema.isGlobal)
-                checkNotNull(file.globalViewModel("env")).also {
-                    assertSame(it, file.globalViewModel("env"))
-                    assertEquals(NuxieViewModelScalarValue.BooleanValue(false), it.snapshot().resolveScalar(listOf("reduceMotion")))
-                    assertEquals(NuxieViewModelScalarValue.NumberValue(0.0), it.snapshot().resolveScalar(listOf("safeArea", "top")))
-                }
+                // Every mounted screen gets its own env instance with the authored defaults.
+                val first = checkNotNull(file.newGlobalViewModel("env"))
+                val second = checkNotNull(file.newGlobalViewModel("env"))
+                try {
+                    assertNotSame(first, second)
+                    assertEquals(NuxieViewModelScalarValue.BooleanValue(false), first.snapshot().resolveScalar(listOf("reduceMotion")))
+                    assertEquals(NuxieViewModelScalarValue.NumberValue(0.0), first.snapshot().resolveScalar(listOf("safeArea", "top")))
+                } finally { first.close(); second.close() }
             }
             for ((index, motion) in listOf(false, true, false).withIndex()) {
                 var host: ExperienceSurfaceHost? = null
@@ -76,6 +80,8 @@ class PublishedRunValuesDeviceTest {
                     val folder = File(instrumentation.targetContext.getExternalFilesDir(null), "f4-run-values").apply { mkdirs() }
                     File(folder, "device-first-frame-$index.png").outputStream().use { assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) }
                     run.lane.call {
+                        val env = ExperienceSurfaceHost::class.java.getDeclaredField("environment")
+                            .apply { isAccessible = true }.get(checkNotNull(host)) as NuxieRuntimeViewModelState
                         assertEquals(NuxieViewModelScalarValue.BooleanValue(motion), env.snapshot().resolveScalar(listOf("reduceMotion")))
                         assertEquals(NuxieViewModelScalarValue.NumberValue(if (motion) 59.0 else 0.0), env.snapshot().resolveScalar(listOf("safeArea", "top")))
                     }

@@ -81,6 +81,31 @@ internal class ExperienceWindowInsets(
     }
 
     companion object {
+        /**
+         * The safe area a screen will have once its own layer window shows it. A screen being
+         * prepared for a new layer is parked inside its presenter, whose geometry is not its own.
+         * A native sheet sits between the system bars; a full-screen layer covers the window.
+         */
+        fun forLayer(activity: Activity, shell: PresentationShell): ExperienceSafeAreaInsets {
+            if (shell !is PresentationShell.FullScreen) return ExperienceSafeAreaInsets.ZERO
+            val windowInsets: WindowInsets
+            val width: Int
+            val height: Int
+            if (Build.VERSION.SDK_INT >= 30) {
+                val metrics = activity.windowManager.currentWindowMetrics
+                windowInsets = metrics.windowInsets
+                width = metrics.bounds.width()
+                height = metrics.bounds.height()
+            } else {
+                val root = activity.window.decorView
+                windowInsets = root.rootWindowInsets ?: return ExperienceSafeAreaInsets.ZERO
+                width = root.width
+                height = root.height
+            }
+            val local = relativeInsets(systemInsets(windowInsets), width, height, 0, 0, width, height)
+            return experienceSafeAreaInsets(local, activity.resources.displayMetrics.density)
+        }
+
         @Suppress("DEPRECATION")
         internal fun systemInsets(insets: WindowInsets): ExperienceSafeAreaInsets {
             if (Build.VERSION.SDK_INT >= 30) {
