@@ -100,7 +100,7 @@ class PublishedScreenExitReasonDeviceTest {
             sceneFile = scene,
             artboardName = "tap",
             clearColor = Color.BLACK,
-            shell = PresentationShell.FullScreen,
+            shell = PresentationShell.FullScreen(),
             screenId = "scr_screens_stap",
             descriptor = hostDescriptor,
             artboardSize = ExperienceArtboardSize(100f, 100f),
