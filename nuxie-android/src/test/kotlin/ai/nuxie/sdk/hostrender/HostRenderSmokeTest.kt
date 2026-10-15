@@ -12,6 +12,9 @@ import java.util.Base64
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -38,7 +41,7 @@ class HostRenderSmokeTest {
                 try {
                     val artboard = checkNotNull(file.newArtboard("tap"))
                     try {
-                        artboard.bindDefaultViewModel("Runtime", "root-sdk-id")
+                        artboard.bindDefaultViewModel(motionModelName("dismissed-only"), "root-sdk-id")
                         val player = file.newExperiencePlayer(artboard, "tap")
                         try {
                             val state = ExperienceScreenLifecycle()
@@ -102,7 +105,7 @@ class HostRenderSmokeTest {
                 try {
                     val artboard = checkNotNull(file.newArtboard("tap"))
                     try {
-                        artboard.bindDefaultViewModel("Runtime", "root-sdk-id")
+                        artboard.bindDefaultViewModel(motionModelName(variant), "root-sdk-id")
                         val player = file.newExperiencePlayer(artboard, "tap")
                         try {
                             val state = ExperienceScreenLifecycle()
@@ -435,6 +438,13 @@ class HostRenderSmokeTest {
         return resource.bufferedReader().use { reader ->
             Base64.getMimeDecoder().decode(reader.readText())
         }
+    }
+
+    private fun motionModelName(variant: String): String {
+        val descriptor = Json.parseToJsonElement(File(System.getProperty("nuxie.repo.root"),
+            "fixtures/runtime/screen-exit-reason/$variant/mounted-screen.json").readText()).jsonObject
+        return descriptor.getValue("render").jsonObject.getValue("screens").jsonArray
+            .single().jsonObject.getValue("defaultViewModelName").jsonPrimitive.content
     }
 
     private fun assumeHostRuntime() {
