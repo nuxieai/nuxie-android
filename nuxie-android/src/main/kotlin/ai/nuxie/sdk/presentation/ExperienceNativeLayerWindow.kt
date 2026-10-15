@@ -137,6 +137,8 @@ internal class ExperienceNativeLayerWindow(
     fun retire() {
         retired = true
         activity.window.decorView.removeOnLayoutChangeListener(layoutListener)
+        (dialog as? BottomSheetDialog)?.findViewById<View>(com.google.android.material.R.id.coordinator)
+            ?.removeOnLayoutChangeListener(layoutListener)
         dialog.setOnDismissListener(null)
         dialog.dismiss()
         (content.parent as? ViewGroup)?.removeView(content)
