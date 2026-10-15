@@ -30,18 +30,23 @@ internal class ExperienceLayerEmissionCursor(batch: Long, emission: Long) {
         batch: JourneyScreenEmissionBatch,
         sources: JourneyRuntimeEmissionSources?,
         isCurrent: () -> Boolean,
-        accept: suspend (JourneyScreenEmissionBatch, JourneyRuntimeEmissionSources?) -> Boolean,
-    ): Boolean {
+        accept: suspend (JourneyScreenEmissionBatch, JourneyRuntimeEmissionSources?) -> JourneyEmissionBatchResult,
+    ): JourneyEmissionBatchResult {
         gate.lock()
         try {
-            if (!isCurrent()) return true
-            if (nextBatch == Long.MAX_VALUE || batch.emissions.size.toLong() > Long.MAX_VALUE - nextEmission) return false
+            // A covered layer's input is dropped without consuming the run cursor.
+            if (!isCurrent()) return JourneyEmissionBatchResult.DECLINED
+            if (nextBatch == Long.MAX_VALUE || batch.emissions.size.toLong() > Long.MAX_VALUE - nextEmission) {
+                return JourneyEmissionBatchResult.REJECTED
+            }
             val sequenced = batch.copy(batchSequence = nextBatch,
                 emissions = batch.emissions.mapIndexed { index, value -> value.copy(sequence = nextEmission + index) })
-            if (!accept(sequenced, sources)) return false
+            // DECLINED (for example a tap during a pending purchase) keeps the surface and does not advance.
+            val result = accept(sequenced, sources)
+            if (result != JourneyEmissionBatchResult.ACCEPTED) return result
             nextBatch++
             nextEmission += sequenced.emissions.size
-            return true
+            return result
         } finally { gate.unlock() }
     }
 }
