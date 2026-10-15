@@ -634,6 +634,84 @@ class JourneyServiceTest {
         assertNull(run.completion)
     }
 
+    @Test fun `authored close of an upper layer reports its dismissal and reveal while its route waits`() = runBlocking {
+        val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(renderedEntry)
+        val renderedAuthority = authority(renderedEntry)
+        catalog.commit("customer", catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority))
+        val baseline = requireNotNull(catalog.snapshot("customer"))
+        val original = baseline.releasesByDigest.values.single()
+        // Parla's shape: a route opens a sheet over the first screen, and the sheet's own route
+        // closes it with an authored dismiss.
+        val leg = JsonObject(original.leg + mapOf(
+            "screens" to JsonArray(original.leg.getValue("screens").jsonArray +
+                Json.parseToJsonElement("""{"id":"screen_details","responseCaptures":[]}""")),
+            "steps" to Json.parseToJsonElement("""[
+                {"kind":"action","id":"present","action":{"type":"navigate","screenId":"screen_welcome"},"outlets":{}},
+                {"kind":"action","id":"open","action":{"type":"navigate","screenId":"screen_details",
+                    "transition":{"type":"modal","present":"sheet","height":"medium","closedby":"any"}},"outlets":{}},
+                {"kind":"action","id":"close","action":{"type":"dismiss","reason":"done"},"outlets":{}}]"""),
+            "routes" to Json.parseToJsonElement("""[
+                {"host":{"kind":"screen","screenId":"screen_welcome"},"eventName":"continue","entryStepId":"open"},
+                {"host":{"kind":"screen","screenId":"screen_details"},"eventName":"done","entryStepId":"close"}]"""),
+        ))
+        val envelope = JourneyReleaseEnvelope.authenticate(renderedEntry.getValue("envelope").toString().encodeToByteArray(),
+            mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(fixture.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP)))
+        val release = AuthenticatedJourneyRelease(envelope, original.identity,
+            JsonObject(original.descriptor + ("leg" to leg)), original.publishedAtSeqToPromote)
+        val snapshot = baseline.copy(releasesByDigest = mapOf(release.descriptorSha256 to release))
+        val captures = CopyOnWriteArrayList<String>()
+        val recording = RecordingJourneyPresenter()
+        val closed = CompletableDeferred<Pair<JourneyScreenDismissalResult, Boolean>>()
+        val presenter = object : JourneyPresenting by recording {
+            override fun hasPresentedLayer(owner: JourneyPresentationOwner) = recording.shownCount.get() > 1
+            override suspend fun dispatchAction(owner: JourneyPresentationOwner, action: JsonObject, effectId: String): JourneyPresentationActionResult {
+                if (action["type"] != JsonPrimitive("dismiss")) return recording.dispatchAction(owner, action, effectId)
+                val request = requireNotNull(recording.request)
+                // As the presentation service does: the closing layer reports its dismissal from its
+                // own coroutine, then the retained screen beneath is shown, before the close returns.
+                val dismissal = scope.async { request.onScreenDismissed("screen_details", "screen_welcome", "journey") }.await()
+                closed.complete(dismissal to request.onScreenChanged("screen_welcome"))
+                return JourneyPresentationActionResult.Handled
+            }
+        }
+        val service = JourneyService(identity = identity("customer"), events = store, catalog = catalog,
+            journalDirectory = directory, scope = scope, capture = { name, _, _, _ -> captures += name; true },
+            captureScreenEvent = { name, properties, eventId, distinctId, occurredAt, admission, origin ->
+                val event = StoredEvent(eventId, name, JsonValueConverter.fromMap(properties), occurredAt, distinctId, journeyOrigin = origin)
+                val settled = admission?.commitIfCurrent { true } != null
+                captures += name
+                StableEventCaptureResult(settled, event.takeIf { settled })
+            }, presenter = presenter)
+        service.initialize()
+        service.onAppWillEnterForeground()
+        service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+        val first = requireNotNull(recording.request)
+        assertEquals("screen_welcome", first.screenId)
+        assertTrue(first.onEmissionBatch(JourneyScreenEmissionBatch(first.journeyId, first.nextBatchSequence, "open-sheet",
+            JourneyScreenEmissionSource("screen_welcome", "continue"),
+            listOf(JourneyScreenEmission("continue-event", first.nextEmissionSequence, 100L, "continue", JsonObject(emptyMap())))),
+            null) == JourneyEmissionBatchResult.ACCEPTED)
+        withTimeout(5_000) { while (recording.shownCount.get() < 2) kotlinx.coroutines.delay(10) }
+        val sheet = requireNotNull(recording.request)
+        assertEquals("screen_details", sheet.screenId)
+        val done = scope.async {
+            sheet.onEmissionBatch(JourneyScreenEmissionBatch(sheet.journeyId, sheet.nextBatchSequence, "close-sheet",
+                JourneyScreenEmissionSource("screen_details", "done"),
+                listOf(JourneyScreenEmission("done-event", sheet.nextEmissionSequence, 200L, "done", JsonObject(emptyMap())))), null)
+        }
+        // Before the fix the dismissal report queued behind the route waiting for it, forever.
+        val (dismissal, shown) = withTimeout(5_000) { closed.await() }
+        assertEquals(JourneyScreenDismissalResult.HANDLED, dismissal)
+        assertTrue("The retained screen's reveal is recorded", shown)
+        assertEquals(JourneyEmissionBatchResult.ACCEPTED, withTimeout(5_000) { done.await() })
+        service.onAppDidEnterBackground() // FIFO barrier after the close settles.
+        assertTrue(captures.toString(), captures.contains(SystemEventNames.SCREEN_DISMISSED))
+        assertFalse("Closing an upper layer does not end the Journey", captures.contains(JourneyEventNames.LEG_COMPLETED))
+        assertNull(JourneyRunJournal(directory, "customer", JourneyStorageScope(renderedAuthority)).runs().single().completion)
+        assertTrue(recording.shutdowns.isEmpty())
+    }
+
     @Test fun `renderer batches durably publish once and route the owning run`() = runBlocking {
         val identity = identity("customer")
         val renderedEntry = fixture.getValue("renderedEntry").jsonObject

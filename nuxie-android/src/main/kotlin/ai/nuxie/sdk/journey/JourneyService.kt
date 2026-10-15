@@ -2343,6 +2343,21 @@ internal class JourneyService(
         JourneyExperimentExposureReporter(target, capture).flushPending()
     }
 
+    /**
+     * An upper layer's authored close reports the closing screen's dismissal and the reveal
+     * beneath it while this route waits for the close. Like presentScreen's callbacks, those
+     * reports are handled under the presentation callback lock with deferred continuation,
+     * never queued on this worker behind the route that is waiting for them.
+     */
+    private suspend inline fun <T> withNestedPresentationCallbacks(runId: String, nested: Boolean, block: () -> T): T {
+        val marked = nested && presentingRunIds.putIfAbsent(runId, Unit) == null
+        try {
+            return block()
+        } finally {
+            if (marked) presentingRunIds.remove(runId)
+        }
+    }
+
     private suspend fun presentScreen(
         currentRun: JourneyRun,
         screenId: String,
@@ -2713,11 +2728,9 @@ internal class JourneyService(
                                 }
                                 pendingPresentationPurchasePlacements[run.id] = placementId
                             }
-                            when (val presentationResult = presentation.dispatchAction(
-                                owner,
-                                purchaseAction,
-                                effectId,
-                            )) {
+                            when (val presentationResult = withNestedPresentationCallbacks(run.id, closesLayer) {
+                                presentation.dispatchAction(owner, purchaseAction, effectId)
+                            }) {
                                 is JourneyPresentationActionResult.Navigate -> {
                                     val alternative = JourneyOfferAccess.forScreen(leg, presentationResult.screenId)?.let { offerAlternative(it, release) }
                                     if (!current()) { finishExecution(run, "abandoned"); return }
