@@ -352,7 +352,9 @@ class ConfiguredImportSmokeTest {
         val preparationStarted = System.nanoTime()
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val local = java.io.File.createTempFile("video-decoder-", ".mp4", instrumentation.targetContext.cacheDir)
-        instrumentation.context.assets.open("video/" + (measurement?.file ?: if (endpointSeek) "endpoint-low-fps.mp4" else if (frenchCaptions) "multilingual.mp4" else "captions.mp4")).use { input ->
+        // The endpoint test uses the Android copy of endpoint-low-fps.mp4 whose frames carry a time code.
+        instrumentation.context.assets.open(measurement?.file?.let { "video/$it" } ?: if (endpointSeek) "video-endpoint/endpoint-timecoded.mp4"
+            else "video/" + if (frenchCaptions) "multilingual.mp4" else "captions.mp4").use { input ->
             local.outputStream().use { input.copyTo(it) }
         }
         val bytes = instrumentation.context.assets.open("video/${if (endpointSeek) "endpoint" else "greeting"}.nux").use { it.readBytes() }
@@ -525,17 +527,23 @@ class ConfiguredImportSmokeTest {
                                     }
                                     return false
                                 }
+                                /** The presented image's own frame time, read from its time code. */
+                                fun presentedSeconds(): Double {
+                                    val composed = renderer.renderToCpuFrame(player, 0, 1f)
+                                    val offset = (80 * composed.width + 100) * 4
+                                    return timecodeSeconds(IntArray(3) { composed.rgba[offset + it].toInt() and 255 })
+                                }
                                 setVideoValue(artboard, player, "current-time", NuxieViewModelScalarValue.NumberValue(0.1))
                                 assertTrue("Bound seek to 0.1 presents a decoded red image", awaitColor(true))
+                                assertEquals("The red image is the 0.1-second sample", 0.1, presentedSeconds(), 0.001)
                                 val delivered = playback.deliveredFrames
                                 setVideoValue(artboard, player, "current-time", NuxieViewModelScalarValue.NumberValue(2.0))
                                 val reachedEndpoint = awaitColor(false)
                                 val endpoint = player.videos().single()
-                                assertTrue("Seek to duration presents the final 1.9-second blue image; video=$endpoint, " +
-                                    "delivered=${playback.deliveredFrames}, frameSeconds=${playback.lastDeliveredFrameSeconds}", reachedEndpoint)
+                                assertTrue("Seek to duration presents a blue image; video=$endpoint, delivered=${playback.deliveredFrames}",
+                                    reachedEndpoint)
                                 assertTrue("The seek delivers a new decoded image", playback.deliveredFrames > delivered)
-                                assertTrue("Final decoded frame must be at least 1.85 seconds: ${playback.lastDeliveredFrameSeconds}",
-                                    checkNotNull(playback.lastDeliveredFrameSeconds) >= 1.85)
+                                assertEquals("The presented image is the final 1.9-second sample", 1.9, presentedSeconds(), 0.001)
                                 assertFalse(player.videos().single().wantsPlay)
                                 return
                             }

@@ -16,39 +16,108 @@ class AndroidVideoSeekDeviceTest {
     @Test fun pausedAfterPlaybackWithClockPollingDeliversEverySeekGeneration() = verifySeeks(true)
 
     @Test fun pausedSeekToDurationDeliversTheLastVideoSample() {
-        val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val file = File.createTempFile("decoder-endpoint-", ".mp4", instrumentation.targetContext.cacheDir)
-        instrumentation.context.assets.open("video/endpoint-low-fps.mp4").use { input ->
-            file.outputStream().use { input.copyTo(it) }
-        }
-        val decoder = AndroidVideoDecoder(instrumentation.targetContext, file, 1, 64 * 1024 * 1024, 1)
+        val file = endpointMedia("endpoint-timecoded.mp4")
+        val decoder = AndroidVideoDecoder(InstrumentationRegistry.getInstrumentation().targetContext, file, 1, 64 * 1024 * 1024, 1)
         val probe = ComposedColorProbe()
         try {
-            val prepared = SystemClock.elapsedRealtime() + 10_000
-            while (!decoder.ready() && SystemClock.elapsedRealtime() < prepared) Thread.sleep(5)
-            assertTrue(decoder.ready())
-            fun seek(seconds: Double, generation: Long, red: Boolean): Double {
+            awaitReady(decoder)
+            /** The decoded image's own frame time, read from its time code, and the player position. */
+            fun seek(seconds: Double, generation: Long, red: Boolean): Pair<Double, Double> {
                 decoder.action(2, seconds, generation)
                 val deadline = SystemClock.elapsedRealtime() + 5_000
                 while (SystemClock.elapsedRealtime() < deadline) {
                     assertNull(decoder.failure())
                     decoder.takeFrame()?.let { frame ->
                         try {
-                            if (frame.generation == generation && probe.color(frame) == red) return frame.seconds
+                            val rgb = probe.rgb(frame)
+                            if (frame.generation == generation && ComposedColorProbe.color(rgb) == red) {
+                                return timecodeSeconds(rgb) to frame.seconds
+                            }
                         } finally { frame.close() }
                     }
                     Thread.sleep(5)
                 }
                 throw AssertionError("Paused decoder must deliver the requested image at $seconds seconds")
             }
-            seek(0.1, 2, true)
-            assertTrue("The final decoded video sample is at least 1.85 seconds", seek(2.0, 3, false) >= 1.85)
+            assertEquals("Seek to 0.1 decodes the 0.1-second sample", 0.1, seek(0.1, 2, true).first, 0.001)
+            val (image, position) = seek(2.0, 3, false)
+            assertEquals("Seek to duration decodes the final 1.9-second sample; player position=$position",
+                1.9, image, 0.001)
             assertFalse(decoder.playing())
         } finally {
             decoder.close()
             probe.close()
             file.delete()
         }
+    }
+
+    @Test fun pausedSeekIntoAnAudioTailKeepsTheRequestedTime() {
+        val file = endpointMedia("endpoint-audio-tail.mp4")
+        val decoder = AndroidVideoDecoder(InstrumentationRegistry.getInstrumentation().targetContext, file, 1, 64 * 1024 * 1024, 1)
+        try {
+            awaitReady(decoder)
+            assertEquals(2.25, decoder.duration(), 0.05)
+            decoder.action(2, 2.2, 2)
+            // The tail has no image to wait for. Read the player on its owner thread
+            // once the seek has completed.
+            val seeking = AndroidVideoDecoder::class.java.getDeclaredField("seeking").apply { isAccessible = true }
+            val player = AndroidVideoDecoder::class.java.getDeclaredField("player").apply { isAccessible = true }
+            val handler = AndroidVideoDecoder::class.java.getDeclaredField("handler").apply { isAccessible = true }
+                .get(decoder) as android.os.Handler
+            var position = -1
+            val deadline = SystemClock.elapsedRealtime() + 5_000
+            while (SystemClock.elapsedRealtime() < deadline) {
+                assertNull(decoder.failure())
+                val read = java.util.concurrent.CountDownLatch(1)
+                var settled = false
+                assertTrue(handler.post {
+                    settled = !seeking.getBoolean(decoder)
+                    if (settled) position = (player.get(decoder) as android.media.MediaPlayer).currentPosition
+                    read.countDown()
+                })
+                assertTrue(read.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                if (settled && position >= 0) break
+                Thread.sleep(20)
+            }
+            assertTrue("A seek into audio after the last image keeps its time: position=${position}ms", position >= 2_150)
+        } finally {
+            decoder.close()
+            file.delete()
+        }
+    }
+
+    @Test fun seekLimitReadsTheLastImageAndSkipsWhenItCannot() {
+        val timecoded = endpointMedia("endpoint-timecoded.mp4")
+        val tail = endpointMedia("endpoint-audio-tail.mp4")
+        val broken = File.createTempFile("decoder-not-video-", ".mp4",
+            InstrumentationRegistry.getInstrumentation().targetContext.cacheDir).apply { writeText("not a video") }
+        try {
+            assertEquals(1.9, AndroidVideoDecoder.seekLimitSeconds(timecoded, AndroidVideoDecoder.SEEK_LIMIT_SCAN_SAMPLES), 0.001)
+            assertTrue("Audio after the last image keeps seeks unmoved",
+                AndroidVideoDecoder.seekLimitSeconds(tail, AndroidVideoDecoder.SEEK_LIMIT_SCAN_SAMPLES).isNaN())
+            assertTrue("A scan over its sample limit skips the limit",
+                AndroidVideoDecoder.seekLimitSeconds(timecoded, 1).isNaN())
+            assertTrue("An unreadable file skips the limit without throwing",
+                AndroidVideoDecoder.seekLimitSeconds(broken, 100).isNaN())
+        } finally {
+            timecoded.delete()
+            tail.delete()
+            broken.delete()
+        }
+    }
+
+    private fun endpointMedia(name: String): File {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val file = File.createTempFile("decoder-endpoint-", ".mp4", instrumentation.targetContext.cacheDir)
+        instrumentation.context.assets.open("video-endpoint/$name").use { input -> file.outputStream().use { input.copyTo(it) } }
+        return file
+    }
+
+    private fun awaitReady(decoder: AndroidVideoDecoder) {
+        val prepared = SystemClock.elapsedRealtime() + 10_000
+        while (!decoder.ready() && decoder.failure() == null && SystemClock.elapsedRealtime() < prepared) Thread.sleep(5)
+        assertNull(decoder.failure())
+        assertTrue(decoder.ready())
     }
 
     private fun verifySeeks(afterPlayback: Boolean) {
@@ -128,7 +197,10 @@ private class ComposedColorProbe : AutoCloseable {
     }
 
     /** True for red, false for blue, null for neither. */
-    fun color(frame: AndroidVideoDecoder.Frame): Boolean? {
+    fun color(frame: AndroidVideoDecoder.Frame): Boolean? = color(rgb(frame))
+
+    /** The composed red, green and blue at the video's center. */
+    fun rgb(frame: AndroidVideoDecoder.Frame): IntArray {
         player.videoPresentHardwareBuffer(renderer, video.componentId, NuxieVideoHardwareBufferFrame(
             video.generation, 0.0, frame.buffer, frame.cropLeft, frame.cropTop, frame.cropRight,
             frame.cropBottom, frame.rotationDegrees, frame.displayWidth, frame.displayHeight,
@@ -136,11 +208,13 @@ private class ComposedColorProbe : AutoCloseable {
         player.step(0.0)
         val composed = renderer.renderToCpuFrame(player, 0, 1f)
         val offset = (80 * composed.width + 100) * 4
-        val r = composed.rgba[offset].toInt() and 255
-        val b = composed.rgba[offset + 2].toInt() and 255
-        return when {
-            r > 180 && b < 70 -> true
-            b > 180 && r < 70 -> false
+        return IntArray(3) { composed.rgba[offset + it].toInt() and 255 }
+    }
+
+    companion object {
+        fun color(rgb: IntArray): Boolean? = when {
+            rgb[0] > 180 && rgb[2] < 70 -> true
+            rgb[2] > 180 && rgb[0] < 70 -> false
             else -> null
         }
     }
@@ -152,3 +226,9 @@ private class ComposedColorProbe : AutoCloseable {
         renderer.close()
     }
 }
+
+/**
+ * The frame time of a decoded image of the Android endpoint test media, read
+ * from the image itself: each frame's green channel is its number times 12.
+ */
+internal fun timecodeSeconds(rgb: IntArray): Double = Math.round(rgb[1] / 12.0) / 10.0
