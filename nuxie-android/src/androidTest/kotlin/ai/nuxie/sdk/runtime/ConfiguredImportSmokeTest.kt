@@ -486,6 +486,10 @@ class ConfiguredImportSmokeTest {
                                     .apply { isAccessible = true }.invoke(live, android.media.AudioManager.AUDIOFOCUS_LOSS)
                                 onDecoder { /* Drain the focus-loss callback on its owner thread. */ }
                                 tick()
+                                // The host sends the pause on this advance. As in the live frame
+                                // loop, the two-way binding writes it back on the next scene step.
+                                assertFalse("Permanent focus loss pauses the runtime video", player.videos().single().wantsPlay)
+                                player.step(0.0)
                                 assertEquals("Permanent host focus loss writes paused=true to the bound value", true,
                                     artboard.defaultViewModelSnapshot()?.resolveBoolean("paused"))
                                 assertFalse(player.videos().single().wantsPlay)
