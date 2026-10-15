@@ -825,7 +825,7 @@ internal class ExperiencePresentationService(
         transition: JsonObject? = null,
         runValues: ExperienceRunValues? = null,
     ): ExperienceRef {
-        val presentation = try { PresentationShell.fromTransition(transition) } catch (error: ExperiencePresentationException) {
+        try { PresentationShell.fromTransition(transition) } catch (error: ExperiencePresentationException) {
             reservation?.close()
             throw error
         }

@@ -4,7 +4,6 @@ import ai.nuxie.sdk.runtime.NuxieTextRunGeometry
 import ai.nuxie.sdk.runtime.NativeSemanticNode
 import ai.nuxie.sdk.runtime.NativeSemanticState
 import android.view.accessibility.AccessibilityNodeInfo
-import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Color

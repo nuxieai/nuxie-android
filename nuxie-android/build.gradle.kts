@@ -147,7 +147,7 @@ dependencies {
   implementation(libs.androidx.sqlite.framework)
   implementation(libs.androidx.browser)
   // Brief 10 Q2: Material owns modal sheet presentation and drag dismissal.
-  implementation("com.google.android.material:material:1.12.0")
+  implementation(libs.google.material)
   // StoreProduct exposes ProductDetails, so Billing is part of consumers'
   // compile classpath. Use the plain artifact: billing-ktx ships Kotlin 2.2
   // metadata this repo's pinned compiler cannot read.

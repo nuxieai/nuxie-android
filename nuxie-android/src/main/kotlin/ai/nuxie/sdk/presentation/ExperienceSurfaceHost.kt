@@ -796,7 +796,8 @@ internal class ExperienceSurfaceHost(
                 val active = checkNotNull(player)
                 initialPresentationSize?.let { size ->
                     presentationHeight.apply(loadedFile, active, fitsContentHeight, size.width, size.height)
-                    val correlation = nextCorrelationId++
+                    val correlation = nextCorrelationId
+                    nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
                     val outcome = stepAndRefreshFocus { active.stepTyped(elapsedSeconds = 0.0, correlationId = correlation) }
                     // Same per-step capture as the frame loop, so a response save on this step is kept.
                     captureStepSnapshot(outcome, correlation)?.let(::retainScreenValues)

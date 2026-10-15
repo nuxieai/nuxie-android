@@ -32,7 +32,7 @@ internal class NuxiePresentationHeight {
             if (schema != null && catalog.properties.any {
                 it.schemaIndex == schema.index && it.name == contract.propertyName && it.kind == NuxieViewModelPropertyKind.NUMBER
             }) {
-                val created = file.newViewModel(schema.index)
+                val created = file.newSchemaViewModel(schema.index)
                 try { player.bindGlobalViewModel(contract.globalName, created) }
                 catch (error: Throwable) { created.close(); throw error }
                 instance = created

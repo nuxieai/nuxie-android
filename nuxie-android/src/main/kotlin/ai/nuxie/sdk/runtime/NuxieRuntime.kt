@@ -266,13 +266,6 @@ internal class NuxieRuntimeFile(
         "read view-model catalog",
     ).toViewModelCatalog()
 
-    fun newViewModel(schemaIndex: Int): NuxieRuntimeViewModelState {
-        val catalog = viewModelCatalog()
-        require(catalog.schemas.any { it.index == schemaIndex }) { "Unknown view-model schema index $schemaIndex" }
-        val root = requireNativeValue(native.newViewModel(owned.require(), schemaIndex, null), "create view model")
-        return NuxieRuntimeViewModelState(root, emptyList(), native, catalog, schemaIndex)
-    }
-
     fun newAuthoredViewModel(name: String, authoredIndex: Int): NuxieRuntimeViewModelState? {
         val catalog = viewModelCatalog()
         val schema = catalog.schemas.singleOrNull { it.name == name } ?: return null
