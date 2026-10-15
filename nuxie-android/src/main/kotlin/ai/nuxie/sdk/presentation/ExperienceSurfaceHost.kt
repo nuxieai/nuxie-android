@@ -73,6 +73,9 @@ internal class ExperienceSurfaceHost(
     private val initialPresentationSize: ExperienceArtboardSize? = null,
 ) : TextureView(context), TextureView.SurfaceTextureListener, Choreographer.FrameCallback {
     @Volatile private var layoutBounds = artboardSize
+    private data class LayoutDelivery(val bounds: ExperienceArtboardSize, val contentHeight: Float?)
+    // Written only after delivery on main; frame-lane measurements are not acknowledgements.
+    @Volatile private var deliveredLayout: LayoutDelivery? = null
     private var surfaceWidth = 0
     private var surfaceHeight = 0
     private var requestedDensity = 0f
@@ -806,12 +809,7 @@ internal class ExperienceSurfaceHost(
                     layoutBounds = bounds
                     pointerInput.updateBounds(bounds)
                     val contentHeight = if (presentationHeight.measuresContent) bounds.height else null
-                    mainHandler.post {
-                        if (!released.get()) {
-                            listener?.onLayoutBounds(bounds)
-                            listener?.onPresentationHeight(contentHeight)
-                        }
-                    }
+                    postLayoutBounds(bounds, contentHeight, notifyHeight = true)
                 }
             } catch (error: Throwable) {
                 reportFailure(ExperiencePresentationException.Reason.HOST_FAILED, "Experience content measurement failed", error)
@@ -819,6 +817,24 @@ internal class ExperienceSurfaceHost(
                 return@enqueuePreparation
             }
             onLoaded?.invoke(true)
+        }
+    }
+
+    private fun postLayoutBounds(
+        bounds: ExperienceArtboardSize,
+        contentHeight: Float?,
+        generation: Long? = null,
+        epoch: Long? = null,
+        notifyHeight: Boolean = fitsContentHeight,
+    ) {
+        val delivery = LayoutDelivery(bounds, contentHeight)
+        if (deliveredLayout == delivery) return
+        mainHandler.post {
+            if (released.get() || (generation != null && generation != frameGeneration.get()) ||
+                (epoch != null && epoch != semanticEpoch.get()) || deliveredLayout == delivery) return@post
+            listener?.onLayoutBounds(bounds)
+            if (notifyHeight) listener?.onPresentationHeight(contentHeight)
+            deliveredLayout = delivery
         }
     }
 
@@ -1327,19 +1343,16 @@ internal class ExperienceSurfaceHost(
                             if (layoutStepPending || presentationHeight.measuresContent) {
                                 val size = player.layoutSize()
                                 val bounds = ExperienceArtboardSize(size.first, size.second)
-                                val boundsChanged = layoutBounds != bounds
                                 layoutBounds = bounds
                                 pointerInput.updateBounds(bounds)
                                 layoutStepPending = false
                                 videoPlayback?.setViewport(currentVideoViewport(layout))
+                            }
+                            // A post invalidated by input activation or a new frame generation must
+                            // retry even when the runtime's measured bounds have not changed.
+                            layoutBounds?.let { bounds ->
                                 val contentHeight = if (presentationHeight.measuresContent) bounds.height else null
-                                if (boundsChanged) mainHandler.post {
-                                    if (!released.get() && generation == frameGeneration.get() && epoch == semanticEpoch.get()) {
-                                        listener?.onLayoutBounds(bounds)
-                                        if (fitsContentHeight) listener?.onPresentationHeight(
-                                            contentHeight)
-                                    }
-                                }
+                                postLayoutBounds(bounds, contentHeight, generation, epoch)
                             }
                             if (it.focusState?.hasFocus != true) {
                                 val direction = focusBatch.withIndex().firstNotNullOfOrNull { (index, input) ->

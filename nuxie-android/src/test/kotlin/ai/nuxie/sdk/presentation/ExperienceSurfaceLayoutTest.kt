@@ -143,19 +143,68 @@ class ExperienceSurfaceLayoutTest {
         }
     }
 
+    @Test fun `fit-content height retries after input activation invalidates its queued delivery`() =
+        heightDeliveryRetries { host -> host.setInputEnabled(false); host.setInputEnabled(true) }
+
+    @Test fun `fit-content height retries after visibility changes invalidate its queued delivery`() =
+        heightDeliveryRetries { host -> host.setPresentationVisible(false); host.setPresentationVisible(true) }
+
+    private fun heightDeliveryRetries(invalidate: (ExperienceSurfaceHost) -> Unit) {
+        val heights = mutableListOf<Float?>()
+        withHost(3f, fitContent = true, heights = heights) { host, texture, lane, native, bounds ->
+            host.onSurfaceTextureAvailable(texture, 1179, 2556)
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            drainUi(host)
+            // Authored padding 16 + child 120 + padding 16, with width in points.
+            assertEquals(listOf(152f), heights)
+            assertEquals(listOf(ExperienceArtboardSize(393f, 152f)), bounds)
+            host.onSurfaceTextureUpdated(texture)
+            drain(lane)
+
+            // The child grows to 240. Drop the post after measuring, before main receives it.
+            native.contentHeight = 16f + 240f + 16f
+            host.doFrame(1_016_000_000L)
+            drain(lane)
+            invalidate(host)
+            drain(lane)
+            drainUi(host)
+            assertEquals(listOf(152f), heights)
+            assertEquals(1, bounds.size)
+            host.onSurfaceTextureUpdated(texture)
+            drain(lane)
+
+            // The native size is unchanged on the next frame, but main still needs it.
+            host.doFrame(1_032_000_000L)
+            drain(lane)
+            drainUi(host)
+            assertEquals(listOf(152f, 272f), heights)
+            assertEquals(ExperienceArtboardSize(393f, 272f), bounds.last())
+            host.onSurfaceTextureUpdated(texture)
+            drain(lane)
+            host.doFrame(1_048_000_000L)
+            drain(lane)
+            drainUi(host)
+            assertEquals("Already delivered bounds must not disturb a native sheet drag", 2, bounds.size)
+            assertEquals(listOf(152f, 272f), heights)
+        }
+    }
+
     private fun withHost(density: Float, expectFailure: Boolean = false, video: Boolean = false,
+        fitContent: Boolean = false, heights: MutableList<Float?> = mutableListOf(),
         body: (ExperienceSurfaceHost, SurfaceTexture, NuxieRuntimeLane, RecordingNative, MutableList<ExperienceArtboardSize>) -> Unit) {
         val context = RuntimeEnvironment.getApplication()
         val previousDensity = context.resources.displayMetrics.density
         context.resources.displayMetrics.density = density
         val lane = NuxieRuntimeLane()
-        val native = RecordingNative(video)
+        val native = RecordingNative(video, fitContent)
         val bounds = mutableListOf<ExperienceArtboardSize>()
         val failures = mutableListOf<ExperiencePresentationException>()
         val host = ExperienceSurfaceHost(context, lane, artboardSize = ExperienceArtboardSize(100f, 200f),
-            runtime = NuxieRuntime(native), listener = object : ExperienceSurfaceHost.Listener {
+            runtime = NuxieRuntime(native), fitsContentHeight = fitContent, listener = object : ExperienceSurfaceHost.Listener {
                 override fun onFirstFrame() = Unit
                 override fun onLayoutBounds(value: ExperienceArtboardSize) { bounds += value }
+                override fun onPresentationHeight(height: Float?) { heights += height }
                 override fun onFailure(error: ExperiencePresentationException) { failures += error }
             })
         val texture = SurfaceTexture(0)
@@ -194,7 +243,7 @@ class ExperienceSurfaceLayoutTest {
         assertTrue(done.await(2, TimeUnit.SECONDS))
     }
 
-    private class RecordingNative(private val video: Boolean) : NuxieTypedRuntimeNative {
+    private class RecordingNative(private val video: Boolean, private val fitContent: Boolean) : NuxieTypedRuntimeNative {
         override fun installValueMarkers(file: Long, entries: Array<ai.nuxie.sdk.runtime.NativeValueMarker>): Int {
             assertTrue(entries.isEmpty()); return 0
         }
@@ -204,7 +253,22 @@ class ExperienceSurfaceLayoutTest {
             assertTrue(entries.isEmpty()); return 0
         }
         override fun viewModelCatalog(fileHandle: Long) = NativeCallResult(0,
-            NativeViewModelCatalog(emptyArray(), emptyArray(), emptyArray()))
+            if (fitContent) NativeViewModelCatalog(
+                arrayOf(NativeViewModelSchema(0, "\$nuxie.presentation", 0, 1, 0, 0, -1, true)),
+                arrayOf(NativeViewModelProperty(0, 0, "heightMode", 2, -1, emptyArray())), emptyArray())
+            else NativeViewModelCatalog(emptyArray(), emptyArray(), emptyArray()))
+        override fun newViewModel(fileHandle: Long, schemaIndex: Int, authoredInstanceIndex: Int?): NativeCallResult<Long> {
+            assertTrue(fitContent); assertEquals(0, schemaIndex); return NativeCallResult(0, 6L)
+        }
+        override fun setPlayerGlobalViewModel(playerHandle: Long, name: ByteArray, viewModelHandle: Long): Int {
+            assertEquals("\$nuxie.presentation", name.decodeToString()); assertEquals(6L, viewModelHandle); return 0
+        }
+        override fun mutateViewModel(handle: Long, write: NativeViewModelWrite): Int {
+            assertEquals(6L, handle); assertEquals("heightMode", write.path)
+            assertEquals(2f, write.numberValue, 0f); return 0
+        }
+        override fun freeViewModel(handle: Long): Int { assertEquals(6L, handle); return 0 }
+        var contentHeight = 16f + 120f + 16f
         override fun inspectFileAssets(bytes: ByteArray) = if (video) listOf(
             ExpectedFileAsset(0, FileAssetKind.VIDEO, 1, "clip", "mp4", false, false, 4)) else emptyList()
         override fun videoOccurrences(player: Long) = emptyList<NuxieVideoOccurrence>()
@@ -247,6 +311,7 @@ class ExperienceSurfaceLayoutTest {
         override fun stepPlayer(playerHandle: Long, inputs: List<NativePlayerInput>, pointers: List<NativePlayerPointer>,
             elapsedSeconds: Float, correlationId: Long, textRunNames: List<String>, focusInputs: List<NativeFocusInput>): NativeCallResult<NativePlayerStepOutcome> {
             calls += "step:$elapsedSeconds"
+            if (fitContent) size[1] = contentHeight
             return NativeCallResult(0, NativePlayerStepOutcome(true, intArrayOf(), emptyArray(), emptyArray(), emptyArray()))
         }
         override fun renderAndPresent(rendererHandle: Long, playerHandle: Long, windowHandle: Long,
