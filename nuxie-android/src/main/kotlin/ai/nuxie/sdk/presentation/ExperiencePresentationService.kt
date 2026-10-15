@@ -74,6 +74,7 @@ internal class ExperiencePresentationException(
         PRODUCTS_UNAVAILABLE,
         FIRST_FRAME_TIMEOUT,
         SUPERSEDED,
+        LAYER_DISMISSED,
         DECLINED,
     }
 }
@@ -145,6 +146,7 @@ internal interface PreparedScreenNavigation {
 }
 
 internal interface PresentationScreenHandle {
+    suspend fun dismissLayerFromJourney(): Boolean = false
     val rendererEffects: RendererEffectLifetime? get() = null
     val nativeAttemptGeneration: Long? get() = null
 
@@ -742,6 +744,7 @@ internal class ExperiencePresentationService(
         val journeyId: String?,
         val job: CompletableJob,
         val finished: CompletableDeferred<Unit> = CompletableDeferred(),
+        val layerDismissed: AtomicBoolean = AtomicBoolean(false),
     )
 
     private var preparation: PreparationAttempt? = null
@@ -1148,7 +1151,10 @@ internal class ExperiencePresentationService(
                     }
                     incoming.layerHistory = if (opensLayer) ExperienceLayerHistory(listOf(incoming.screenId))
                         else back?.history ?: outgoing.layerHistory.navigate(incoming.screenId, transition?.string("type") == "push")
-                    val dismissal = dismissForNavigation(outgoing, incoming.screenId)
+                    // A covered screen remains active and mounted. Opening a
+                    // layer is not a dismissal of its presenting screen.
+                    val dismissal = if (opensLayer) JourneyScreenDismissalResult.HANDLED
+                        else dismissForNavigation(outgoing, incoming.screenId)
                     synchronized(stateLock) {
                         if (!attempt.job.isActive || !isCurrentIdentity(request) || !canPresent() || current !== existing ||
                             it.outcomeReason.get() != null) {
@@ -1264,7 +1270,8 @@ internal class ExperiencePresentationService(
                     }
                     // Owned withdrawal is a presentation result, not cancellation of the Journey worker.
                     throw ExperiencePresentationException(
-                        ExperiencePresentationException.Reason.SUPERSEDED,
+                        if (attempt.layerDismissed.get()) ExperiencePresentationException.Reason.LAYER_DISMISSED
+                        else ExperiencePresentationException.Reason.SUPERSEDED,
                         "Presentation preparation was withdrawn", error,
                     )
                 }
@@ -1312,6 +1319,14 @@ internal class ExperiencePresentationService(
     }
 
     private suspend fun closeLayer(id: String, reveal: PreparedLayerReveal): Boolean {
+        // A completed native dismissal wins over preparation in that layer.
+        // Withdraw only the preparation job, never the Journey worker itself.
+        val pending = synchronized(stateLock) {
+            if (current?.id != id) return false
+            preparation?.takeIf { transitionInProgress }?.also { it.layerDismissed.set(true) }
+        }
+        pending?.job?.cancel()
+        pending?.finished?.await()
         val (outgoing, incoming) = synchronized(stateLock) {
             val outgoing = current ?: return false
             val incoming = coveredLayers.lastOrNull() ?: return false
@@ -1320,7 +1335,18 @@ internal class ExperiencePresentationService(
             outgoing to incoming
         }
         return try {
-            val dismissal = dismissForNavigation(outgoing.journey, incoming.journey.screenId, "native_sheet")
+            // A navigation checkpoint already in durable flight still owns its
+            // one dismissal notification. Join it, then park on the actual
+            // retained screen instead of rejecting the completed system close.
+            val checkpoint = synchronized(outgoing.journey) { outgoing.journey.navigationDismissal }
+            val dismissal = checkpoint?.result?.await()
+                ?: dismissForNavigation(outgoing.journey, incoming.journey.screenId, reveal.method)
+            if (dismissal == JourneyScreenDismissalResult.COMPLETED) {
+                // The authored dismissal route completed normally. Its native
+                // surface is already gone, so finish without a second exit wait.
+                PresentationRegistry.dismiss(outgoing.id, CloseReason.JourneyDismissed)
+                return true
+            }
             if (dismissal != JourneyScreenDismissalResult.HANDLED) return false
             synchronized(stateLock) {
                 if (current !== outgoing || coveredLayers.lastOrNull() !== incoming ||
@@ -1346,6 +1372,10 @@ internal class ExperiencePresentationService(
         } finally {
             synchronized(stateLock) { transitionInProgress = false }
         }
+    }
+
+    fun hasPresentedJourneyLayer(owner: JourneyPresentationOwner): Boolean = synchronized(stateLock) {
+        current?.isOwnedBy(owner.journeyId, owner.distinctId) == true && coveredLayers.isNotEmpty()
     }
 
     fun ownsJourney(owner: JourneyPresentationOwner): Boolean = synchronized(stateLock) {
@@ -1475,23 +1505,36 @@ internal class ExperiencePresentationService(
             )
             // Persist the authored terminal outcome before presentation teardown
             // can emit a user-close lifecycle callback.
-            JourneyActionType.DISMISS -> JourneyPresentationActionResult.Completed(
-                action.string("reason")?.takeIf(String::isNotEmpty) ?: "completed",
-            )
+            JourneyActionType.DISMISS -> {
+                if (action.string("scope") != "all" && hasPresentedJourneyLayer(owner)) {
+                    if (PresentationRegistry.currentScreen(active.id)?.dismissLayerFromJourney() == true)
+                        JourneyPresentationActionResult.Handled else JourneyPresentationActionResult.Failed
+                } else JourneyPresentationActionResult.Completed(
+                    action.string("reason")?.takeIf(String::isNotEmpty) ?: "completed",
+                )
+            }
             else -> JourneyPresentationActionResult.Failed
         }
     }
 
     suspend fun projectJourneyCommerceOutcome(owner: JourneyPresentationOwner, type: JourneyActionType,
         outlet: String, errorCode: String, effectId: String) {
-        val active = synchronized(stateLock) { current?.takeIf { it.isOwnedBy(owner.journeyId, owner.distinctId) } } ?: return
-        writeCommerceFeedback(active, active.journey.commerceFeedback.outcome(type, outlet, errorCode, effectId))
+        val owned = synchronized(stateLock) {
+            (listOfNotNull(current) + coveredLayers.asReversed()).filter {
+                it.isOwnedBy(owner.journeyId, owner.distinctId) && it.outcomeReason.get() == null
+            }
+        }
+        for (layer in owned) {
+            val write = layer.journey.commerceFeedback.outcome(type, outlet, errorCode, effectId) ?: continue
+            writeCommerceFeedback(layer, write)
+            return
+        }
     }
 
     private suspend fun writeCommerceFeedback(active: ActivePresentation, write: JourneyCommerceFeedback.Write?) {
         if (write == null) return
         val values = synchronized(stateLock) {
-            if (current !== active) return
+            if (current !== active && active !in coveredLayers) return
             val snapshot = if (write.screenId == active.journey.screenId) active.latestViewModelSnapshot.get()
                 ?: active.journey.viewModelsByScreen[write.screenId]?.get()
                 else active.journey.viewModelsByScreen[write.screenId]?.get()

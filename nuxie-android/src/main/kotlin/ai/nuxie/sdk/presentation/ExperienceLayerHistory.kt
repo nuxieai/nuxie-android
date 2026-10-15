@@ -16,6 +16,7 @@ internal data class ExperienceLayerHistory(val screens: List<String>) {
 
 /** Native lifecycle work around the service's durable hidden/reveal callbacks. */
 internal interface PreparedLayerReveal {
+    val method: String get() = "native_sheet"
     suspend fun prepare()
     fun activate()
 }

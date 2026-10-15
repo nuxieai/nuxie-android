@@ -167,7 +167,9 @@ internal class NuxieExperienceActivity : Activity() {
                 if (closeState.reason == CloseReason.JourneyNavigation &&
                     (navigation?.source === this || currentScreen !== this || closingLayer?.screen === this)) {
                     // A navigation source, a covered layer or a closing layer never finishes the Activity.
-                    mounted?.exit(reason)
+                    if (navigation?.source === this && currentScreen === this && closingLayer?.screen !== this) {
+                        mounted?.exit(reason)
+                    }
                 } else if (revealed && currentScreen === this && closingLayer?.screen !== this && !baseWindowDismissed &&
                         (closeState.reason == CloseReason.UserDismissed ||
                             closeState.reason == CloseReason.HostDismissed ||
@@ -175,6 +177,7 @@ internal class NuxieExperienceActivity : Activity() {
                     // Only the revealed current screen plays its compiled exit. A sheet the
                     // platform already dismissed has no window left, so it finishes at once.
                     finishingAfterExit = true
+                    layers.forEach { it.sheet?.setInputEnabled(false); it.screen.mounted?.setInputEnabled(false) }
                     registryScope.launch {
                         try {
                             mounted?.awaitExit(reason)
@@ -191,6 +194,10 @@ internal class NuxieExperienceActivity : Activity() {
         override suspend fun retireForRetry() = withContext(Dispatchers.Main.immediate) {
             close(true)
             closed.await()
+        }
+        override suspend fun dismissLayerFromJourney(): Boolean = withContext(Dispatchers.Main.immediate) {
+            val layer = layers.lastOrNull()?.takeIf { it.screen === this@Screen } ?: return@withContext false
+            closeLayer(layer, authored = true)
         }
         override suspend fun prepareNavigation(id: String, content: PreparedPresentation): PreparedScreenNavigation =
             prepareScreenNavigation(this, id, content)
@@ -250,6 +257,14 @@ internal class NuxieExperienceActivity : Activity() {
                     PresentationRegistry.reportRuntimeStep(id, outcome, correlationId, viewModelSnapshot, this, frameSaves)
                 }
             }
+        }
+
+        fun retainCoveredFrame() {
+            synchronized(effectsLock) {
+                provisional = false
+                pendingEffects.clear()
+            }
+            mounted?.setVisible(visible)
         }
 
         fun publishPreparedFrame() {
@@ -357,7 +372,7 @@ internal class NuxieExperienceActivity : Activity() {
                 checkNotNull(source.prepared.screenId), checkNotNull(target.prepared.screenId),
             )
             val animate = plan.shouldAnimate(source.mounted?.reduceMotion == true)
-            if (plan.kind != ExperienceScreenTransitionPlan.Kind.CUSTOM || !animate) source.mounted?.awaitExit(ExperienceScreenLifecycle.ExitReason.NAVIGATION)
+            if (!target.prepared.opensLayer && (plan.kind != ExperienceScreenTransitionPlan.Kind.CUSTOM || !animate)) source.mounted?.awaitExit(ExperienceScreenLifecycle.ExitReason.NAVIGATION)
             check(navigation === this@Navigation && !isFinishing && !isDestroyed)
             if (animate && !target.prepared.opensLayer) {
                 val outgoing = checkNotNull(source.view)
@@ -406,11 +421,11 @@ internal class NuxieExperienceActivity : Activity() {
                 restoreInput()
                 target.registered = true
                 currentScreen = target
-                dismissible = true
+                dismissible = layers.lastOrNull()?.shell?.dismissible ?: true
                 intent.putExtra(EXTRA_PRESENTATION_ID, target.id)
                 target.view?.alpha = 1f
                 if (target.prepared.opensLayer) {
-                    source.mounted?.hide()
+                    source.mounted?.setInputEnabled(false)
                     layers.lastOrNull()?.sheet?.setInputEnabled(false)
                     val root = ExperienceFocusRoot(this@NuxieExperienceActivity)
                     (target.view?.parent as? android.view.ViewGroup)?.removeView(target.view)
@@ -431,6 +446,7 @@ internal class NuxieExperienceActivity : Activity() {
                 navigation = null
                 observePresentation(target.id, checkNotNull(PresentationRegistry.observe(target.id)))
                 target.publishPreparedFrame()
+                target.mounted?.setInputEnabled(true)
                 target.mounted?.setVisible(visible)
             }
         }
@@ -444,7 +460,7 @@ internal class NuxieExperienceActivity : Activity() {
             screens.remove(target)
             if (currentScreen === source) {
                 if (source.screenCloseReason() != null) finish()
-                else source.mounted?.activate()
+                else if (closingLayer == null && !target.prepared.opensLayer) source.mounted?.activate()
             }
             target.closed.await()
         }
@@ -466,6 +482,7 @@ internal class NuxieExperienceActivity : Activity() {
                 prepared.textInputState.refreshBeforeMount()
                 screens += target
                 val targetView = target.mount().apply { alpha = 0f }
+                target.mounted?.setInputEnabled(false)
                 val params = if (prepared.fitsContentHeight) {
                     val size = ExperienceNativeLayerWindow.availableSize(this@NuxieExperienceActivity, prepared.shell)
                     val density = resources.displayMetrics.density
@@ -693,8 +710,9 @@ internal class NuxieExperienceActivity : Activity() {
                     retained.mounted?.setInputEnabled(false)
                     retained.mounted?.setVisible(visible)
                     retained.ready.await()
+                    retained.retainCoveredFrame()
                     restoringLayerScreen = null
-                    retained.mounted?.hide()
+                    retained.mounted?.setInputEnabled(false)
                     layer.sheet?.setInputEnabled(false)
                 }
             }
@@ -752,49 +770,53 @@ internal class NuxieExperienceActivity : Activity() {
     }
 
     private fun requestLayerClose(layer: Layer) {
-        if (layers.lastOrNull() !== layer || layers.size < 2 || closingLayer != null) return
+        registryScope.launch { closeLayer(layer, authored = false) }
+    }
+
+    private suspend fun closeLayer(layer: Layer, authored: Boolean): Boolean {
+        if (layers.lastOrNull() !== layer || layers.size < 2 || closingLayer != null) return false
         closingLayer = layer
         layers.forEach { it.sheet?.setInputEnabled(false) }
         val source = layer.screen
-        source.mounted?.exit(ExperienceScreenLifecycle.ExitReason.DISMISSED)
-        source.mounted?.hide()
-        registryScope.launch {
-            try {
-                val accepted = source.prepared.closeLayer?.invoke(object : PreparedLayerReveal {
-                    override suspend fun prepare() = withContext(Dispatchers.Main.immediate) {
-                        check(layers.lastOrNull() === layer && !isFinishing && !isDestroyed)
-                        layers.removeAt(layers.lastIndex)
-                        layer.sheet?.retire()
+        source.mounted?.setInputEnabled(false)
+        try {
+            if (authored) source.mounted?.awaitExit(ExperienceScreenLifecycle.ExitReason.DISMISSED)
+            else source.mounted?.exit(ExperienceScreenLifecycle.ExitReason.DISMISSED)
+            source.mounted?.hide()
+            if (authored) layer.sheet?.retire()
+            val accepted = source.prepared.closeLayer?.invoke(object : PreparedLayerReveal {
+                override val method = if (authored) "journey" else "native_sheet"
+                override suspend fun prepare() = withContext(Dispatchers.Main.immediate) {
+                    check(layers.lastOrNull() === layer && !isFinishing && !isDestroyed)
+                    layers.removeAt(layers.lastIndex)
+                    layer.sheet?.retire()
+                    val lower = layers.last()
+                    currentScreen = lower.screen
+                    contentRoot = lower.root
+                    intent.putExtra(EXTRA_PRESENTATION_ID, lower.screen.id)
+                    observePresentation(lower.screen.id, checkNotNull(PresentationRegistry.observe(lower.screen.id)))
+                    source.close(false)
+                    screens.remove(source)
+                    Unit
+                }
+                override fun activate() {
+                    runOnUiThread {
+                        if (isFinishing || isDestroyed || closingLayer !== layer) return@runOnUiThread
                         val lower = layers.last()
-                        currentScreen = lower.screen
-                        contentRoot = lower.root
-                        intent.putExtra(EXTRA_PRESENTATION_ID, lower.screen.id)
-                        lower.screen.provisional = true
-                        lower.screen.mounted?.enter()
-                        lower.screen.mounted?.activate()
-                        observePresentation(lower.screen.id, checkNotNull(PresentationRegistry.observe(lower.screen.id)))
-                        source.close(false)
-                        screens.remove(source)
-                        Unit
+                        dismissible = lower.shell.dismissible
+                        lower.sheet?.setInputEnabled(dismissible)
+                        lower.screen.mounted?.setInputEnabled(true)
+                        lower.screen.mounted?.setVisible(visible)
                     }
-                    override fun activate() {
-                        runOnUiThread {
-                            if (isFinishing || isDestroyed || closingLayer !== layer) return@runOnUiThread
-                            val lower = layers.last()
-                            dismissible = lower.shell.dismissible
-                            lower.sheet?.setInputEnabled(dismissible)
-                            lower.screen.mounted?.setInputEnabled(true)
-                            lower.screen.publishPreparedFrame()
-                            lower.screen.mounted?.setVisible(visible)
-                        }
-                    }
-                }) == true
-                if (!accepted) finishTerminal(CloseReason.Error(IllegalStateException("Layer reveal was rejected")))
-            } catch (error: Throwable) {
-                if (error is kotlinx.coroutines.CancellationException) throw error
-                finishTerminal(CloseReason.Error(error))
-            } finally { closingLayer = null }
-        }
+                }
+            }) == true
+            if (!accepted) finishTerminal(CloseReason.Error(IllegalStateException("Layer reveal was rejected")))
+            return accepted
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            finishTerminal(CloseReason.Error(error))
+            return false
+        } finally { closingLayer = null }
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -810,7 +832,7 @@ internal class NuxieExperienceActivity : Activity() {
         visible = true
         loadingView?.setActive(recoveryView == null)
         navigation?.setVisible(true)
-        screens.forEach { if (!it.rendererEffects.isRetired && (it === currentScreen || it === navigation?.target || it === restoringLayerScreen)) it.mounted?.setVisible(true) }
+        screens.forEach { if (!it.rendererEffects.isRetired && (layers.any { layer -> layer.screen === it } || it === navigation?.target || it === restoringLayerScreen)) it.mounted?.setVisible(true) }
     }
 
     override fun onStop() {
@@ -1005,7 +1027,7 @@ internal class NuxieExperienceActivity : Activity() {
             finishTerminal(CloseReason.UserDismissed)
         }
         baseWindow = window
-        window.setInputEnabled(true)
+        window.setInputEnabled(true, allowDismissalDuringLoading = true)
         window.show()
         return ExperienceFocusRoot(this)
     }

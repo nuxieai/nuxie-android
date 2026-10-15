@@ -2359,8 +2359,14 @@ class ExperiencePresentationServiceTest {
             val edges = mutableListOf<String>()
             val batches = mutableListOf<JourneyScreenEmissionBatch>()
             val sharedValues = ExperienceRunValues()
+            var heldNavigation: CompletableDeferred<Unit>? = null
+            lateinit var service: ExperiencePresentationService
             class Host(val id: String) : PresentationScreenHandle {
                 var reason: CloseReason? = null
+                val values = mutableMapOf<String, ai.nuxie.sdk.runtime.NuxieViewModelScalarValue>()
+                override suspend fun updateRuntimeValues(values: Map<String, ai.nuxie.sdk.runtime.NuxieViewModelScalarValue>) {
+                    this.values.putAll(values)
+                }
                 override fun requestCloseFromService(reason: CloseReason): Boolean { this.reason = reason; return true }
                 override fun screenCloseReason() = reason
                 override fun finishAfterServiceClose() {
@@ -2368,9 +2374,22 @@ class ExperiencePresentationServiceTest {
                         nativeLayers.forEach { owned -> hosts[owned]?.let { PresentationRegistry.detach(owned, it) } }
                     }
                 }
+                override suspend fun dismissLayerFromJourney(): Boolean {
+                    val content = checkNotNull(PresentationRegistry.resolve(id))
+                    val lowerId = nativeLayers[nativeLayers.lastIndex - 1]
+                    return checkNotNull(content.closeLayer).invoke(object : PreparedLayerReveal {
+                        override val method = "journey"
+                        override suspend fun prepare() {
+                            PresentationRegistry.detach(id, this@Host)
+                            nativeLayers.removeAt(nativeLayers.lastIndex)
+                        }
+                        override fun activate() = Unit
+                    }).also { if (it) assertEquals(lowerId, nativeLayers.last()) }
+                }
                 override suspend fun prepareNavigation(id: String, content: PreparedPresentation): PreparedScreenNavigation {
                     val outgoing = this
                     return object : PreparedScreenNavigation {
+                        override suspend fun awaitExit() { heldNavigation?.await() }
                         override fun activate() {
                             val target = Host(id)
                             hosts[id] = target
@@ -2385,7 +2404,7 @@ class ExperiencePresentationServiceTest {
                     }
                 }
             }
-            val service = service(this, launch = { id ->
+            service = service(this, launch = { id ->
                 val host = Host(id)
                 hosts[id] = host
                 nativeLayers += id
@@ -2411,6 +2430,12 @@ class ExperiencePresentationServiceTest {
             val baseId = nativeLayers.single()
             val baseHost = hosts.getValue(baseId)
             val baseContent = checkNotNull(PresentationRegistry.resolve(baseId))
+            baseContent.retainedViewModel.set(reportCommerceSnapshot(baseId))
+            val ownerForCommerce = JourneyPresentationOwner("journey-1", "customer-1")
+            assertEquals(JourneyPresentationActionResult.ProductsUnavailable,
+                service.dispatchJourneyAction(ownerForCommerce,
+                    JsonObject(mapOf("type" to JsonPrimitive("purchase"), "placementId" to JsonPrimitive("monthly"))), "covered-purchase"))
+            var commerceProjected = false
             val draft = ExperienceTextInputState.Value("retained", 0, 8)
             val baseInput = baseContent.textInputState.bind()
             baseInput.write("input_email", draft)
@@ -2428,13 +2453,13 @@ class ExperiencePresentationServiceTest {
                             override suspend fun prepare() {
                                 PresentationRegistry.detach(outgoingId, hosts.getValue(outgoingId))
                                 nativeLayers.removeAt(nativeLayers.lastIndex)
-                                edges += "enter:${lower.screenId}"
+                                edges += "retain:${lower.screenId}"
                             }
                             override fun activate() { edges += "publish:${lower.screenId}" }
                         }))
                         draftsByLayer.removeAt(draftsByLayer.lastIndex)
                         assertEquals(listOf("hidden:${content.screenId}:${lower.screenId}:native_sheet",
-                            "enter:${lower.screenId}", "active:${lower.screenId}", "reveal:${lower.screenId}",
+                            "retain:${lower.screenId}", "active:${lower.screenId}", "reveal:${lower.screenId}",
                             "publish:${lower.screenId}"), edges)
                     }
                     "back" -> {
@@ -2479,6 +2504,15 @@ class ExperiencePresentationServiceTest {
                 val expected = step.getValue("layers").jsonArray.map { layer -> layer.jsonArray.map { screen(it.jsonPrimitive.content) } }
                 assertEquals(vector.getValue("name").jsonPrimitive.content, expected, service.layerScreenIds())
                 if (expected.size > 1) {
+                    if (!commerceProjected) {
+                        service.projectJourneyCommerceOutcome(ownerForCommerce, ai.nuxie.sdk.journey.JourneyActionType.PURCHASE,
+                            "failed", "store-offline", "covered-purchase")
+                        assertEquals(ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.StringValue("error"),
+                            (baseHost as Host).values["paywall/purchase/status"])
+                        assertEquals(ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.StringValue("store-offline"),
+                            baseContent.commerceValues.get()["paywall/purchase/errorCode"])
+                        commerceProjected = true
+                    }
                     assertTrue(PresentationRegistry.currentScreen(baseId) === baseHost)
                     assertFalse(leases.first().closed.get())
                     val top = checkNotNull(PresentationRegistry.resolve(nativeLayers.last()))
@@ -2509,6 +2543,49 @@ class ExperiencePresentationServiceTest {
             assertTrue(fixed.shell.fitsContent)
             assertTrue(hugging.layerContentHeight === fixed.layerContentHeight)
             assertEquals(152f, fixed.layerContentHeight.get())
+            // A completed system close withdraws preparation in its source
+            // layer, instead of turning the native dismissal into an error.
+            val sourceId = nativeLayers.last()
+            val sourceContent = checkNotNull(PresentationRegistry.resolve(sourceId))
+            val expectedAfterClose = service.layerScreenIds().dropLast(1)
+            heldNavigation = CompletableDeferred()
+            val inFlight = async {
+                runCatching {
+                    service.presentJourney(testPresentationFences(), release, "screen_details", "journey-1", "customer-1",
+                        null, acquire = { acquired(release.identity, Lease().also { leases += it }) }, onOutcome = {})
+                }
+            }
+            runCurrent()
+            assertTrue(checkNotNull(sourceContent.closeLayer).invoke(object : PreparedLayerReveal {
+                override suspend fun prepare() {
+                    PresentationRegistry.detach(sourceId, hosts.getValue(sourceId))
+                    nativeLayers.removeAt(nativeLayers.lastIndex)
+                }
+                override fun activate() = Unit
+            }))
+            assertEquals(ExperiencePresentationException.Reason.LAYER_DISMISSED,
+                (inFlight.await().exceptionOrNull() as ExperiencePresentationException).reason)
+            assertEquals(expectedAfterClose, service.layerScreenIds())
+            heldNavigation = null
+            navigate("screen_details", JsonObject(mapOf("type" to JsonPrimitive("modal"))))
+            val owner = JourneyPresentationOwner("journey-1", "customer-1")
+            val closeAll = service.dispatchJourneyAction(owner,
+                JsonObject(mapOf("type" to JsonPrimitive("dismiss"), "scope" to JsonPrimitive("all"),
+                    "reason" to JsonPrimitive("finished"))), "close-all")
+            assertEquals(JourneyPresentationActionResult.Completed("finished"), closeAll)
+            // Completion is persisted by the executor before whole-surface teardown.
+            assertTrue(service.layerScreenIds().size > 1)
+            while (service.layerScreenIds().size > 1) {
+                val before = service.layerScreenIds()
+                edges.clear()
+                assertEquals(JourneyPresentationActionResult.Handled,
+                    service.dispatchJourneyAction(owner, JsonObject(mapOf("type" to JsonPrimitive("dismiss"))), "done"))
+                assertEquals(before.dropLast(1), service.layerScreenIds())
+                assertEquals(1, edges.count { it.startsWith("hidden:") && it.endsWith(":journey") })
+                assertEquals(1, edges.count { it.startsWith("active:") })
+            }
+            assertEquals(JourneyPresentationActionResult.Completed("completed"),
+                service.dispatchJourneyAction(owner, JsonObject(mapOf("type" to JsonPrimitive("dismiss"))), "close-base"))
             service.dismissFromHost("customer-1")
             nativeLayers.forEach { id -> hosts[id]?.let { PresentationRegistry.detach(id, it) } }
             runCurrent()

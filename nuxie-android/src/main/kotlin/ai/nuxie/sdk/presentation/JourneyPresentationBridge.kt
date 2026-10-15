@@ -140,6 +140,8 @@ internal interface JourneyPresenting {
 
     fun owns(owner: JourneyPresentationOwner): Boolean = false
 
+    fun hasPresentedLayer(owner: JourneyPresentationOwner): Boolean = false
+
     fun screenId(owner: JourneyPresentationOwner): String? = null
 
     fun resolveAction(

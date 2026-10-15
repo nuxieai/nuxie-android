@@ -117,7 +117,14 @@ internal object JourneyGrammar {
                 value(action["url"])
                 oneOf(record(action["url"])["type"], "String", "Event.Field", "Response.Field")
             }
-            "dismiss", "exit" -> { shape(optional = setOf("reason")); action["reason"]?.let { text(it) } }
+            "dismiss" -> {
+                shape(optional = setOf("reason", "scope"))
+                action["reason"]?.let { text(it) }
+                action["scope"]?.let { scope ->
+                    require((scope as? JsonPrimitive)?.takeIf { it.isString }?.content == "all")
+                }
+            }
+            "exit" -> { shape(optional = setOf("reason")); action["reason"]?.let { text(it) } }
             else -> fail("unknown or server action")
         }
     }

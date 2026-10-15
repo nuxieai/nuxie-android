@@ -24,6 +24,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -59,6 +60,92 @@ class PublishedScreenExitReasonDeviceTest {
     @Test
     fun missingCompletionUsesTheBoundedFallbackOnAnOlderScreen() =
         verifyCompiledDismissal(CloseReason.HostDismissed, neverCompletes = true)
+
+    @Test
+    fun authoredLayerCloseKeepsItsNativeWindowThroughTheDismissedExit() = kotlinx.coroutines.runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val id = UUID.randomUUID().toString()
+        val topId = UUID.randomUUID().toString()
+        val assets = instrumentation.context.assets
+        val prefix = "runtime/screen-exit-reason/dismissed-only"
+        val scene = File(instrumentation.targetContext.cacheDir, "layer-exit-$id.nux")
+        assets.open("$prefix/screen.nux").use { input -> scene.outputStream().use(input::copyTo) }
+        val descriptor = assets.open("$prefix/mounted-screen.json").bufferedReader().use {
+            Json.parseToJsonElement(it.readText()).jsonObject
+        }
+        val base = PreparedPresentation(scene, "tap", Color.BLACK, PresentationShell.FullScreen(),
+            screenId = "scr_screens_stap", descriptor = descriptor, artboardSize = ExperienceArtboardSize(100f, 100f))
+        val baseReady = CountDownLatch(1)
+        val topReady = CountDownLatch(1)
+        val retired = CountDownLatch(1)
+        val reveals = AtomicInteger()
+        val top = base.copy(shell = PresentationShell.Sheet(PresentationShell.Sheet.Detent.MEDIUM, false),
+            screenLifecycle = ExperienceScreenLifecycle(), opensLayer = true, layerAncestors = listOf(id),
+            closeLayer = { reveal ->
+                assertEquals("journey", reveal.method)
+                PresentationRegistry.dismiss(topId, CloseReason.JourneyNavigation)
+                reveal.prepare()
+                reveals.incrementAndGet()
+                reveal.activate()
+                true
+            })
+        val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
+        instrumentation.addMonitor(monitor)
+        PresentationRegistry.register(id, base,
+            onFirstFrame = { runBlocking { PresentationRegistry.reveal(id) }; baseReady.countDown() },
+            onFailure = { throw AssertionError(it) }, onDismissed = { retired.countDown() }, onOutcome = {})
+        var activity: Activity? = null
+        try {
+            instrumentation.targetContext.startActivity(Intent(instrumentation.targetContext, NuxieExperienceActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); putExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID, id)
+            })
+            val host = checkNotNull(monitor.waitForActivityWithTimeout(15_000)).also { activity = it }
+            assertTrue(baseReady.await(30, TimeUnit.SECONDS))
+            val baseHandle = checkNotNull(PresentationRegistry.currentScreen(id))
+            val navigation = checkNotNull(baseHandle.prepareNavigation(topId, top))
+            navigation.awaitExit()
+            PresentationRegistry.register(topId, top,
+                onFirstFrame = { runBlocking { PresentationRegistry.reveal(topId) }; topReady.countDown() },
+                onFailure = { throw AssertionError(it) }, onDismissed = {}, onOutcome = {})
+            navigation.activate()
+            assertTrue(topReady.await(30, TimeUnit.SECONDS))
+            var sheet: ExperienceNativeLayerWindow? = null
+            instrumentation.runOnMainSync {
+                val layers = host.javaClass.getDeclaredField("layers").apply { isAccessible = true }.get(host) as List<*>
+                val layer = checkNotNull(layers.last())
+                sheet = layer.javaClass.getDeclaredField("sheet").apply { isAccessible = true }.get(layer) as ExperienceNativeLayerWindow
+            }
+            val appearances = base.screenLifecycle.snapshot()["screen/appearances"]
+            val closing = async(kotlinx.coroutines.Dispatchers.Default) {
+                checkNotNull(PresentationRegistry.currentScreen(topId)).dismissLayerFromJourney()
+            }
+            val deadline = SystemClock.uptimeMillis() + 2_000
+            while (top.screenLifecycle.phase != ExperienceScreenLifecycle.Phase.EXITING && SystemClock.uptimeMillis() < deadline) {
+                SystemClock.sleep(1)
+            }
+            instrumentation.runOnMainSync {
+                assertEquals(ExperienceScreenLifecycle.Phase.EXITING, top.screenLifecycle.phase)
+                assertEquals(NuxieViewModelScalarValue.StringValue("dismissed"), top.screenLifecycle.snapshot()["screen/exitReason"])
+                assertTrue("The 400 ms authored fade still owns its native sheet", sheet!!.dialog.isShowing)
+                assertFalse(host.isFinishing)
+                assertEquals(ExperienceScreenLifecycle.Phase.ACTIVE, base.screenLifecycle.phase)
+            }
+            assertTrue(closing.await())
+            instrumentation.runOnMainSync {
+                assertFalse(sheet!!.dialog.isShowing)
+                assertTrue(PresentationRegistry.currentScreen(id) === baseHandle)
+                assertFalse(host.isFinishing)
+                assertEquals(appearances, base.screenLifecycle.snapshot()["screen/appearances"])
+                assertEquals(ExperienceScreenLifecycle.Phase.ACTIVE, base.screenLifecycle.phase)
+            }
+            assertEquals(1, reveals.get())
+        } finally {
+            instrumentation.runOnMainSync { PresentationRegistry.dismiss(id, CloseReason.HostDismissed); activity?.finish() }
+            assertTrue(retired.await(5, TimeUnit.SECONDS))
+            instrumentation.removeMonitor(monitor)
+            scene.delete()
+        }
+    }
 
     private fun verifyCompiledDismissal(
         reason: CloseReason,

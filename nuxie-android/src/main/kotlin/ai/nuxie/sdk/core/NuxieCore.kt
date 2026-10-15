@@ -373,6 +373,7 @@ internal class NuxieCore(
                     JourneyPresentationResult.Declined
                 ExperiencePresentationException.Reason.JOURNEY_COMPLETED ->
                     JourneyPresentationResult.Completed
+                ExperiencePresentationException.Reason.LAYER_DISMISSED -> JourneyPresentationResult.Shown
                 ExperiencePresentationException.Reason.PRODUCTS_UNAVAILABLE ->
                     JourneyPresentationResult.ProductsUnavailable
                 else -> JourneyPresentationResult.Failed
@@ -380,6 +381,9 @@ internal class NuxieCore(
         } catch (_: Exception) {
             JourneyPresentationResult.Failed
         }
+
+        override fun hasPresentedLayer(owner: JourneyPresentationOwner): Boolean =
+            presentations.hasPresentedJourneyLayer(owner)
 
         override fun owns(owner: JourneyPresentationOwner): Boolean =
             presentations.ownsJourney(owner)

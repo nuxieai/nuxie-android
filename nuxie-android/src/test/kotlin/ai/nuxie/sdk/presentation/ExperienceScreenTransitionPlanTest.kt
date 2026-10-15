@@ -39,6 +39,17 @@ class ExperienceScreenTransitionPlanTest {
         }
     }
 
+    @Test fun `dismiss accepts only the decided all scope`() {
+        for (text in listOf("{\"type\":\"dismiss\"}", "{\"type\":\"dismiss\",\"scope\":\"all\"}")) {
+            ai.nuxie.sdk.experiences.JourneyGrammar.action(Json.parseToJsonElement(text), emptySet(), emptySet())
+        }
+        for (scope in listOf(JsonPrimitive("top"), JsonPrimitive("layer"), JsonPrimitive(1), kotlinx.serialization.json.JsonNull)) {
+            val result = runCatching { ai.nuxie.sdk.experiences.JourneyGrammar.action(
+                JsonObject(mapOf("type" to JsonPrimitive("dismiss"), "scope" to scope)), emptySet(), emptySet()) }
+            assertTrue("Unknown or non-string dismiss scope is refused", result.isFailure)
+        }
+    }
+
     @Test fun `shared modal options validate and select each native layer`() {
         val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/presentation-options.json").readText()).jsonObject
