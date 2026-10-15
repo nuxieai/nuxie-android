@@ -798,9 +798,8 @@ internal class ExperienceSurfaceHost(
                     presentationHeight.apply(loadedFile, active, fitsContentHeight, size.width, size.height)
                     val correlation = nextCorrelationId++
                     val outcome = stepAndRefreshFocus { active.stepTyped(elapsedSeconds = 0.0, correlationId = correlation) }
-                    val snapshot = viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot()
-                    snapshot?.let(::retainScreenValues)
-                    if (outcome.hasPublishableEffects()) unpublishedSteps.addLast(PublishedStep(correlation, outcome, snapshot))
+                    // Same per-step capture as the frame loop, so a response save on this step is kept.
+                    captureStepSnapshot(outcome, correlation)?.let(::retainScreenValues)
                     val laidOut = active.layoutSize()
                     val bounds = ExperienceArtboardSize(laidOut.first, laidOut.second)
                     layoutBounds = bounds
@@ -816,7 +815,7 @@ internal class ExperienceSurfaceHost(
             } catch (error: Throwable) {
                 reportFailure(ExperiencePresentationException.Reason.HOST_FAILED, "Experience content measurement failed", error)
                 onLoaded?.invoke(false)
-                return@enqueue
+                return@enqueuePreparation
             }
             onLoaded?.invoke(true)
         }
