@@ -2401,7 +2401,7 @@ class ExperiencePresentationServiceTest {
                         JourneyScreenDismissalResult.HANDLED
                     }, onScreenChanged = { edges += "active:$it"; true },
                     onPresentationRevealed = { edges += "reveal:$it" },
-                    onEmissionBatch = { batch, _ -> batches += batch; true },
+                    onEmissionBatch = { batch, _ -> batches += batch; JourneyEmissionBatchResult.ACCEPTED },
                     onOutcome = {}, transition = transition, runValues = sharedValues) }
                 runCurrent()
                 if (initial) PresentationRegistry.reportFirstFrame(nativeLayers.single())
