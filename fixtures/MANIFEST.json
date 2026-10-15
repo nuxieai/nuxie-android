@@ -463,7 +463,7 @@
     "unicode/GraphemeBreakTest-16.0.0.txt": "ee2b9354d270ac061b29f09662cafea06341d77e704b8cc6bd72aaeeda363cb5",
     "unicode/LICENSE.txt": "e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96",
     "unicode/grapheme-properties-16.0.0.json": "84c942f0030116e6341c2fb3cd57a8d619b8cf82f613860766493b8b99498cf4",
-    "video/README.md": "9c42dbf30994f62d708ac3fd5f5b921e94c00e74f4457ce31e2eaa3bba0c88d8",
+    "video/README.md": "08f1c77bc27fe29d7e47fd13aa8a34eb98c81050a3bb0ac65d8097e3521eb448",
     "video/caption-selection.json": "90d556cdeb581ac2cfbd67036e8b22a3963513acfda915074b9f769c00ce16ad",
     "video/captions-4k60.mp4": "600159824f081a7907b5c09eedc86318fd4005f5b40275f3f020ee3ff6b4b086",
     "video/captions-720p.mp4": "16b1362520eaf0be21545d16062606ff7782409e0ea784c2d94dae8d0135b113",
@@ -796,7 +796,6 @@
     "runtime/text-editing-experiment/text_input_secure_observed.riv": "5f0f378c4eb3c4fbec1d6710fa6afdb6fb75cb71",
     "runtime/typing-probes/README.md": "ccaad4fe7f09685429a0159222a6332e3f29a13b",
     "runtime/typing-probes/f3-field-in-flow.riv": "ccaad4fe7f09685429a0159222a6332e3f29a13b",
-    "video/README.md": "422d4a00445197ca08846d7444ae305b84dec239",
     "journeys/planes/runtime-screen-lifecycle.json": "ea4be62bf08895f388ea109b3931168b4d0aaea7",
     "runtime/screen-exit-reason/dismissed-only/mounted-screen.json": "ea4be62bf08895f388ea109b3931168b4d0aaea7",
     "runtime/screen-exit-reason/dismissed-only/provenance.json": "ea4be62bf08895f388ea109b3931168b4d0aaea7",
@@ -819,5 +818,8 @@
     "video/endpoint.nux": "422d4a00445197ca08846d7444ae305b84dec239",
     "video/endpoint-inventory.json": "422d4a00445197ca08846d7444ae305b84dec239",
     "journeys/planes/video-admission.json": "8d760b2a96b5c6229afd5fa060fdf9ba2828186d"
-  }
+  },
+  "repositoryOwned": [
+    "video/README.md"
+  ]
 }

@@ -93,6 +93,22 @@ if invalid_source_overrides:
         print(f"Invalid source commit override in manifest: {path}", file=sys.stderr)
     raise SystemExit(1)
 
+repository_owned = manifest.get("repositoryOwned", [])
+if (
+    not isinstance(repository_owned, list)
+    or len(set(map(str, repository_owned))) != len(repository_owned)
+    or any(
+        not isinstance(path, str)
+        or path not in expected_files
+        or path in source_commit_overrides
+        for path in repository_owned
+    )
+):
+    fail(
+        "Fixture manifest repositoryOwned must list distinct manifest files "
+        "without a source commit override."
+    )
+
 actual_files = {}
 for path in sorted(
     fixture_root.rglob("*"),
@@ -134,6 +150,7 @@ if missing_paths or extra_paths or mismatched_paths:
 print(
     f"Verified {len(actual_files)} fixture files from "
     f"{manifest['sourceRepo']}@{source_commit} "
-    f"with {len(source_commit_overrides)} source commit override(s)."
+    f"with {len(source_commit_overrides)} source commit override(s) "
+    f"and {len(repository_owned)} repository-owned file(s)."
 )
 PY
