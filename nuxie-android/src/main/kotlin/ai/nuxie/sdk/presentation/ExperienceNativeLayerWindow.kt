@@ -62,8 +62,11 @@ internal class ExperienceNativeLayerWindow(
                 val height = when (shell.detent) {
                     PresentationShell.Sheet.Detent.MEDIUM -> availableHeight / 2
                     PresentationShell.Sheet.Detent.LARGE -> ViewGroup.LayoutParams.MATCH_PARENT
+                    // The runtime centres the hugging content in its surface. Rounding the sheet down
+                    // lets that content cover both edges; rounding up left a partly uncovered
+                    // pixel row along the top and bottom of the sheet.
                     PresentationShell.Sheet.Detent.FIT_CONTENT -> measuredHeight?.let {
-                        kotlin.math.ceil(it * activity.resources.displayMetrics.density).toInt().coerceIn(1, availableHeight.coerceAtLeast(1))
+                        kotlin.math.floor(it * activity.resources.displayMetrics.density).toInt().coerceIn(1, availableHeight.coerceAtLeast(1))
                     } ?: ViewGroup.LayoutParams.MATCH_PARENT
                 }
                 panel?.let { view ->

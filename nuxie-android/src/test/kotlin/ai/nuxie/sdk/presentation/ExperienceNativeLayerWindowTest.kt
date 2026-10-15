@@ -91,6 +91,9 @@ class ExperienceNativeLayerWindowTest {
             assertTrue(window.dialog.isShowing)
             val sheet = window.dialog.findViewById<android.view.View>(com.google.android.material.R.id.design_bottom_sheet)
             assertEquals(152, sheet.layoutParams.height)
+            // Parla's Saved hugs 177.79 points; the sheet rounds down so its content covers both edges.
+            window.updateContentHeight(177.79f)
+            assertEquals(177, sheet.layoutParams.height)
             window.updateContentHeight(272f)
             assertEquals(272, sheet.layoutParams.height)
             window.updateContentHeight(1232f)
