@@ -376,6 +376,12 @@ final class AndroidVideoDecoder {
    * file with audio after its last image keeps every seek where it was asked.
    * Reading stops after `sampleLimit` samples per track. Any failure or limit
    * skips the seek limit and never fails opening the video.
+   *
+   * AAC encoders delay audio by 1,024 to 2,112 samples. A platform that does not
+   * apply the file's edit list reports that delay as audio ending up to about
+   * two audio frames late (48 ms at 44.1 kHz). Audio counts as running past the
+   * video only when it ends more than three of its own frames after the last
+   * image, at least 50 ms and at most 200 ms, so that delay never decides it.
    */
   static double seekLimitSeconds(java.io.File source, int sampleLimit) {
     MediaExtractor extractor = new MediaExtractor();
@@ -398,10 +404,17 @@ final class AndroidVideoDecoder {
       if (videoTail == null)
         return Double.NaN;
       // The last image is shown until its own frame interval has passed.
-      long imageEndUs = videoTail[0] + Math.max(1, videoTail[1] >= 0 ? videoTail[0] - videoTail[1] : 1);
+      long frameUs = sampleLength(videoTail);
+      if (frameUs <= 0)
+        return Double.NaN;
+      long imageEndUs = videoTail[0] + frameUs;
       for (int track : audio) {
         long[] audioTail = lastSampleTimes(extractor, track, sampleLimit);
-        if (audioTail == null || audioTail[0] > imageEndUs)
+        if (audioTail == null)
+          return Double.NaN;
+        long audioFrameUs = Math.max(0, sampleLength(audioTail));
+        long toleranceUs = Math.min(200_000, Math.max(50_000, 3 * audioFrameUs));
+        if (audioTail[0] + audioFrameUs > imageEndUs + toleranceUs)
           return Double.NaN;
       }
       return videoTail[0] / 1_000_000.0;
@@ -411,7 +424,17 @@ final class AndroidVideoDecoder {
       extractor.release();
     }
   }
-  /** The latest and second latest presentation times near the track's end, or null. */
+  /**
+   * The last sample's length: the gap from the sample before it, or, when the
+   * last sample is the only one read (a sync frame), the rest of the track.
+   */
+  private static long sampleLength(long[] tail) {
+    return tail[1] >= 0 ? tail[0] - tail[1] : tail[2] - tail[0];
+  }
+  /**
+   * The latest and second latest presentation times near the track's end and
+   * the track's duration, or null.
+   */
   private static long[] lastSampleTimes(MediaExtractor extractor, int track, int sampleLimit) {
     MediaFormat format = extractor.getTrackFormat(track);
     if (!format.containsKey(MediaFormat.KEY_DURATION))
@@ -437,7 +460,7 @@ final class AndroidVideoDecoder {
         if (!extractor.advance())
           break;
       }
-      return last < 0 ? null : new long[] {last, previous};
+      return last < 0 ? null : new long[] {last, previous, durationUs};
     } finally {
       extractor.unselectTrack(track);
     }

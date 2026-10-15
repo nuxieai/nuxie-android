@@ -15,8 +15,18 @@ class AndroidVideoSeekDeviceTest {
 
     @Test fun pausedAfterPlaybackWithClockPollingDeliversEverySeekGeneration() = verifySeeks(true)
 
+    /**
+     * The shared endpoint shape, the same with its last frame a sync frame, and
+     * the same with AAC times reported without the encoder-delay shift.
+     */
     @Test fun pausedSeekToDurationDeliversTheLastVideoSample() {
-        val file = endpointMedia("endpoint-timecoded.mp4")
+        for (name in listOf("endpoint-timecoded.mp4", "endpoint-last-keyframe.mp4", "endpoint-unshifted-audio.mp4")) {
+            verifyEndpointSeek(name)
+        }
+    }
+
+    private fun verifyEndpointSeek(name: String) {
+        val file = endpointMedia(name)
         val decoder = AndroidVideoDecoder(InstrumentationRegistry.getInstrumentation().targetContext, file, 1, 64 * 1024 * 1024, 1)
         val probe = ComposedColorProbe()
         try {
@@ -37,11 +47,11 @@ class AndroidVideoSeekDeviceTest {
                     }
                     Thread.sleep(5)
                 }
-                throw AssertionError("Paused decoder must deliver the requested image at $seconds seconds")
+                throw AssertionError("$name: paused decoder must deliver the requested image at $seconds seconds")
             }
-            assertEquals("Seek to 0.1 decodes the 0.1-second sample", 0.1, seek(0.1, 2, true).first, 0.001)
-            val (image, position) = seek(2.0, 3, false)
-            assertEquals("Seek to duration decodes the final 1.9-second sample; player position=$position",
+            assertEquals("$name: seek to 0.1 decodes the 0.1-second sample", 0.1, seek(0.1, 2, true).first, 0.001)
+            val (image, position) = seek(decoder.duration(), 3, false)
+            assertEquals("$name: seek to duration decodes the final 1.9-second sample; player position=$position",
                 1.9, image, 0.001)
             assertFalse(decoder.playing())
         } finally {
@@ -93,6 +103,17 @@ class AndroidVideoSeekDeviceTest {
             InstrumentationRegistry.getInstrumentation().targetContext.cacheDir).apply { writeText("not a video") }
         try {
             assertEquals(1.9, AndroidVideoDecoder.seekLimitSeconds(timecoded, AndroidVideoDecoder.SEEK_LIMIT_SCAN_SAMPLES), 0.001)
+            val keyframe = endpointMedia("endpoint-last-keyframe.mp4")
+            val unshifted = endpointMedia("endpoint-unshifted-audio.mp4")
+            try {
+                assertEquals("A last sample that is a sync frame still ends at the track's end", 1.9,
+                    AndroidVideoDecoder.seekLimitSeconds(keyframe, AndroidVideoDecoder.SEEK_LIMIT_SCAN_SAMPLES), 0.001)
+                assertEquals("AAC encoder delay reported without its shift is not an audio tail", 1.9,
+                    AndroidVideoDecoder.seekLimitSeconds(unshifted, AndroidVideoDecoder.SEEK_LIMIT_SCAN_SAMPLES), 0.001)
+            } finally {
+                keyframe.delete()
+                unshifted.delete()
+            }
             assertTrue("Audio after the last image keeps seeks unmoved",
                 AndroidVideoDecoder.seekLimitSeconds(tail, AndroidVideoDecoder.SEEK_LIMIT_SCAN_SAMPLES).isNaN())
             assertTrue("A scan over its sample limit skips the limit",
