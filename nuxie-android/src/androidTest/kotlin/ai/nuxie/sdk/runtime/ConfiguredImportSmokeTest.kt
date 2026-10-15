@@ -477,9 +477,10 @@ class ConfiguredImportSmokeTest {
                                     assertEquals("Actual MediaPlayer speed", expectedSpeed, media.playbackParams.speed, 0.001f)
                                 }
                                 if (rateAnimation) {
-                                    // Rates up to 1.5 fit this pool's 100,000 pixels per second; faster ones do not.
+                                    // This pool fits the clip at its own decode cost but not at twice it,
+                                    // so a claim that followed the playback rate could not keep the decoder.
                                     val cost = ExperienceVideoDecodeCost.read(local)
-                                    assertTrue("Fixture decode cost $cost", cost * 1.5 <= 100_000 && cost * 2.0 > 100_000)
+                                    assertTrue("Fixture decode cost $cost", cost <= 100_000 && cost * 2.0 > 100_000)
                                     // One bound rate per frame, as an animation or a dragged slider writes it.
                                     for (step in (1..10) + (9 downTo 0)) {
                                         val rate = 1.0 + step / 10.0
