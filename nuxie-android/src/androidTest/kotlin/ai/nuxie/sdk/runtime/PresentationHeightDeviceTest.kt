@@ -171,7 +171,17 @@ class PresentationHeightDeviceTest {
                 assertEquals(expectedWidth, sheet.width)
                 assertEquals(kotlin.math.ceil(152f * activity.resources.displayMetrics.density).toInt(), sheet.height)
                 window!!.updateContentHeight(10000f)
-                assertEquals(ai.nuxie.sdk.presentation.ExperienceNativeLayerWindow.windowBounds(activity).height(), sheet.layoutParams.height)
+                // A sheet never extends under the system bars: the cap is the window height
+                // less the status and navigation bar insets, whether or not the bars are shown.
+                val windowHeight = ai.nuxie.sdk.presentation.ExperienceNativeLayerWindow.windowBounds(activity).height()
+                val insets = checkNotNull(activity.window.decorView.rootWindowInsets)
+                val bars = if (android.os.Build.VERSION.SDK_INT >= 30) {
+                    insets.getInsetsIgnoringVisibility(android.view.WindowInsets.Type.systemBars()).let { it.top + it.bottom }
+                } else {
+                    @Suppress("DEPRECATION") (insets.stableInsetTop + insets.stableInsetBottom)
+                }
+                assertTrue("The window reports its system bars", bars > 0)
+                assertEquals(windowHeight - bars, sheet.layoutParams.height)
                 window!!.retire()
                 window!!.updateContentHeight(272f)
                 assertFalse(window!!.dialog.isShowing)
