@@ -2502,9 +2502,12 @@ class JourneyServiceTest {
     @Test fun `identity roundtrip routes runtime link externally before shutdown`() =
         sharedLinkStates("identity-roundtrip-runtime-before-shutdown")
 
-    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-    private fun sharedLinkStates(onlyName: String? = null) = runTest {
-        Dispatchers.setMain(kotlinx.coroutines.test.StandardTestDispatcher(testScheduler))
+    private fun sharedLinkStates(onlyName: String? = null) {
+        // Robolectric loads its native SQLite runtime, copying its ICU data, on the
+        // first native database open in each sandbox. These three tests instrument
+        // extra classes, so they share a sandbox of their own; whichever runs first
+        // pays that cost here, not inside the wall-clock Activity launch waits below.
+        runBlocking { store.queryPendingLocalRoutes("customer") }
         val vectors = Json.parseToJsonElement(FixtureRunner.fixturesRoot().resolve("events/link-open-states.json").readText())
             .jsonObject.getValue("cases").jsonArray + Json.parseToJsonElement("""{
                 "name":"runtime-complete","state":"settled","complete":true,
@@ -2512,240 +2515,246 @@ class JourneyServiceTest {
                 "expected":{"destination":"in_app","opened":true,"recorded":true}}
             """)
         if (onlyName != null) require(vectors.any { it.jsonObject["name"] == JsonPrimitive(onlyName) })
+        // Each vector drives real Activities, so each gets its own runTest and hang
+        // timeout, as in PurchaseOutcomeCommitFixtureTest, rather than one shared limit.
+        for (item in vectors) {
+            val name = item.jsonObject.getValue("name").jsonPrimitive.content
+            if (onlyName == null || name == onlyName) sharedLinkState(item.jsonObject, name)
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private fun sharedLinkState(vector: JsonObject, name: String) = runTest {
+        Dispatchers.setMain(kotlinx.coroutines.test.StandardTestDispatcher(testScheduler))
         val app = RuntimeEnvironment.getApplication()
         val lifecycle = ai.nuxie.sdk.core.NuxieLifecycleCoordinator(
             ai.nuxie.sdk.core.AppLifecycleTracker(app.getSharedPreferences("link-state-lifecycle", 0), { "1" }, { 100_000L }, { _, _ -> }),
             ai.nuxie.sdk.session.SessionService { 100_000L }, backgroundScope)
         app.registerActivityLifecycleCallbacks(lifecycle)
         try {
-            for (item in vectors) {
-                val vector = item.jsonObject
-                val name = vector.getValue("name").jsonPrimitive.content
-                if (onlyName != null && name != onlyName) continue
-                val state = vector.getValue("state").jsonPrimitive.content
-                val link = vector.getValue("link").jsonObject
-                val expected = vector.getValue("expected").jsonObject
-                val journeyLink = link.getValue("kind").jsonPrimitive.content == "journey"
-                if (journeyLink && !expected.getValue("opened").jsonPrimitive.boolean) continue
-                val screenless = state == "screenless"
-                val completes = vector["complete"] == JsonPrimitive(true)
-                val host = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
-                var controller: org.robolectric.android.controller.ActivityController<NuxieExperienceActivity>? = null
-                var dialog: android.app.Dialog? = null
-                var pendingClose: kotlinx.coroutines.Deferred<Unit>? = null
-                val allowIdentityShutdown = CompletableDeferred<Unit>()
-                val beforeShutdown = vector["beforeShutdown"] == JsonPrimitive(true)
-                var profileShutdownEntered = false
-                var retirementCloseReason: CloseReason? = null
-                var handoffCount = 0
-                var handoffWhileResumed = false
-                var handoffBeforeShutdown = false
-                val identity = IdentityService(app).also { it.setDistinctId("customer") }
-                val releaseEntry = fixture.getValue("renderedEntry").jsonObject
-                val catalog = catalog(releaseEntry)
-                val authority = authority(releaseEntry)
-                catalog.commit("customer", catalog.prepare(profile(releaseEntry = releaseEntry), authority))
-                val baseline = requireNotNull(catalog.snapshot("customer"))
-                val original = baseline.releasesByDigest.values.single()
-                val leg = JsonObject(original.leg + mapOf(
-                    "entryStepId" to JsonPrimitive(if (screenless) "link" else "present"),
-                    "screens" to if (screenless) JsonArray(emptyList()) else original.leg.getValue("screens"),
-                    "routes" to if (screenless) JsonArray(emptyList()) else Json.parseToJsonElement("""[{"host":{"kind":"screen","screenId":"screen_welcome"},"eventName":"table_link","entryStepId":"${if (journeyLink) "link" else if (completes) "done" else "wait"}"}]"""),
-                    "steps" to JsonArray(listOf(
-                        Json.parseToJsonElement("""{"kind":"action","id":"present","action":{"type":"navigate","screenId":"screen_welcome"},"outlets":{}}"""),
-                        buildJsonObject { put("kind", "action"); put("id", "link"); putJsonObject("action") { put("type", "open_link"); put("url", link.getValue("url")); put("target", link["target"] ?: JsonPrimitive("")) }; putJsonObject("outlets") { put("next", "done") } },
-                        Json.parseToJsonElement("""{"kind":"action","id":"wait","action":{"type":"delay","durationMs":60000},"outlets":{}}"""),
-                        Json.parseToJsonElement("""{"kind":"complete","id":"done","outcome":"completed"}"""))
-                        .filter { (!screenless || it.jsonObject["id"] != JsonPrimitive("present")) && (journeyLink || it.jsonObject["id"] != JsonPrimitive("link")) })))
-                val envelope = JourneyReleaseEnvelope.authenticate(releaseEntry.getValue("envelope").toString().encodeToByteArray(),
-                    mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(fixture.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP)))
-                val descriptor = JsonObject(original.descriptor + mapOf("leg" to leg) + if (screenless) mapOf(
-                    "render" to kotlinx.serialization.json.JsonNull, "requirements" to kotlinx.serialization.json.JsonNull,
-                    "screenBehaviors" to JsonArray(emptyList())) else emptyMap())
-                ai.nuxie.sdk.experiences.JourneySchemaValidator.validate(descriptor)
-                val release = AuthenticatedJourneyRelease(envelope, original.identity, descriptor, original.publishedAtSeqToPromote)
-                val snapshot = baseline.copy(releasesByDigest = mapOf(release.descriptorSha256 to release))
-                val captures = mutableListOf<Triple<String, Map<String, Any?>, String>>()
-                val recorder = JourneyEffectDispatcher(identity, capture = { event, props, id, _, admission, _ ->
-                    admission.commitIfCurrent { captures += Triple(event, props, id); true } == true }, deliverAppAction = { _, _ -> false })
-                val launched = mutableListOf<String>()
-                val presentations = ExperiencePresentationService(currentDistinctId = identity::distinctId, scope = backgroundScope, emit = { _, _, _ -> }, runtimeAvailable = { true },
-                    launch = { id ->
-                        launched += id; host.pause()
-                        controller = org.robolectric.Robolectric.buildActivity(NuxieExperienceActivity::class.java,
-                            android.content.Intent(app, NuxieExperienceActivity::class.java).putExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID, id)).setup().visible()
-                    }, foregroundActivity = lifecycle::resumedActivity, isAppForeground = lifecycle::isAppForeground,
-                    openLink = { route, activity ->
-                        if (!link.getValue("canOpen").jsonPrimitive.boolean) throw android.content.ActivityNotFoundException()
-                        handoffCount++
-                        handoffWhileResumed = lifecycle.resumedActivity() === controller?.get()
-                        handoffBeforeShutdown = controller?.get()?.isFinishing == false &&
-                            launched.singleOrNull()?.let(PresentationRegistry::currentScreen)?.screenCloseReason() == null
-                        val opened = openActivityLink(app, route, activity)
-                        if (vector["retirement"] == JsonPrimitive("identity_change") || beforeShutdown) {
-                            // The route is chosen before queued shutdown starts, while the Activity stays resumed.
-                            allowIdentityShutdown.complete(Unit)
-                            runCurrent()
+            val state = vector.getValue("state").jsonPrimitive.content
+            val link = vector.getValue("link").jsonObject
+            val expected = vector.getValue("expected").jsonObject
+            val journeyLink = link.getValue("kind").jsonPrimitive.content == "journey"
+            if (journeyLink && !expected.getValue("opened").jsonPrimitive.boolean) return@runTest
+            val screenless = state == "screenless"
+            val completes = vector["complete"] == JsonPrimitive(true)
+            val host = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
+            var controller: org.robolectric.android.controller.ActivityController<NuxieExperienceActivity>? = null
+            var dialog: android.app.Dialog? = null
+            var pendingClose: kotlinx.coroutines.Deferred<Unit>? = null
+            val allowIdentityShutdown = CompletableDeferred<Unit>()
+            val beforeShutdown = vector["beforeShutdown"] == JsonPrimitive(true)
+            var profileShutdownEntered = false
+            var retirementCloseReason: CloseReason? = null
+            var handoffCount = 0
+            var handoffWhileResumed = false
+            var handoffBeforeShutdown = false
+            val identity = IdentityService(app).also { it.setDistinctId("customer") }
+            val releaseEntry = fixture.getValue("renderedEntry").jsonObject
+            val catalog = catalog(releaseEntry)
+            val authority = authority(releaseEntry)
+            catalog.commit("customer", catalog.prepare(profile(releaseEntry = releaseEntry), authority))
+            val baseline = requireNotNull(catalog.snapshot("customer"))
+            val original = baseline.releasesByDigest.values.single()
+            val leg = JsonObject(original.leg + mapOf(
+                "entryStepId" to JsonPrimitive(if (screenless) "link" else "present"),
+                "screens" to if (screenless) JsonArray(emptyList()) else original.leg.getValue("screens"),
+                "routes" to if (screenless) JsonArray(emptyList()) else Json.parseToJsonElement("""[{"host":{"kind":"screen","screenId":"screen_welcome"},"eventName":"table_link","entryStepId":"${if (journeyLink) "link" else if (completes) "done" else "wait"}"}]"""),
+                "steps" to JsonArray(listOf(
+                    Json.parseToJsonElement("""{"kind":"action","id":"present","action":{"type":"navigate","screenId":"screen_welcome"},"outlets":{}}"""),
+                    buildJsonObject { put("kind", "action"); put("id", "link"); putJsonObject("action") { put("type", "open_link"); put("url", link.getValue("url")); put("target", link["target"] ?: JsonPrimitive("")) }; putJsonObject("outlets") { put("next", "done") } },
+                    Json.parseToJsonElement("""{"kind":"action","id":"wait","action":{"type":"delay","durationMs":60000},"outlets":{}}"""),
+                    Json.parseToJsonElement("""{"kind":"complete","id":"done","outcome":"completed"}"""))
+                    .filter { (!screenless || it.jsonObject["id"] != JsonPrimitive("present")) && (journeyLink || it.jsonObject["id"] != JsonPrimitive("link")) })))
+            val envelope = JourneyReleaseEnvelope.authenticate(releaseEntry.getValue("envelope").toString().encodeToByteArray(),
+                mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(fixture.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP)))
+            val descriptor = JsonObject(original.descriptor + mapOf("leg" to leg) + if (screenless) mapOf(
+                "render" to kotlinx.serialization.json.JsonNull, "requirements" to kotlinx.serialization.json.JsonNull,
+                "screenBehaviors" to JsonArray(emptyList())) else emptyMap())
+            ai.nuxie.sdk.experiences.JourneySchemaValidator.validate(descriptor)
+            val release = AuthenticatedJourneyRelease(envelope, original.identity, descriptor, original.publishedAtSeqToPromote)
+            val snapshot = baseline.copy(releasesByDigest = mapOf(release.descriptorSha256 to release))
+            val captures = mutableListOf<Triple<String, Map<String, Any?>, String>>()
+            val recorder = JourneyEffectDispatcher(identity, capture = { event, props, id, _, admission, _ ->
+                admission.commitIfCurrent { captures += Triple(event, props, id); true } == true }, deliverAppAction = { _, _ -> false })
+            val launched = mutableListOf<String>()
+            val presentations = ExperiencePresentationService(currentDistinctId = identity::distinctId, scope = backgroundScope, emit = { _, _, _ -> }, runtimeAvailable = { true },
+                launch = { id ->
+                    launched += id; host.pause()
+                    controller = org.robolectric.Robolectric.buildActivity(NuxieExperienceActivity::class.java,
+                        android.content.Intent(app, NuxieExperienceActivity::class.java).putExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID, id)).setup().visible()
+                }, foregroundActivity = lifecycle::resumedActivity, isAppForeground = lifecycle::isAppForeground,
+                openLink = { route, activity ->
+                    if (!link.getValue("canOpen").jsonPrimitive.boolean) throw android.content.ActivityNotFoundException()
+                    handoffCount++
+                    handoffWhileResumed = lifecycle.resumedActivity() === controller?.get()
+                    handoffBeforeShutdown = controller?.get()?.isFinishing == false &&
+                        launched.singleOrNull()?.let(PresentationRegistry::currentScreen)?.screenCloseReason() == null
+                    val opened = openActivityLink(app, route, activity)
+                    if (vector["retirement"] == JsonPrimitive("identity_change") || beforeShutdown) {
+                        // The route is chosen before queued shutdown starts, while the Activity stays resumed.
+                        allowIdentityShutdown.complete(Unit)
+                        runCurrent()
+                    }
+                    opened
+                })
+            lateinit var journeys: JourneyService
+            val transitions = ai.nuxie.sdk.identity.UserTransitionCoordinator(store, backgroundScope)
+            transitions.addObserver { _, from, _ ->
+                allowIdentityShutdown.await()
+                presentations.shutdownOwnedBy(from)
+            }
+            transitions.addObserver { _, from, to -> journeys.handleUserChange(from, to) }
+            var currentRequest: JourneyPresentationRequest? = null
+            var changedState = false
+            suspend fun changeState() {
+                if (changedState || screenless) return
+                changedState = true
+                val activity = requireNotNull(controller).get()
+                when (state) {
+                    "sheet_active" -> dialog = android.app.Dialog(activity).also { it.setContentView(android.view.View(activity)); it.show() }
+                    "button_dismissing" -> org.robolectric.util.ReflectionHelpers.callInstanceMethod<Void>(activity, "finishTerminal",
+                        org.robolectric.util.ReflectionHelpers.ClassParameter.from(CloseReason::class.java, CloseReason.UserDismissed))
+                    "swipe_dismissing" -> activity.onBackPressed()
+                    "paused_foreground" -> controller!!.pause()
+                    "host_dismissed" -> presentations.dismiss(CloseReason.HostDismissed)
+                    "owner_retired", "presentation_finished" -> {
+                        val retirement = if (state == "owner_retired") vector.getValue("retirement").jsonPrimitive.content else null
+                        if (retirement == "identity_change" || retirement == "identity_roundtrip") {
+                            identity.setDistinctId("replacement-owner")
+                            if (retirement == "identity_roundtrip") identity.setDistinctId("customer")
                         }
-                        opened
-                    })
-                lateinit var journeys: JourneyService
-                val transitions = ai.nuxie.sdk.identity.UserTransitionCoordinator(store, backgroundScope)
-                transitions.addObserver { _, from, _ ->
-                    allowIdentityShutdown.await()
-                    presentations.shutdownOwnedBy(from)
-                }
-                transitions.addObserver { _, from, to -> journeys.handleUserChange(from, to) }
-                var currentRequest: JourneyPresentationRequest? = null
-                var changedState = false
-                suspend fun changeState() {
-                    if (changedState || screenless) return
-                    changedState = true
-                    val activity = requireNotNull(controller).get()
-                    when (state) {
-                        "sheet_active" -> dialog = android.app.Dialog(activity).also { it.setContentView(android.view.View(activity)); it.show() }
-                        "button_dismissing" -> org.robolectric.util.ReflectionHelpers.callInstanceMethod<Void>(activity, "finishTerminal",
-                            org.robolectric.util.ReflectionHelpers.ClassParameter.from(CloseReason::class.java, CloseReason.UserDismissed))
-                        "swipe_dismissing" -> activity.onBackPressed()
-                        "paused_foreground" -> controller!!.pause()
-                        "host_dismissed" -> presentations.dismiss(CloseReason.HostDismissed)
-                        "owner_retired", "presentation_finished" -> {
-                            val retirement = if (state == "owner_retired") vector.getValue("retirement").jsonPrimitive.content else null
-                            if (retirement == "identity_change" || retirement == "identity_roundtrip") {
-                                identity.setDistinctId("replacement-owner")
-                                if (retirement == "identity_roundtrip") identity.setDistinctId("customer")
-                            }
-                            val close = async {
-                                when (retirement) {
-                                    null -> presentations.shutdownJourney("customer", requireNotNull(currentRequest).journeyId)
-                                    "identity_change", "identity_roundtrip" -> {
+                        val close = async {
+                            when (retirement) {
+                                null -> presentations.shutdownJourney("customer", requireNotNull(currentRequest).journeyId)
+                                "identity_change", "identity_roundtrip" -> {
+                                    transitions.enqueue(ai.nuxie.sdk.identity.UserTransitionCoordinator.Transition(
+                                        ai.nuxie.sdk.identity.UserTransitionCoordinator.Kind.IDENTIFY,
+                                        "customer", "replacement-owner", migrateEvents = false))
+                                    if (retirement == "identity_roundtrip") {
                                         transitions.enqueue(ai.nuxie.sdk.identity.UserTransitionCoordinator.Transition(
                                             ai.nuxie.sdk.identity.UserTransitionCoordinator.Kind.IDENTIFY,
-                                            "customer", "replacement-owner", migrateEvents = false))
-                                        if (retirement == "identity_roundtrip") {
-                                            transitions.enqueue(ai.nuxie.sdk.identity.UserTransitionCoordinator.Transition(
-                                                ai.nuxie.sdk.identity.UserTransitionCoordinator.Kind.IDENTIFY,
-                                                "replacement-owner", "customer", migrateEvents = false))
-                                        }
-                                        transitions.drain()
+                                            "replacement-owner", "customer", migrateEvents = false))
                                     }
-                                    "profile_clear" -> journeys.profileDidClear("customer", 2)
-                                    else -> error("unknown retirement $retirement")
+                                    transitions.drain()
                                 }
+                                "profile_clear" -> journeys.profileDidClear("customer", 2)
+                                else -> error("unknown retirement $retirement")
                             }
-                            runCurrent()
-                            retirementCloseReason = PresentationRegistry.currentScreen(launched.single())?.screenCloseReason()
-                            if (retirement == "profile_clear" && beforeShutdown) {
-                                assertTrue("$name must reach shutdown after revoking execution", profileShutdownEntered)
-                            }
-                            pendingClose = close
                         }
-                        "background" -> { controller!!.pause().stop(); host.stop() }
-                    }
-                }
-                val presenter = object : JourneyPresenting {
-                    override suspend fun openLink(owner: JourneyPresentationOwner, link: JourneyLinkRequest): ai.nuxie.sdk.presentation.JourneyOpenedLink? {
-                        changeState(); return presentations.openJourneyLink(owner, link)
-                    }
-                    override fun reserve(ownerDistinctId: String) = presentations.reserveJourney(ownerDistinctId)
-                    override fun owns(owner: JourneyPresentationOwner) = presentations.ownsJourney(owner)
-                    override fun screenId(owner: JourneyPresentationOwner) = presentations.journeyScreenId(owner)
-                    override suspend fun present(request: JourneyPresentationRequest): JourneyPresentationResult {
-                        currentRequest = request
-                        val file = File(directory, "link-scene").apply { writeBytes(byteArrayOf(1)) }
-                        presentations.presentJourney(request.fences, request.release, request.screenId, request.journeyId, request.ownerDistinctId, request.reservation,
-                            acquire = { AcquiredJourneyRelease(identity = request.release.identity, artifactsByKey = mapOf("renders/main.riv" to file), sceneFile = file, protection = Closeable {}) },
-                            onScreenChanged = request.onScreenChanged, onScreenDismissed = request.onScreenDismissed,
-                            onPresentationRevealed = request.onPresentationRevealed, onLinkOpened = request.onLinkOpened,
-                            onEmissionBatch = { batch, sources -> if (!journeyLink) changeState(); request.onEmissionBatch(batch, sources) }, onOutcome = request.onOutcome)
-                        return JourneyPresentationResult.Shown
-                    }
-                    override suspend fun shutdownPresentation(ownerDistinctId: String, journeyId: String) { presentations.shutdownJourney(ownerDistinctId, journeyId) }
-                    override suspend fun shutdownOwnedBy(ownerDistinctId: String) {
-                        if (beforeShutdown) {
-                            profileShutdownEntered = true
-                            allowIdentityShutdown.await()
-                        }
-                        presentations.shutdownOwnedBy(ownerDistinctId)
-                    }
-                }
-                currentRequest = null
-                val journeyScope = CoroutineScope(backgroundScope.coroutineContext + SupervisorJob(backgroundScope.coroutineContext[kotlinx.coroutines.Job]))
-                journeys = JourneyService(identity, store, catalog, File(directory, name).apply { mkdirs() }, journeyScope,
-                    capture = { event, props, id, _ -> captures += Triple(event, props, id); true }, presenter = presenter, linkRecorder = recorder, nowMillis = { 100_000L })
-                val admission = async { journeys.initialize(); journeys.onAppWillEnterForeground(); journeys.profileDidCommit(snapshot, authority, "customer", 1) }
-                runCurrent()
-                if (!screenless) {
-                    for (attempt in 0 until 200) {
                         runCurrent()
-                        if (launched.isNotEmpty()) break
-                        Thread.sleep(10)
-                    }
-                    assertTrue("$name must launch its real Activity", launched.isNotEmpty())
-                    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-                    val screen = requireNotNull(PresentationRegistry.currentScreen(launched.single()))
-                    org.robolectric.util.ReflectionHelpers.callInstanceMethod<Void>(screen, "onFirstFrame")
-                    runCurrent(); org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-                    admission.await()
-                    val runtimeEvents = mutableListOf(ai.nuxie.sdk.runtime.NuxieRuntimeEvent(0, 128, "table_link", "", "", 0f, emptyList()))
-                    if (!journeyLink) runtimeEvents += ai.nuxie.sdk.runtime.NuxieRuntimeEvent(1, 131, "", link.getValue("url").jsonObject.getValue("value").jsonPrimitive.content,
-                        link["target"]?.jsonPrimitive?.contentOrNull ?: "", 0f, emptyList())
-                    PresentationRegistry.reportRuntimeStep(launched.single(), NuxiePlayerStepOutcome(true, emptyList(), runtimeEvents, emptyList(), emptyList()), 1uL, null)
-                    runCurrent()
-                } else { admission.await(); runCurrent() }
-                if (expected.getValue("opened").jsonPrimitive.boolean) {
-                    for (attempt in 0 until 200) {
-                        runCurrent()
-                        val recorded = captures.any { it.first == JourneyEventNames.LINK_OPENED }
-                        val completed = !completes || captures.any { it.first == JourneyEventNames.LEG_COMPLETED }
-                        if (handoffCount > 0 && completed && (!expected.getValue("recorded").jsonPrimitive.boolean || recorded)) break
-                        Thread.sleep(10)
-                    }
-                }
-                pendingClose?.let { close ->
-                    allowIdentityShutdown.complete(Unit)
-                    runCurrent()
-                    if (vector["retirement"] == JsonPrimitive("identity_change") || beforeShutdown) {
                         retirementCloseReason = PresentationRegistry.currentScreen(launched.single())?.screenCloseReason()
+                        if (retirement == "profile_clear" && beforeShutdown) {
+                            assertTrue("$name must reach shutdown after revoking execution", profileShutdownEntered)
+                        }
+                        pendingClose = close
                     }
-                    controller!!.pause().stop().destroy(); host.resume(); runCurrent()
-                    close.await()
+                    "background" -> { controller!!.pause().stop(); host.stop() }
                 }
-                runCurrent()
-                if (state == "owner_retired") {
-                    assertEquals(name, 1, handoffCount)
-                    assertTrue("$name must hand off before the test destroys the resumed Activity", handoffWhileResumed)
-                    assertEquals(name, CloseReason.IdentityChanged, retirementCloseReason)
-                    if (vector["retirement"] == JsonPrimitive("identity_change") || beforeShutdown) {
-                        assertTrue("$name must route before queued identity shutdown starts", handoffBeforeShutdown)
-                    }
-                }
-                val records = captures.filter { it.first == JourneyEventNames.LINK_OPENED }
-                assertEquals(name, if (expected.getValue("recorded").jsonPrimitive.boolean) 1 else 0, records.size)
-                records.firstOrNull()?.let { record ->
-                    assertEquals(name, expected["destination"]?.jsonPrimitive?.contentOrNull, record.second["destination"])
-                }
-                val intent = controller?.get()?.let { org.robolectric.Shadows.shadowOf(it).nextStartedActivity }
-                    ?: org.robolectric.Shadows.shadowOf(host.get()).nextStartedActivity ?: org.robolectric.Shadows.shadowOf(app).nextStartedActivity
-                assertEquals(name, expected.getValue("opened").jsonPrimitive.boolean, intent != null)
-                if (intent != null) {
-                    assertEquals(android.content.Intent.ACTION_VIEW, intent.action)
-                    assertEquals(name, expected["destination"] == JsonPrimitive("in_app"), intent.hasExtra(androidx.browser.customtabs.CustomTabsIntent.EXTRA_SESSION))
-                    if (state == "paused_foreground") assertTrue(intent.flags and android.content.Intent.FLAG_ACTIVITY_NEW_TASK != 0)
-                }
-                if (completes) {
-                    val names = captures.map { it.first }
-                    assertTrue(names.indexOf(JourneyEventNames.LINK_OPENED) >= 0)
-                    assertTrue(names.indexOf(JourneyEventNames.LINK_OPENED) < names.indexOf(JourneyEventNames.LEG_COMPLETED))
-                }
-                runCurrent()
-                dialog?.dismiss(); presentations.close()
-                controller?.let { if (!it.get().isDestroyed) { if (state !in setOf("background", "paused_foreground")) it.pause(); if (state != "background") it.stop(); it.destroy() } }
-                if (screenless || state in setOf("owner_retired", "presentation_finished")) host.pause()
-                if (state != "background") host.stop()
-                host.destroy(); runCurrent(); PresentationRegistry.clearForTesting()
-                journeyScope.cancel()
             }
+            val presenter = object : JourneyPresenting {
+                override suspend fun openLink(owner: JourneyPresentationOwner, link: JourneyLinkRequest): ai.nuxie.sdk.presentation.JourneyOpenedLink? {
+                    changeState(); return presentations.openJourneyLink(owner, link)
+                }
+                override fun reserve(ownerDistinctId: String) = presentations.reserveJourney(ownerDistinctId)
+                override fun owns(owner: JourneyPresentationOwner) = presentations.ownsJourney(owner)
+                override fun screenId(owner: JourneyPresentationOwner) = presentations.journeyScreenId(owner)
+                override suspend fun present(request: JourneyPresentationRequest): JourneyPresentationResult {
+                    currentRequest = request
+                    val file = File(directory, "link-scene").apply { writeBytes(byteArrayOf(1)) }
+                    presentations.presentJourney(request.fences, request.release, request.screenId, request.journeyId, request.ownerDistinctId, request.reservation,
+                        acquire = { AcquiredJourneyRelease(identity = request.release.identity, artifactsByKey = mapOf("renders/main.riv" to file), sceneFile = file, protection = Closeable {}) },
+                        onScreenChanged = request.onScreenChanged, onScreenDismissed = request.onScreenDismissed,
+                        onPresentationRevealed = request.onPresentationRevealed, onLinkOpened = request.onLinkOpened,
+                        onEmissionBatch = { batch, sources -> if (!journeyLink) changeState(); request.onEmissionBatch(batch, sources) }, onOutcome = request.onOutcome)
+                    return JourneyPresentationResult.Shown
+                }
+                override suspend fun shutdownPresentation(ownerDistinctId: String, journeyId: String) { presentations.shutdownJourney(ownerDistinctId, journeyId) }
+                override suspend fun shutdownOwnedBy(ownerDistinctId: String) {
+                    if (beforeShutdown) {
+                        profileShutdownEntered = true
+                        allowIdentityShutdown.await()
+                    }
+                    presentations.shutdownOwnedBy(ownerDistinctId)
+                }
+            }
+            currentRequest = null
+            val journeyScope = CoroutineScope(backgroundScope.coroutineContext + SupervisorJob(backgroundScope.coroutineContext[kotlinx.coroutines.Job]))
+            journeys = JourneyService(identity, store, catalog, File(directory, name).apply { mkdirs() }, journeyScope,
+                capture = { event, props, id, _ -> captures += Triple(event, props, id); true }, presenter = presenter, linkRecorder = recorder, nowMillis = { 100_000L })
+            val admission = async { journeys.initialize(); journeys.onAppWillEnterForeground(); journeys.profileDidCommit(snapshot, authority, "customer", 1) }
+            runCurrent()
+            if (!screenless) {
+                for (attempt in 0 until 200) {
+                    runCurrent()
+                    if (launched.isNotEmpty()) break
+                    Thread.sleep(10)
+                }
+                assertTrue("$name must launch its real Activity", launched.isNotEmpty())
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                val screen = requireNotNull(PresentationRegistry.currentScreen(launched.single()))
+                org.robolectric.util.ReflectionHelpers.callInstanceMethod<Void>(screen, "onFirstFrame")
+                runCurrent(); org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                admission.await()
+                val runtimeEvents = mutableListOf(ai.nuxie.sdk.runtime.NuxieRuntimeEvent(0, 128, "table_link", "", "", 0f, emptyList()))
+                if (!journeyLink) runtimeEvents += ai.nuxie.sdk.runtime.NuxieRuntimeEvent(1, 131, "", link.getValue("url").jsonObject.getValue("value").jsonPrimitive.content,
+                    link["target"]?.jsonPrimitive?.contentOrNull ?: "", 0f, emptyList())
+                PresentationRegistry.reportRuntimeStep(launched.single(), NuxiePlayerStepOutcome(true, emptyList(), runtimeEvents, emptyList(), emptyList()), 1uL, null)
+                runCurrent()
+            } else { admission.await(); runCurrent() }
+            if (expected.getValue("opened").jsonPrimitive.boolean) {
+                for (attempt in 0 until 200) {
+                    runCurrent()
+                    val recorded = captures.any { it.first == JourneyEventNames.LINK_OPENED }
+                    val completed = !completes || captures.any { it.first == JourneyEventNames.LEG_COMPLETED }
+                    if (handoffCount > 0 && completed && (!expected.getValue("recorded").jsonPrimitive.boolean || recorded)) break
+                    Thread.sleep(10)
+                }
+            }
+            pendingClose?.let { close ->
+                allowIdentityShutdown.complete(Unit)
+                runCurrent()
+                if (vector["retirement"] == JsonPrimitive("identity_change") || beforeShutdown) {
+                    retirementCloseReason = PresentationRegistry.currentScreen(launched.single())?.screenCloseReason()
+                }
+                controller!!.pause().stop().destroy(); host.resume(); runCurrent()
+                close.await()
+            }
+            runCurrent()
+            if (state == "owner_retired") {
+                assertEquals(name, 1, handoffCount)
+                assertTrue("$name must hand off before the test destroys the resumed Activity", handoffWhileResumed)
+                assertEquals(name, CloseReason.IdentityChanged, retirementCloseReason)
+                if (vector["retirement"] == JsonPrimitive("identity_change") || beforeShutdown) {
+                    assertTrue("$name must route before queued identity shutdown starts", handoffBeforeShutdown)
+                }
+            }
+            val records = captures.filter { it.first == JourneyEventNames.LINK_OPENED }
+            assertEquals(name, if (expected.getValue("recorded").jsonPrimitive.boolean) 1 else 0, records.size)
+            records.firstOrNull()?.let { record ->
+                assertEquals(name, expected["destination"]?.jsonPrimitive?.contentOrNull, record.second["destination"])
+            }
+            val intent = controller?.get()?.let { org.robolectric.Shadows.shadowOf(it).nextStartedActivity }
+                ?: org.robolectric.Shadows.shadowOf(host.get()).nextStartedActivity ?: org.robolectric.Shadows.shadowOf(app).nextStartedActivity
+            assertEquals(name, expected.getValue("opened").jsonPrimitive.boolean, intent != null)
+            if (intent != null) {
+                assertEquals(android.content.Intent.ACTION_VIEW, intent.action)
+                assertEquals(name, expected["destination"] == JsonPrimitive("in_app"), intent.hasExtra(androidx.browser.customtabs.CustomTabsIntent.EXTRA_SESSION))
+                if (state == "paused_foreground") assertTrue(intent.flags and android.content.Intent.FLAG_ACTIVITY_NEW_TASK != 0)
+            }
+            if (completes) {
+                val names = captures.map { it.first }
+                assertTrue(names.indexOf(JourneyEventNames.LINK_OPENED) >= 0)
+                assertTrue(names.indexOf(JourneyEventNames.LINK_OPENED) < names.indexOf(JourneyEventNames.LEG_COMPLETED))
+            }
+            runCurrent()
+            dialog?.dismiss(); presentations.close()
+            controller?.let { if (!it.get().isDestroyed) { if (state !in setOf("background", "paused_foreground")) it.pause(); if (state != "background") it.stop(); it.destroy() } }
+            if (screenless || state in setOf("owner_retired", "presentation_finished")) host.pause()
+            if (state != "background") host.stop()
+            host.destroy(); runCurrent(); PresentationRegistry.clearForTesting()
+            journeyScope.cancel()
         } finally { app.unregisterActivityLifecycleCallbacks(lifecycle); lifecycle.close(); Dispatchers.resetMain() }
     }
 
