@@ -13,8 +13,10 @@
   exposes `ProductDetails` publicly, and it is the plain artifact, never
   `billing-ktx` (the KTX granule ships Kotlin metadata newer than this
   repo's pinned compiler). `androidx.browser` provides the in-app Custom Tab,
-  approved in [the dependency decision](docs/decisions.md). Adding any further runtime dependency needs a
-  spec decision first. No `java.time` anywhere in SDK
+  and `com.google.android.material:material` provides native bottom sheets;
+  both are approved in [the dependency decisions](docs/decisions.md).
+  Adding any further runtime dependency needs a spec decision first.
+  No `java.time` anywhere in SDK
   sources — it would force host apps below minSdk 26 into core-library
   desugaring. Timestamps are epoch millis (`Long`).
 - Kotlin sources use the `ai.nuxie.sdk` package root.
