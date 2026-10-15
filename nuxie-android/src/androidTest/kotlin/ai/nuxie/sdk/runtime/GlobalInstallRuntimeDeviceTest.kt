@@ -44,16 +44,13 @@ class GlobalInstallRuntimeDeviceTest {
                                     assertEquals(status, (error as NuxieRuntimeCallException).status)
                                 }
                                 flags.setValue("enabled", NuxieViewModelScalarValue.BooleanValue(true))
-                                player.setGlobalViewModel("Flags", flags)
+                                player.bindGlobalViewModel("Flags", flags)
                                 assertEquals(labelsFor("enabledLabels"), labels())
-                                rejected(statusFor("notFound")) { player.setGlobalViewModel("missing", flags) }
-                                rejected(statusFor("notFound")) { player.setGlobalViewModel("Root", wrong) }
-                                rejected(statusFor("handleMismatch")) { player.setGlobalViewModel("Flags", wrong) }
+                                rejected(statusFor("notFound")) { player.bindGlobalViewModel("missing", flags) }
+                                rejected(statusFor("notFound")) { player.bindGlobalViewModel("Root", wrong) }
+                                rejected(statusFor("handleMismatch")) { player.bindGlobalViewModel("Flags", wrong) }
                                 assertEquals(labelsFor("enabledLabels"), labels())
                                 flags.setValue("enabled", NuxieViewModelScalarValue.BooleanValue(false))
-                                assertEquals(labelsFor("disabledLabels"), labels())
-                                flags.setValue("enabled", NuxieViewModelScalarValue.BooleanValue(true))
-                                player.setGlobalViewModel("Flags", null)
                                 assertEquals(labelsFor("disabledLabels"), labels())
                             } finally { wrong.close(); flags.close(); player.close() }
                         } finally { artboard.close() }
