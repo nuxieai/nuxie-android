@@ -50,12 +50,14 @@ class HostRenderSmokeTest {
                                     assertTrue("Native lifecycle write $path", artboard.setDefaultViewModelValue(path, value))
                                 }
                             }
-                            fun green(): Int {
+                            fun centerRgb(): List<Int> {
                                 val frame = renderer.renderToCpuFrame(player, 0xFF000000.toInt(), 1f)
                                 assertEquals(100, frame.width)
                                 assertEquals(100, frame.height)
-                                return frame.rgba[(50 * 100 + 50) * 4 + 1].toInt() and 255
+                                val offset = (50 * 100 + 50) * 4
+                                return (0..2).map { frame.rgba[offset + it].toInt() and 255 }
                             }
+                            fun green(): Int = centerRgb()[1]
                             move(Phase.ENTERING)
                             player.stepTyped(elapsedSeconds = 0.0)
                             move(Phase.ACTIVE)
@@ -77,11 +79,11 @@ class HostRenderSmokeTest {
                                 assertEquals(0, beforeEnd.events.count { it.name == event })
                                 val complete = player.stepTyped(elapsedSeconds = 0.02)
                                 assertEquals(1, complete.events.count { it.name == event })
-                                val finalGreen = green()
-                                assertTrue(finalGreen < 5)
+                                val finalRgb = centerRgb()
+                                assertEquals(DEFAULT_PUBLISHED_SCREEN_BACKING_RGB, finalRgb)
                                 val settled = player.stepTyped(elapsedSeconds = 0.1)
                                 assertEquals(0, settled.events.count { it.name == event })
-                                assertEquals("Completion must preserve the terminal pose", finalGreen, green())
+                                assertEquals("Completion must preserve the terminal pose", finalRgb, centerRgb())
                             }
                         } finally { player.close() }
                     } finally { artboard.close() }
@@ -462,6 +464,8 @@ class HostRenderSmokeTest {
         .joinToString("") { "%02x".format(it) }
 
     private companion object {
+        // Screens without an authored background use the compiler's default navy backing.
+        val DEFAULT_PUBLISHED_SCREEN_BACKING_RGB = listOf(19, 37, 61)
         val JSON = Json { prettyPrint = true }
         val MAGENTA_RGBA = byteArrayOf(0xff.toByte(), 0, 0xff.toByte(), 0xff.toByte())
         val OPAQUE_BLACK_RGBA = byteArrayOf(0, 0, 0, 0xff.toByte())
