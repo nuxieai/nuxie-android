@@ -155,7 +155,11 @@ java_test(
     runtime_deps = [":host_render_smoke_kotlin", "@test_maven//:junit_junit"],
     resources = glob(["nuxie-android/src/test/resources/hostrender/**"]),
     resource_strip_prefix = "nuxie-android/src/test/resources",
-    data = glob(["nuxie-android/src/androidTest/assets/**", "example-app/src/debug/assets/asset-smoke/**"]),
+    data = glob([
+        "nuxie-android/src/androidTest/assets/**",
+        "example-app/src/debug/assets/asset-smoke/**",
+        "fixtures/runtime/screen-exit-reason/**",
+    ]),
     target_compatible_with = HOST_COMPATIBILITY,
     tags = ["manual"],
 )
