@@ -119,5 +119,15 @@ native test writes `current-time = 2` and checks that a new decoded blue image
 reaches the Vulkan scene. `endpoint-low-fps.mp4` ends at 2 seconds; its final 10 fps image
 is at 1.9 seconds. No request receipts are part of this contract.
 
+This README is owned by the Android SDK repository (`repositoryOwned` in
+`fixtures/MANIFEST.json`): its rebuild command names this repository's commit, so
+an iOS fixture sync keeps it. Android's endpoint tests decode an Android-only copy
+of `endpoint-low-fps.mp4` whose frames carry their frame number in the green
+channel, so the oracle is the decoded image's own frame time rather than the
+player position, plus a copy whose audio runs past the last image. Both are
+described in `nuxie-android/src/androidTest/assets/video-endpoint-fixtures.md`.
+Android limits a seek past the final video sample to that sample only when no
+audio runs past the video.
+
 A separate long audio-tail case where AVFoundation provides no image at all
 remains tracked in [UNIV-3339](https://universe.basis.dev/issue/UNIV-3339).
