@@ -450,23 +450,29 @@ class ConfiguredImportSmokeTest {
                                 }
                                 val until = android.os.SystemClock.elapsedRealtime() + 10_000
                                 while (decoder()?.playing() != true && android.os.SystemClock.elapsedRealtime() < until) tick()
-                                val live = checkNotNull(decoder())
+                                var live = checkNotNull(decoder())
                                 assertTrue("Bound settings are changed during real playback", live.playing())
                                 fun onDecoder(block: () -> Unit) {
                                     val handler = AndroidVideoDecoder::class.java.getDeclaredField("handler").apply { isAccessible = true }.get(live) as android.os.Handler
                                     val done = java.util.concurrent.CountDownLatch(1)
                                     val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
-                                    handler.post { try { block() } catch (error: Throwable) { failure.set(error) } finally { done.countDown() } }
-                                    assertTrue(done.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                                    assertTrue("Decoder settings callback is queued", handler.post { try { block() } catch (error: Throwable) { failure.set(error) } finally { done.countDown() } })
+                                    val deadline = android.os.SystemClock.elapsedRealtime() + 5_000
+                                    while (done.count > 0 && android.os.SystemClock.elapsedRealtime() < deadline) tick()
+                                    assertEquals("Decoder settings finish while the host keeps consuming frames", 0L, done.count)
                                     failure.get()?.let { throw AssertionError("Decoder settings", it) }
                                 }
                                 fun settings(path: String, value: NuxieViewModelScalarValue, expectedVolume: Float, expectedSpeed: Float) {
                                     setVideoValue(artboard, player, path, value)
-                                    tick()
+                                    // A rate change can resize the pool claim and replace its decoder.
+                                    val deadline = android.os.SystemClock.elapsedRealtime() + 10_000
+                                    do { tick() } while (decoder()?.playing() != true && android.os.SystemClock.elapsedRealtime() < deadline)
+                                    live = checkNotNull(decoder())
+                                    assertTrue("The current decoder is playing after a bound change", live.playing())
                                     onDecoder {
                                         val volume = AndroidVideoDecoder::class.java.getDeclaredField("volume").apply { isAccessible = true }.getFloat(live)
                                         val media = AndroidVideoDecoder::class.java.getDeclaredField("player").apply { isAccessible = true }.get(live) as android.media.MediaPlayer
-                                        assertTrue("MediaPlayer stays playing during a bound change", media.isPlaying)
+                                        assertTrue("Bound settings reach a playing MediaPlayer", media.isPlaying)
                                         assertEquals("Effective decoder volume", expectedVolume, volume, 0.001f)
                                         assertEquals("Actual MediaPlayer speed", expectedSpeed, media.playbackParams.speed, 0.001f)
                                     }
@@ -500,7 +506,10 @@ class ConfiguredImportSmokeTest {
                                 assertTrue("Bound seek to 0.1 presents a decoded red image", awaitColor(true))
                                 val delivered = playback.deliveredFrames
                                 setVideoValue(artboard, player, "current-time", NuxieViewModelScalarValue.NumberValue(2.0))
-                                assertTrue("Seek to duration presents the final 1.9-second blue image", awaitColor(false))
+                                val reachedEndpoint = awaitColor(false)
+                                val endpoint = player.videos().single()
+                                assertTrue("Seek to duration presents the final 1.9-second blue image; video=$endpoint, " +
+                                    "delivered=${playback.deliveredFrames}, frameSeconds=${playback.lastDeliveredFrameSeconds}", reachedEndpoint)
                                 assertTrue("The seek delivers a new decoded image", playback.deliveredFrames > delivered)
                                 assertTrue("Final decoded frame must be at least 1.85 seconds: ${playback.lastDeliveredFrameSeconds}",
                                     checkNotNull(playback.lastDeliveredFrameSeconds) >= 1.85)
