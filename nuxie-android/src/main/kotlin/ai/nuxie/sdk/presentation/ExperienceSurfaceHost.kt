@@ -1326,12 +1326,13 @@ internal class ExperienceSurfaceHost(
                             if (layoutStepPending || presentationHeight.measuresContent) {
                                 val size = player.layoutSize()
                                 val bounds = ExperienceArtboardSize(size.first, size.second)
+                                val boundsChanged = layoutBounds != bounds
                                 layoutBounds = bounds
                                 pointerInput.updateBounds(bounds)
                                 layoutStepPending = false
                                 videoPlayback?.setViewport(currentVideoViewport(layout))
                                 val contentHeight = if (presentationHeight.measuresContent) bounds.height else null
-                                mainHandler.post {
+                                if (boundsChanged) mainHandler.post {
                                     if (!released.get() && generation == frameGeneration.get() && epoch == semanticEpoch.get()) {
                                         listener?.onLayoutBounds(bounds)
                                         if (fitsContentHeight) listener?.onPresentationHeight(

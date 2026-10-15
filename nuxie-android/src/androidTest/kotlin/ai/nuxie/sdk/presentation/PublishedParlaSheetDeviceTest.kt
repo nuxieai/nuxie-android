@@ -95,9 +95,13 @@ class PublishedParlaSheetDeviceTest {
                 instrumentation.waitForIdleSync()
                 instrumentation.runOnMainSync {
                     val sheet = window!!.dialog.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)
-                    val available = ExperienceNativeLayerWindow.windowBounds(activity).height()
-                    assertEquals(if (large) available else available / 2, sheet.height)
+                    val parent = sheet.parent as View
+                    val visibleArea = Rect()
+                    assertTrue(parent.getGlobalVisibleRect(visibleArea))
                     assertTrue(sheet.getGlobalVisibleRect(bounds))
+                    assertEquals("The entire authored surface is reachable above system bars", sheet.height, bounds.height())
+                    assertTrue(visibleArea.contains(bounds))
+                    assertEquals(if (large) parent.height else parent.height / 2, sheet.height)
                 }
                 swipeDown(instrumentation, bounds, activity.resources.displayMetrics.density)
                 if (large) {
@@ -105,7 +109,9 @@ class PublishedParlaSheetDeviceTest {
                     instrumentation.runOnMainSync {
                         assertTrue("closedby none retains the native large sheet", window!!.dialog.isShowing)
                         val sheet = window!!.dialog.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)
-                        assertEquals(ExperienceNativeLayerWindow.windowBounds(activity).height(), sheet.height)
+                        val visible = Rect()
+                        assertTrue(sheet.getGlobalVisibleRect(visible))
+                        assertEquals(sheet.height, visible.height())
                     }
                     assertEquals(0, closes.get())
                 } else {
@@ -116,6 +122,36 @@ class PublishedParlaSheetDeviceTest {
                 instrumentation.runOnMainSync { window?.retire(); activity.finish() }
             }
         }
+    }
+
+    @Test fun fitContentFrameUpdatesDoNotCancelTheNativeDrag() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val activity = instrumentation.startActivitySync(Intent(instrumentation.context,
+            SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val dismissed = CountDownLatch(1)
+        val laidOut = CountDownLatch(1)
+        val bounds = Rect()
+        var window: ExperienceNativeLayerWindow? = null
+        try {
+            instrumentation.runOnMainSync {
+                val content = FrameLayout(activity)
+                content.addOnLayoutChangeListener { _, _, _, r, b, _, _, _, _ -> if (r > 0 && b > 0) laidOut.countDown() }
+                window = ExperienceNativeLayerWindow(activity, content,
+                    PresentationShell.fromTransition(transition(authenticate(instrumentation, false), "save"))) { dismissed.countDown() }
+                // Source arithmetic from published-fit-content: 16 + 120 + 16.
+                window!!.updateContentHeight(152f)
+                window!!.setInputEnabled(true)
+                window!!.show()
+            }
+            assertTrue(laidOut.await(10, TimeUnit.SECONDS))
+            instrumentation.runOnMainSync {
+                assertTrue(window!!.dialog.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet).getGlobalVisibleRect(bounds))
+            }
+            swipeDown(instrumentation, bounds, activity.resources.displayMetrics.density) {
+                instrumentation.runOnMainSync { window!!.updateContentHeight(152f) }
+            }
+            assertTrue("Frame measurements must not settle a dragging sheet back to expanded", dismissed.await(10, TimeUnit.SECONDS))
+        } finally { instrumentation.runOnMainSync { window?.retire(); activity.finish() } }
     }
 
     private fun authenticate(instrumentation: Instrumentation, large: Boolean): AuthenticatedJourneyRelease {
@@ -152,7 +188,7 @@ class PublishedParlaSheetDeviceTest {
         }.jsonObject.getValue("action").jsonObject.getValue("transition").jsonObject
     }
 
-    private fun swipeDown(instrumentation: Instrumentation, bounds: Rect, density: Float) {
+    private fun swipeDown(instrumentation: Instrumentation, bounds: Rect, density: Float, onFrame: () -> Unit = {}) {
         val x = bounds.exactCenterX()
         val startY = bounds.top + minOf(bounds.height() * 0.15f, 64f * density)
         val endY = bounds.bottom - 24f * density
@@ -166,6 +202,7 @@ class PublishedParlaSheetDeviceTest {
         send(MotionEvent.ACTION_DOWN, startY)
         for (step in 1..20) {
             SystemClock.sleep(25)
+            onFrame()
             send(MotionEvent.ACTION_MOVE, startY + (endY - startY) * step / 20f)
         }
         send(MotionEvent.ACTION_UP, endY)

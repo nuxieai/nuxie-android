@@ -94,7 +94,8 @@ class ExperienceNativeLayerWindowTest {
             window.updateContentHeight(272f)
             assertEquals(272, sheet.layoutParams.height)
             window.updateContentHeight(1232f)
-            assertEquals(852, sheet.layoutParams.height)
+            val available = (sheet.parent as android.view.View).height.takeIf { it > 0 } ?: 852
+            assertEquals(available, sheet.layoutParams.height)
             window.retire()
             window.updateContentHeight(152f)
             assertFalse(window.dialog.isShowing)
@@ -109,7 +110,7 @@ class ExperienceNativeLayerWindowTest {
             window.show()
             window.updateContentHeight(null)
             assertTrue(window.dialog.isShowing)
-            assertEquals(852, window.dialog.findViewById<android.view.View>(
+            assertEquals(android.view.ViewGroup.LayoutParams.MATCH_PARENT, window.dialog.findViewById<android.view.View>(
                 com.google.android.material.R.id.design_bottom_sheet).layoutParams.height)
         } finally { window.retire(); activity.finish() }
     }
@@ -129,6 +130,28 @@ class ExperienceNativeLayerWindowTest {
                     com.google.android.material.R.id.design_bottom_sheet).layoutParams.height)
             } finally { recreated.retire() }
         } finally { activity.finish() }
+    }
+
+    @Test fun `frame height updates do not reset an active native drag or settling`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val window = ExperienceNativeLayerWindow(activity, FrameLayout(activity),
+            PresentationShell.Sheet(PresentationShell.Sheet.Detent.FIT_CONTENT, true)) {}
+        try {
+            window.updateContentHeight(152f)
+            window.setInputEnabled(true)
+            window.show()
+            val behavior = (window.dialog as com.google.android.material.bottomsheet.BottomSheetDialog).behavior
+            // Material's public setter refuses transient states. This is the
+            // state its drag callback selects after accepting the pointer.
+            for (state in listOf(com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_DRAGGING,
+                com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_SETTLING)) {
+                org.robolectric.util.ReflectionHelpers.setField(behavior, "state", state)
+                repeat(60) { window.updateContentHeight(152f) }
+                assertEquals(state, behavior.state)
+                window.updateContentHeight(272f)
+                assertEquals("A content reflow must not seize a native gesture either", state, behavior.state)
+            }
+        } finally { window.retire(); activity.finish() }
     }
 
     @Test fun `loading permits leaving a closedby none sheet before content is revealed`() {
