@@ -64,6 +64,9 @@ class PublishedVideoDeviceTest {
             }) },
         ))
         val descriptor = buildJsonObject {
+            put("state", buildJsonObject {})
+            put("responses", buildJsonObject {})
+            put("ruleGroups", buildJsonArray {})
             put("render", JsonObject(inventory + mapOf("renderer" to JsonPrimitive("nux"), "assets" to JsonArray(listOf(asset)))))
             put("leg", instrumentation.context.assets.open("video/$sceneName-journey.json").bufferedReader().use {
                 videoLegWithBoundValues(Json.parseToJsonElement(it.readText()).jsonObject,

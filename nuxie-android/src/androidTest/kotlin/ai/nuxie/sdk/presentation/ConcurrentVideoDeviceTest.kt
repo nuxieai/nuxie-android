@@ -45,6 +45,9 @@ class ConcurrentVideoDeviceTest {
             "width" to JsonPrimitive(1280), "height" to JsonPrimitive(720),
         ))
         val descriptor = buildJsonObject {
+            put("state", buildJsonObject {})
+            put("responses", buildJsonObject {})
+            put("ruleGroups", buildJsonArray {})
             put("render", JsonObject(inventory + mapOf("renderer" to JsonPrimitive("nux"), "assets" to JsonArray(listOf(asset)))))
             put("leg", instrumentation.context.assets.open("video/greeting-journey.json").bufferedReader().use {
                 videoLegWithBoundValues(Json.parseToJsonElement(it.readText()).jsonObject)
