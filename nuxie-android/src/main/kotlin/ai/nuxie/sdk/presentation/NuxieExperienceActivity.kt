@@ -331,7 +331,7 @@ internal class NuxieExperienceActivity : Activity() {
                 checkNotNull(source.prepared.screenId), checkNotNull(target.prepared.screenId),
             )
             val animate = plan.shouldAnimate(source.mounted?.reduceMotion == true)
-            if (plan.kind != ExperienceScreenTransitionPlan.Kind.CUSTOM || !animate) source.mounted?.awaitExit()
+            if (plan.kind != ExperienceScreenTransitionPlan.Kind.CUSTOM || !animate) source.mounted?.awaitExit(ExperienceScreenLifecycle.ExitReason.NAVIGATION)
             check(navigation === this@Navigation && !isFinishing && !isDestroyed)
             if (animate) {
                 val outgoing = checkNotNull(source.view)

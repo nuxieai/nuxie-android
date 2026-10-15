@@ -86,7 +86,7 @@ internal class ExperienceMountedScreen(
         lifecycle.updateFontScale(activity.resources.configuration.fontScale)
         surface.updateRuntimeValues(prepared.commerceValues.get())
         surface.updateRuntimeValues(if (lifecycle.phase == ExperienceScreenLifecycle.Phase.HIDDEN)
-            lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING) else lifecycle.snapshot())
+            lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING, exitReason = ExperienceScreenLifecycle.ExitReason.NONE) else lifecycle.snapshot())
         reducedMotion = ExperienceReducedMotion(activity) { reduced ->
             reduceMotionEnabled = reduced
             surface.updateRuntimeValues(lifecycle.updateReduceMotion(reduced))
@@ -154,11 +154,11 @@ internal class ExperienceMountedScreen(
     fun activate() {
         if (lifecycle.phase == ExperienceScreenLifecycle.Phase.ENTERING ||
             lifecycle.phase == ExperienceScreenLifecycle.Phase.EXITING) {
-            surface.updateRuntimeValues(lifecycle.move(ExperienceScreenLifecycle.Phase.ACTIVE))
+            surface.updateRuntimeValues(lifecycle.move(ExperienceScreenLifecycle.Phase.ACTIVE, exitReason = ExperienceScreenLifecycle.ExitReason.NONE))
         }
     }
 
-    suspend fun awaitExit(reason: ExperienceScreenLifecycle.ExitReason = ExperienceScreenLifecycle.ExitReason.NAVIGATION) {
+    suspend fun awaitExit(reason: ExperienceScreenLifecycle.ExitReason) {
         val render = prepared.descriptor?.get("render") as? JsonObject
         val screens = render?.get("screens") as? JsonArray
         val screen = screens?.filterIsInstance<JsonObject>()?.firstOrNull {
@@ -169,11 +169,11 @@ internal class ExperienceMountedScreen(
 
     suspend fun beginCustomTransition(id: String, outgoing: Boolean) {
         surface.applyTransitionValues(if (outgoing)
-            lifecycle.move(ExperienceScreenLifecycle.Phase.EXITING, id)
+            lifecycle.move(ExperienceScreenLifecycle.Phase.EXITING, id, exitReason = ExperienceScreenLifecycle.ExitReason.NAVIGATION)
         else lifecycle.beginPreparedTransition(id))
     }
 
-    fun exit(reason: ExperienceScreenLifecycle.ExitReason = ExperienceScreenLifecycle.ExitReason.DISMISSED) {
+    fun exit(reason: ExperienceScreenLifecycle.ExitReason) {
         surface.updateRuntimeValues(lifecycle.move(ExperienceScreenLifecycle.Phase.EXITING, exitReason = reason))
     }
 
@@ -191,7 +191,7 @@ internal class ExperienceMountedScreen(
         textOverlay?.close()
         textOverlay = null
         val finalState = if (changingConfigurations) lifecycle.snapshot()
-            else lifecycle.move(ExperienceScreenLifecycle.Phase.HIDDEN)
+            else lifecycle.move(ExperienceScreenLifecycle.Phase.HIDDEN, exitReason = ExperienceScreenLifecycle.ExitReason.NONE)
         val retirement = ExperienceScreenRetirement(completion)
         surface.release(finalState, retirement::mediaReleased)
         if (runValues != null) runValues.releaseScreen(retirement::nativeReleased)
