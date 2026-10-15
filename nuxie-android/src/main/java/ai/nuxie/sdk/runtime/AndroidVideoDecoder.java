@@ -169,6 +169,7 @@ final class AndroidVideoDecoder {
   private volatile String failure;
   private volatile double duration;
   private double lastVideoSampleSeconds = Double.NaN;
+  static final int SEEK_LIMIT_SCAN_SAMPLES = 100_000;
   private Frame latest;
   private MediaPlayer player;
   private ImageReader reader;
@@ -257,6 +258,7 @@ final class AndroidVideoDecoder {
         throw new IllegalStateException("video frames need Android 9");
       int[] size = readTrack(source);
       checkBudget(size[0], size[1]);
+      lastVideoSampleSeconds = seekLimitSeconds(source, SEEK_LIMIT_SCAN_SAMPLES);
       // Four images: one the runtime is importing, the latest, one held
       // across a seek and one being decoded. PRIVATE images take the
       // decoder's own size.
@@ -359,29 +361,85 @@ final class AndroidVideoDecoder {
         colorMatrix = matrix(integer(format, MediaFormat.KEY_COLOR_STANDARD, 0), width, height);
         colorRange = integer(format, MediaFormat.KEY_COLOR_RANGE, 0) ==
                              MediaFormat.COLOR_RANGE_FULL ? 2 : 1;
-        if (format.containsKey(MediaFormat.KEY_DURATION)) {
-          long durationUs = format.getLong(MediaFormat.KEY_DURATION);
-          if (durationUs > 0) {
-            extractor.selectTrack(track);
-            extractor.seekTo(durationUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
-            long lastSampleUs = -1;
-            int samples = 0;
-            while (extractor.getSampleTrackIndex() >= 0) {
-              if (++samples > 100_000)
-                throw new IllegalArgumentException("video sample limit exceeded");
-              lastSampleUs = Math.max(lastSampleUs, extractor.getSampleTime());
-              if (!extractor.advance())
-                break;
-            }
-            if (lastSampleUs >= 0)
-              lastVideoSampleSeconds = lastSampleUs / 1_000_000.0;
-          }
-        }
         return new int[] {Math.max(1, width), Math.max(1, height)};
       }
       throw new IllegalArgumentException("source has no video track");
     } finally {
       extractor.release();
+    }
+  }
+  /**
+   * The final video sample's time when a seek past it may be limited to it,
+   * otherwise NaN. MediaPlayer can finish a paused seek beyond the last video
+   * sample without producing an image. Limiting such a seek keeps it inside
+   * the last image's display time only when no audio runs past the video; a
+   * file with audio after its last image keeps every seek where it was asked.
+   * Reading stops after `sampleLimit` samples per track. Any failure or limit
+   * skips the seek limit and never fails opening the video.
+   */
+  static double seekLimitSeconds(java.io.File source, int sampleLimit) {
+    MediaExtractor extractor = new MediaExtractor();
+    try (java.io.FileInputStream input = new java.io.FileInputStream(source)) {
+      extractor.setDataSource(input.getFD());
+      int video = -1;
+      java.util.List<Integer> audio = new java.util.ArrayList<>();
+      for (int track = 0; track < extractor.getTrackCount(); track++) {
+        String mime = extractor.getTrackFormat(track).getString(MediaFormat.KEY_MIME);
+        if (mime == null)
+          continue;
+        if (mime.startsWith("video/") && video < 0)
+          video = track;
+        else if (mime.startsWith("audio/"))
+          audio.add(track);
+      }
+      if (video < 0)
+        return Double.NaN;
+      long[] videoTail = lastSampleTimes(extractor, video, sampleLimit);
+      if (videoTail == null)
+        return Double.NaN;
+      // The last image is shown until its own frame interval has passed.
+      long imageEndUs = videoTail[0] + Math.max(1, videoTail[1] >= 0 ? videoTail[0] - videoTail[1] : 1);
+      for (int track : audio) {
+        long[] audioTail = lastSampleTimes(extractor, track, sampleLimit);
+        if (audioTail == null || audioTail[0] > imageEndUs)
+          return Double.NaN;
+      }
+      return videoTail[0] / 1_000_000.0;
+    } catch (Exception e) {
+      return Double.NaN;
+    } finally {
+      extractor.release();
+    }
+  }
+  /** The latest and second latest presentation times near the track's end, or null. */
+  private static long[] lastSampleTimes(MediaExtractor extractor, int track, int sampleLimit) {
+    MediaFormat format = extractor.getTrackFormat(track);
+    if (!format.containsKey(MediaFormat.KEY_DURATION))
+      return null;
+    long durationUs = format.getLong(MediaFormat.KEY_DURATION);
+    if (durationUs <= 0)
+      return null;
+    extractor.selectTrack(track);
+    try {
+      extractor.seekTo(durationUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
+      long last = -1, previous = -1;
+      int samples = 0;
+      while (extractor.getSampleTrackIndex() >= 0) {
+        if (++samples > sampleLimit)
+          return null;
+        long time = extractor.getSampleTime();
+        if (time > last) {
+          previous = last;
+          last = time;
+        } else if (time < last && time > previous) {
+          previous = time;
+        }
+        if (!extractor.advance())
+          break;
+      }
+      return last < 0 ? null : new long[] {last, previous};
+    } finally {
+      extractor.unselectTrack(track);
     }
   }
   private static int integer(MediaFormat format, String key, int fallback) {
@@ -567,7 +625,8 @@ final class AndroidVideoDecoder {
     }
     generation = token;
     // MediaPlayer can finish a paused seek to duration without producing an
-    // image. Seek to the final video sample when the requested time is later.
+    // image. Seek to the final video sample when the requested time is later
+    // and no audio runs past the video (see seekLimitSeconds).
     double target = Double.isNaN(lastVideoSampleSeconds)
                         ? seconds : Math.min(seconds, lastVideoSampleSeconds);
     if (android.os.Build.VERSION.SDK_INT >= 26)
