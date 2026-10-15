@@ -158,13 +158,13 @@ internal class ExperienceMountedScreen(
         }
     }
 
-    suspend fun awaitExit() {
+    suspend fun awaitExit(reason: ExperienceScreenLifecycle.ExitReason = ExperienceScreenLifecycle.ExitReason.NAVIGATION) {
         val render = prepared.descriptor?.get("render") as? JsonObject
         val screens = render?.get("screens") as? JsonArray
         val screen = screens?.filterIsInstance<JsonObject>()?.firstOrNull {
             (it["id"] as? JsonPrimitive)?.content == prepared.screenId
         }
-        transitionEvents.perform(screen?.get("exit") as? JsonObject, reduceMotionEnabled) { exit(ExperienceScreenLifecycle.ExitReason.NAVIGATION) }
+        transitionEvents.perform(screen?.get("exit") as? JsonObject, reduceMotionEnabled) { exit(reason) }
     }
 
     suspend fun beginCustomTransition(id: String, outgoing: Boolean) {
