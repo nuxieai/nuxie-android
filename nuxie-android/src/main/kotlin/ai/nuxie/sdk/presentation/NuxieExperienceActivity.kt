@@ -161,7 +161,8 @@ internal class NuxieExperienceActivity : Activity() {
                 if (closeState.reason == CloseReason.JourneyNavigation && navigation?.source === this) {
                     mounted?.exit(reason)
                 } else if (revealed && (closeState.reason == CloseReason.UserDismissed ||
-                        closeState.reason == CloseReason.HostDismissed)) {
+                        closeState.reason == CloseReason.HostDismissed ||
+                        closeState.reason == CloseReason.JourneyDismissed)) {
                     finishingAfterExit = true
                     registryScope.launch {
                         try {

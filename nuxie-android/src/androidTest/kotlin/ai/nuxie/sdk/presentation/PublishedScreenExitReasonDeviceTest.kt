@@ -41,9 +41,16 @@ import org.junit.Test
 /** Real Activity, mounting, native phase writes, completion and teardown. */
 class PublishedScreenExitReasonDeviceTest {
     @Test
-    fun activeCloseKeepsTheScreenMountedUntilItsCompiledDismissalCompletes() {
+    fun activeCloseKeepsTheScreenMountedUntilItsCompiledDismissalCompletes() =
+        verifyCompiledDismissal(CloseReason.UserDismissed, capture = true)
+
+    @Test
+    fun journeyDismissKeepsTheScreenMountedUntilItsCompiledDismissalCompletes() =
+        verifyCompiledDismissal(CloseReason.JourneyDismissed)
+
+    private fun verifyCompiledDismissal(reason: CloseReason, capture: Boolean = false) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val frames = if (InstrumentationRegistry.getArguments().getString("captureScreenMotionFrames") == "true")
+        val frames = if (capture && InstrumentationRegistry.getArguments().getString("captureScreenMotionFrames") == "true")
             ScreenExitFrameCapture(instrumentation) else null
         assertTrue("This positive animation witness requires enabled system animations",
             Settings.Global.getFloat(instrumentation.targetContext.contentResolver,
@@ -122,7 +129,7 @@ class PublishedScreenExitReasonDeviceTest {
             instrumentation.runOnMainSync {
                 assertTrue(PresentationRegistry.currentScreen(id) != null)
                 closeStartedAt.set(SystemClock.elapsedRealtime())
-                PresentationRegistry.dismiss(id, CloseReason.UserDismissed)
+                PresentationRegistry.dismiss(id, reason)
                 assertFalse("Active Close must keep the Activity through the native exit", host.isFinishing)
                 assertEquals(NuxieViewModelScalarValue.StringValue("dismissed"), prepared.screenLifecycle.snapshot()["screen/exitReason"])
             }
@@ -139,9 +146,9 @@ class PublishedScreenExitReasonDeviceTest {
                 dismissed.await(remaining, TimeUnit.MILLISECONDS))
             assertTrue("A 4250 ms watchdog cannot satisfy the native completion oracle",
                 dismissedAt.get() - closeStartedAt.get() < 2000L)
-            assertEquals(CloseReason.UserDismissed, dismissalReason.get())
+            assertEquals(reason, dismissalReason.get())
             assertEquals(1, dismissalCount.get())
-            assertEquals(CloseReason.UserDismissed, outcomeReason.get())
+            assertEquals(reason, outcomeReason.get())
             assertEquals(1, outcomeCount.get())
             assertNull(PresentationRegistry.currentScreen(id))
             assertNull(failure.get())
