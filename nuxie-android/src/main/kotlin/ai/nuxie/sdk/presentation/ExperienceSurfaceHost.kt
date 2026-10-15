@@ -394,16 +394,15 @@ internal class ExperienceSurfaceHost(
     private var screenRuntimeValues = ExperienceScreenRuntimeValues(false)
 
     private data class RuntimeWrite(
-        val values: Map<String, NuxieViewModelScalarValue>,
+        val paths: Set<String>,
         val completion: CompletableDeferred<Boolean>,
     )
     private val pendingRuntimeWrites = ArrayDeque<RuntimeWrite>()
 
-    private fun drainRuntimeWrites() {
-        if (artboard == null || pendingPresentation) return
+    private fun completeRuntimeWrites(acceptedPaths: Set<String>) {
         while (pendingRuntimeWrites.isNotEmpty()) {
             val write = pendingRuntimeWrites.removeFirst()
-            write.completion.complete(applyRuntimeValues(write.values))
+            write.completion.complete(acceptedPaths.containsAll(write.paths))
         }
     }
 
@@ -411,7 +410,7 @@ internal class ExperienceSurfaceHost(
         while (pendingRuntimeWrites.isNotEmpty()) pendingRuntimeWrites.removeFirst().completion.complete(false)
     }
 
-    /** Completes after writing the bound root; false means at least one path was rejected. */
+    /** Reports accepted paths after applying the latest values; queued writes stay coalesced. */
     fun updateRuntimeValues(values: Map<String, NuxieViewModelScalarValue>): kotlinx.coroutines.Deferred<Boolean> {
         val completion = CompletableDeferred<Boolean>()
         if (released.get() || failureReported.get()) return completion.apply { complete(false) }
@@ -422,8 +421,10 @@ internal class ExperienceSurfaceHost(
                 return@enqueue
             }
             runtimeValues.putAll(copied)
-            pendingRuntimeWrites.addLast(RuntimeWrite(copied, completion))
-            if (pendingPresentation) runtimeValuesPending = true else drainRuntimeWrites()
+            if (pendingPresentation || artboard == null) {
+                pendingRuntimeWrites.addLast(RuntimeWrite(copied.keys.toSet(), completion))
+                if (pendingPresentation) runtimeValuesPending = true
+            } else completion.complete(applyRuntimeValues(copied).containsAll(copied.keys))
         }
         if (!accepted) completion.complete(false)
         return completion
@@ -457,10 +458,8 @@ internal class ExperienceSurfaceHost(
         while (transitionWrites.isNotEmpty()) {
             val write = transitionWrites.removeFirst()
             if (!write.completion.isActive) continue
-            // Older screen writes must settle before the transition phase wins.
-            drainRuntimeWrites()
             runtimeValues.putAll(write.values)
-            applyRuntimeValues(runtimeValues)
+            completeRuntimeWrites(applyRuntimeValues(runtimeValues))
             runtimeValuesPending = false
             presentedTransitionWrite = write
             return
@@ -503,9 +502,9 @@ internal class ExperienceSurfaceHost(
         while (transitionWrites.isNotEmpty()) transitionWrites.removeFirst().completion.cancel()
     }
 
-    private fun applyRuntimeValues(values: Map<String, NuxieViewModelScalarValue>): Boolean {
-        val boundArtboard = artboard ?: return false
-        var accepted = true
+    private fun applyRuntimeValues(values: Map<String, NuxieViewModelScalarValue>): Set<String> {
+        val boundArtboard = artboard ?: return emptySet()
+        val accepted = mutableSetOf<String>()
         screenRuntimeValues.apply(values, write = { path, value ->
             val globalPath = when (path) {
                 "env/reduceMotion" -> "reduceMotion"
@@ -525,13 +524,16 @@ internal class ExperienceSurfaceHost(
                 }
                 val shared = runValues
                 if (shared == null) write() else shared.mutateWhenPresented(write, {})
+                accepted += path
                 return@apply
             }
             val projected = viewModelState
             if (projected != null) projected.setValue(path, value)
             else check(boundArtboard.setDefaultViewModelValue(path, value)) { "Experience has no bound view-model" }
+            accepted += path
         }, onRejected = { path, error ->
-            accepted = false
+            // Reserved environment fields are optional in older releases. One
+            // rejected field must not prevent valid siblings or close the screen.
             if (reportedStatePaths.add(path)) Log.w(LOG_TAG, "Experience state path rejected", error, Log.sensitive("path", path))
         })
         return accepted
@@ -755,8 +757,7 @@ internal class ExperienceSurfaceHost(
                 onLoaded?.invoke(false)
                 return@enqueuePreparation
             }
-            applyRuntimeValues(runtimeValues)
-            drainRuntimeWrites()
+            completeRuntimeWrites(applyRuntimeValues(runtimeValues))
             try {
                 player = loadedFile.newExperiencePlayer(loadedArtboard, artboardName)
                 environment?.let { checkNotNull(player).bindGlobalViewModel("env", it) }
@@ -1250,9 +1251,8 @@ internal class ExperienceSurfaceHost(
                     // A submitted frame owns its model revision through completion and semantic capture.
                     // Coalesce newer environment values and apply them before advancing the next frame.
                     if (runtimeValuesPending) {
-                        applyRuntimeValues(runtimeValues)
+                        completeRuntimeWrites(applyRuntimeValues(runtimeValues))
                         runtimeValuesPending = false
-                        drainRuntimeWrites()
                     }
                     // Keep the clock on the lane: a resize queued ahead of this
                     // tick may have retired its pending submission. Polling does
