@@ -324,6 +324,12 @@ internal class NuxieRuntimeArtboard internal constructor(
         return true
     }
 
+    /** Capability of the actual bound root, including retained and projected graphs. */
+    fun supportsDefaultEnumPath(path: String): Boolean = boundRootSchemaIndex?.let { root ->
+        runCatching { boundCatalog?.propertyAtPath(root, path)?.kind == NuxieViewModelPropertyKind.ENUM }
+            .getOrDefault(false)
+    } ?: false
+
     fun fireDefaultTrigger(path: String) {
         owned.require()
         requireNativeSuccess(native.mutateViewModel(checkNotNull(defaultViewModel).require(),
@@ -460,6 +466,10 @@ internal class NuxieRuntimeViewModelState(
     private val children = children.toMutableList()
 
     internal fun requireHandle(): Long = checkNotNull(root) { "Runtime view-model state is closed" }
+
+    fun supportsEnumPath(path: String): Boolean =
+        runCatching { catalog.propertyAtPath(rootSchemaIndex, path).kind == NuxieViewModelPropertyKind.ENUM }
+            .getOrDefault(false)
 
     /** Update the same root that owns projected commerce children, on its runtime lane. */
     fun setValue(path: String, value: NuxieViewModelScalarValue) {

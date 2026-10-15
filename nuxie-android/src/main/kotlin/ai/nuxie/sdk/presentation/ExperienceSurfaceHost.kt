@@ -417,6 +417,7 @@ internal class ExperienceSurfaceHost(
     private val runtimeValues = linkedMapOf<String, NuxieViewModelScalarValue>()
     private var runtimeValuesPending = false
     private val reportedStatePaths = mutableSetOf<String>()
+    private var screenRuntimeValues = ExperienceScreenRuntimeValues(false)
 
     /** UI entry point; values submitted before loading are applied to the bound root before player creation. */
     fun updateRuntimeValues(values: Map<String, NuxieViewModelScalarValue>) {
@@ -503,38 +504,33 @@ internal class ExperienceSurfaceHost(
 
     private fun applyRuntimeValues(values: Map<String, NuxieViewModelScalarValue>) {
         val boundArtboard = artboard ?: return
-        for ((path, value) in values) {
-            try {
-                val globalPath = when (path) {
-                    "env/reduceMotion" -> "reduceMotion"
-                    "safeArea/top", "safeArea/bottom", "safeArea/left", "safeArea/right" -> path
-                    else -> null
-                }
-                if (globalPath != null) {
-                    val write = {
-                        if (!released.get()) {
-                            try { environment?.setValue(globalPath, value) }
-                            catch (error: Exception) {
-                                if (error is kotlinx.coroutines.CancellationException) throw error
-                                if (reportedStatePaths.add(path)) Log.w(LOG_TAG, "Experience state path rejected", error,
-                                    Log.sensitive("path", path))
-                            }
+        screenRuntimeValues.apply(values, write = { path, value ->
+            val globalPath = when (path) {
+                "env/reduceMotion" -> "reduceMotion"
+                "safeArea/top", "safeArea/bottom", "safeArea/left", "safeArea/right" -> path
+                else -> null
+            }
+            if (globalPath != null) {
+                val write = {
+                    if (!released.get()) {
+                        try { environment?.setValue(globalPath, value) }
+                        catch (error: Exception) {
+                            if (error is kotlinx.coroutines.CancellationException) throw error
+                            if (reportedStatePaths.add(path)) Log.w(LOG_TAG, "Experience state path rejected", error,
+                                Log.sensitive("path", path))
                         }
                     }
-                    val shared = runValues
-                    if (shared == null) write() else shared.mutateWhenPresented(write, {})
-                    continue
                 }
-                val projected = viewModelState
-                if (projected != null) projected.setValue(path, value)
-                else boundArtboard.setDefaultViewModelValue(path, value)
-            } catch (error: Exception) {
-                if (error is kotlinx.coroutines.CancellationException) throw error
-                // Reserved environment fields are optional in older releases. One
-                // rejected field must not prevent valid siblings or close the screen.
-                if (reportedStatePaths.add(path)) Log.w(LOG_TAG, "Experience state path rejected", error, Log.sensitive("path", path))
+                val shared = runValues
+                if (shared == null) write() else shared.mutateWhenPresented(write, {})
+                return@apply
             }
-        }
+            val projected = viewModelState
+            if (projected != null) projected.setValue(path, value)
+            else boundArtboard.setDefaultViewModelValue(path, value)
+        }, onRejected = { path, error ->
+            if (reportedStatePaths.add(path)) Log.w(LOG_TAG, "Experience state path rejected", error, Log.sensitive("path", path))
+        })
     }
 
     /**
@@ -731,6 +727,10 @@ internal class ExperienceSurfaceHost(
                         }
                     }
                 }
+                screenRuntimeValues = ExperienceScreenRuntimeValues(
+                    viewModelState?.supportsEnumPath("screen/exitReason")
+                        ?: loadedArtboard.supportsDefaultEnumPath("screen/exitReason"),
+                )
                 val values = shared?.values
                 if (values != null) {
                     sharedValuesLinked = viewModelState?.linkViewModel("experience", values)

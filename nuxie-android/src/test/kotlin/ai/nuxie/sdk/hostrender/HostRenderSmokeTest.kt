@@ -1,5 +1,7 @@
 package ai.nuxie.sdk.hostrender
 
+import ai.nuxie.sdk.experiences.ExperienceViewModelBinding
+import ai.nuxie.sdk.presentation.ExperienceScreenRuntimeValues
 import ai.nuxie.sdk.presentation.ExperienceScreenLifecycle
 import ai.nuxie.sdk.presentation.ExperienceScreenLifecycle.ExitReason
 import ai.nuxie.sdk.presentation.ExperienceScreenLifecycle.Phase
@@ -111,6 +113,8 @@ class HostRenderSmokeTest {
                         val player = file.newExperiencePlayer(artboard, "tap")
                         try {
                             val state = ExperienceScreenLifecycle()
+                            val writes = ExperienceScreenRuntimeValues(artboard.supportsDefaultEnumPath("screen/exitReason"))
+                            val rejected = mutableListOf<String>()
                             val visits = listOf(
                                 Triple(Phase.ENTERING, ExitReason.NONE, 0L),
                                 Triple(Phase.ACTIVE, ExitReason.NONE, 0L),
@@ -121,16 +125,20 @@ class HostRenderSmokeTest {
                                 Triple(Phase.EXITING, ExitReason.DISMISSED, 1L),
                             )
                             for ((phase, reason, expected) in visits) {
+                                val values = state.move(phase, exitReason = reason).filterKeys { it.startsWith("screen/") }
+                                // Keep the native absence proof separate from the SDK compatibility path.
                                 var missingReasonRejected = false
-                                for ((path, value) in state.move(phase, exitReason = reason).filterKeys { it.startsWith("screen/") }) {
-                                    try {
-                                        assertTrue("The signed native default must receive $path", artboard.setDefaultViewModelValue(path, value))
-                                    } catch (error: Exception) {
-                                        if (hasReason || path != "screen/exitReason") throw error
-                                        missingReasonRejected = true
-                                    }
+                                try {
+                                    artboard.setDefaultViewModelValue("screen/exitReason", values.getValue("screen/exitReason"))
+                                } catch (error: Exception) {
+                                    if (hasReason) throw error
+                                    missingReasonRejected = true
                                 }
                                 assertEquals(!hasReason, missingReasonRejected)
+                                writes.apply(values, write = { path, value ->
+                                    assertTrue("The signed native default must receive $path", artboard.setDefaultViewModelValue(path, value))
+                                }, onRejected = { path, _ -> rejected += path })
+                                assertTrue("SDK lifecycle writes must not log a rejected path: $rejected", rejected.isEmpty())
                                 player.stepTyped(elapsedSeconds = 0.0)
                                 val snapshot = checkNotNull(artboard.defaultViewModelSnapshot())
                                 assertEquals(if (hasReason) expected else null, snapshot.resolveEnumOrdinal("screen/exitReason"))
@@ -445,8 +453,7 @@ class HostRenderSmokeTest {
     private fun motionModelName(variant: String): String {
         val descriptor = Json.parseToJsonElement(File(System.getProperty("nuxie.repo.root"),
             "fixtures/runtime/screen-exit-reason/$variant/mounted-screen.json").readText()).jsonObject
-        return descriptor.getValue("render").jsonObject.getValue("screens").jsonArray
-            .single().jsonObject.getValue("defaultViewModelName").jsonPrimitive.content
+        return checkNotNull(ExperienceViewModelBinding.defaultSchemaName(descriptor, "tap"))
     }
 
     private fun assumeHostRuntime() {
