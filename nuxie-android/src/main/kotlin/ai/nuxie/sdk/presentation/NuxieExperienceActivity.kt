@@ -111,6 +111,7 @@ internal class NuxieExperienceActivity : Activity() {
         val ready = CompletableDeferred<Unit>()
         val closed = CompletableDeferred<Unit>()
         private var closing = false
+        private var finishingAfterExit = false
         private var revealed = false
         private val effectsLock = Any()
         private val pendingEffects = mutableListOf<() -> Unit>()
@@ -154,9 +155,25 @@ internal class NuxieExperienceActivity : Activity() {
         override fun screenCloseReason(): CloseReason? = closeState.reason
         override fun finishAfterServiceClose() {
             runOnUiThread {
-                mounted?.exit(if (closeState.reason == CloseReason.JourneyNavigation)
-                    ExperienceScreenLifecycle.ExitReason.NAVIGATION else ExperienceScreenLifecycle.ExitReason.DISMISSED)
-                if (closeState.reason != CloseReason.JourneyNavigation || navigation?.source !== this) finish()
+                if (finishingAfterExit || closing || isDestroyed) return@runOnUiThread
+                val reason = if (closeState.reason == CloseReason.JourneyNavigation)
+                    ExperienceScreenLifecycle.ExitReason.NAVIGATION else ExperienceScreenLifecycle.ExitReason.DISMISSED
+                if (closeState.reason == CloseReason.JourneyNavigation && navigation?.source === this) {
+                    mounted?.exit(reason)
+                } else if (revealed && (closeState.reason == CloseReason.UserDismissed ||
+                        closeState.reason == CloseReason.HostDismissed)) {
+                    finishingAfterExit = true
+                    registryScope.launch {
+                        try {
+                            mounted?.awaitExit(reason)
+                        } finally {
+                            if (!closing && !isDestroyed) finish()
+                        }
+                    }
+                } else {
+                    mounted?.exit(reason)
+                    finish()
+                }
             }
         }
         override suspend fun retireForRetry() = withContext(Dispatchers.Main.immediate) {
