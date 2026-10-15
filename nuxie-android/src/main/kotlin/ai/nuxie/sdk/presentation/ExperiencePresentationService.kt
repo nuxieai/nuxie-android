@@ -53,6 +53,8 @@ internal sealed interface CloseReason {
     data object HostDismissed : CloseReason
     /** Physical replacement while the same Journey retains surface ownership. */
     data object JourneyNavigation : CloseReason
+    /** The Journey has ended; close its screen without delivering another Journey outcome. */
+    data object JourneyDismissed : CloseReason
     data object IdentityChanged : CloseReason
     data class Error(val cause: Throwable) : CloseReason
 }
@@ -1572,8 +1574,8 @@ internal class ExperiencePresentationService(
             attempt?.finished?.await()
             return
         }
-        PresentationRegistry.dismiss(active.id, CloseReason.JourneyNavigation)
-        attemptOutcome(active, CloseReason.JourneyNavigation)
+        PresentationRegistry.dismiss(active.id, CloseReason.JourneyDismissed)
+        attemptOutcome(active, CloseReason.JourneyDismissed)
         // The caller may be the Journey worker completing a terminal action.
         // An earlier identity/host outcome can be queued to that same worker;
         // joining it here would prevent the worker from ever processing it.
@@ -1707,7 +1709,7 @@ internal class ExperiencePresentationService(
             if (!active.outcomeReason.compareAndSet(null, reason)) return
             active.shown.get()
         }
-        if (reason == CloseReason.JourneyNavigation) {
+        if (reason == CloseReason.JourneyNavigation || reason == CloseReason.JourneyDismissed) {
             scope.launch(start = CoroutineStart.UNDISPATCHED) {
                 active.journey.emissions.close()
             }
@@ -1793,14 +1795,14 @@ internal class ExperiencePresentationService(
         when (reason) {
             CloseReason.UserDismissed -> properties["reason"] = "user"
             CloseReason.HostDismissed -> properties["reason"] = "host"
-            CloseReason.JourneyNavigation -> return
+            CloseReason.JourneyNavigation, CloseReason.JourneyDismissed -> return
             CloseReason.IdentityChanged -> return
             is CloseReason.Error -> Unit
         }
         val name = when (reason) {
             CloseReason.UserDismissed, CloseReason.HostDismissed ->
                 SystemEventNames.EXPERIENCE_DISMISSED
-            CloseReason.JourneyNavigation ->
+            CloseReason.JourneyNavigation, CloseReason.JourneyDismissed ->
                 error("same-Journey navigation has no close fact")
             CloseReason.IdentityChanged -> error("identity-change shutdown has no close fact")
             is CloseReason.Error -> {
@@ -1834,6 +1836,7 @@ private fun CloseReason.screenDismissalMethod(): String? = when (this) {
     is CloseReason.Error -> "error"
     CloseReason.HostDismissed,
     CloseReason.JourneyNavigation,
+    CloseReason.JourneyDismissed,
     CloseReason.IdentityChanged,
     -> null
 }

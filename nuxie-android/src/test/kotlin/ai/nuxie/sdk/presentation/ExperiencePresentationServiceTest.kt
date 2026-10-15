@@ -2169,6 +2169,37 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun `Journey dismissal closes with its terminal reason without another outcome`() = runTest {
+        val release = renderedJourneyRelease()
+        val launched = mutableListOf<String>()
+        val outcomes = mutableListOf<JourneySurfaceOutcome>()
+        val emitted = mutableListOf<String>()
+        val lease = Lease()
+        val service = service(this, launch = launched::add, emit = { name, _, _ -> emitted += name })
+        val presentation = async {
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { acquired(release.identity, lease) },
+                onOutcome = outcomes::add)
+        }
+        runCurrent()
+        val id = launched.single()
+        val host = AttachedHost()
+        assertTrue(PresentationRegistry.attach(id, host))
+        PresentationRegistry.reportFirstFrame(id)
+        presentation.await()
+        val shutdown = async { service.shutdownJourney("customer-1", "journey-1") }
+        runCurrent()
+        assertEquals(CloseReason.JourneyDismissed, host.requestedReason)
+        assertFalse(shutdown.isCompleted)
+        assertFalse(lease.closed.get())
+        PresentationRegistry.detach(id, host)
+        shutdown.await()
+        assertTrue(lease.closed.get())
+        assertTrue(outcomes.isEmpty())
+        assertFalse(SystemEventNames.EXPERIENCE_DISMISSED in emitted)
+    }
+
+    @Test
     fun `terminal shutdown drains native ownership without joining an outer outcome callback`() = runTest {
         val vector = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/terminal-shutdown-android.json").readText()).jsonObject
