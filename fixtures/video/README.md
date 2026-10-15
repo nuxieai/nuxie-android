@@ -127,8 +127,8 @@ channel, so the oracle is the decoded image's own frame time rather than the
 player position, plus a copy whose audio runs past the last image. Both are
 described in `nuxie-android/src/androidTest/assets/video-endpoint-fixtures.md`.
 Android limits a seek past the final video sample to that sample only when no
-audio runs past the last image by more than three audio frames (at least 50 ms,
-at most 200 ms), which keeps AAC encoder delay from deciding it.
+audio runs past the last image by more than four audio frames (at least 50 ms,
+at most 200 ms), which keeps AAC encoder delay and padding from deciding it.
 
 A separate long audio-tail case where AVFoundation provides no image at all
 remains tracked in [UNIV-3339](https://universe.basis.dev/issue/UNIV-3339).

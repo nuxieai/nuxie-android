@@ -377,11 +377,12 @@ final class AndroidVideoDecoder {
    * Reading stops after `sampleLimit` samples per track. Any failure or limit
    * skips the seek limit and never fails opening the video.
    *
-   * AAC encoders delay audio by 1,024 to 2,112 samples. A platform that does not
-   * apply the file's edit list reports that delay as audio ending up to about
-   * two audio frames late (48 ms at 44.1 kHz). Audio counts as running past the
-   * video only when it ends more than three of its own frames after the last
-   * image, at least 50 ms and at most 200 ms, so that delay never decides it.
+   * AAC encoders delay audio by 1,024 to 2,112 samples and pad its end by up to
+   * 1,023 more. A platform that does not apply the file's edit list reports both
+   * as audio ending up to 3,135 samples late, just over three audio frames (71 ms
+   * at 44.1 kHz). Audio counts as running past the video only when it ends more
+   * than four of its own frames after the last image, at least 50 ms and at most
+   * 200 ms, so that delay and padding never decide it.
    */
   static double seekLimitSeconds(java.io.File source, int sampleLimit) {
     MediaExtractor extractor = new MediaExtractor();
@@ -413,7 +414,7 @@ final class AndroidVideoDecoder {
         if (audioTail == null)
           return Double.NaN;
         long audioFrameUs = Math.max(0, sampleLength(audioTail));
-        long toleranceUs = Math.min(200_000, Math.max(50_000, 3 * audioFrameUs));
+        long toleranceUs = Math.min(200_000, Math.max(50_000, 4 * audioFrameUs));
         if (audioTail[0] + audioFrameUs > imageEndUs + toleranceUs)
           return Double.NaN;
       }
