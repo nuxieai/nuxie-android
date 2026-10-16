@@ -828,6 +828,8 @@ internal class NuxieExperienceActivity : Activity() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        // Sheet chrome follows a light or dark switch while its window stays open.
+        (layers.mapNotNull { it.sheet } + listOfNotNull(baseWindow)).distinct().forEach { it.refreshChrome() }
         // Keep incoming and outgoing screens synchronized during navigation.
         screens.forEach { screen ->
             if (!screen.rendererEffects.isRetired) screen.mounted?.refreshFontScale(newConfig.fontScale)
