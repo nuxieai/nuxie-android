@@ -42,7 +42,10 @@ internal class ExperienceNativeLayerWindow(
      * sheet shape (rounded top corners) and its drag handle. The window keeps the dialog theme
      * whose geometry the sheet sizes are measured against; only these pieces use Material 3.
      */
-    private val sheetLook = (shell as? PresentationShell.Sheet)?.let {
+    private val sheetLook = sheetLook()
+
+    /** Resolved against the Activity's current configuration, so light or dark follows the system. */
+    private fun sheetLook(): Context? = (shell as? PresentationShell.Sheet)?.let {
         ContextThemeWrapper(activity, com.google.android.material.R.style.Theme_Material3_DayNight_BottomSheetDialog)
     }
     private val sheetShape: ShapeAppearanceModel? = sheetLook?.let {
@@ -50,10 +53,7 @@ internal class ExperienceNativeLayerWindow(
             com.google.android.material.R.style.ShapeAppearanceOverlay_Material3_Corner_Top).build()
     }
     private val sheetBackground: MaterialShapeDrawable? = sheetShape?.let { shape ->
-        MaterialShapeDrawable(shape).apply {
-            fillColor = ColorStateList.valueOf(MaterialColors.getColor(checkNotNull(sheetLook),
-                com.google.android.material.R.attr.colorSurfaceContainerLow, Color.TRANSPARENT))
-        }
+        MaterialShapeDrawable(shape).apply { fillColor = sheetColor(checkNotNull(sheetLook)) }
     }
 
     /**
@@ -80,6 +80,16 @@ internal class ExperienceNativeLayerWindow(
         }
         dialog.setOnDismissListener { if (!retired) onClosed() }
         activity.window.decorView.addOnLayoutChangeListener(layoutListener)
+    }
+
+    /**
+     * The Activity handles uiMode changes itself, so nothing rebuilds an open sheet when the system
+     * switches between light and dark: re-resolve the sheet and handle colours here.
+     */
+    fun refreshChrome() {
+        val look = sheetLook() ?: return
+        sheetBackground?.fillColor = sheetColor(look)
+        dragHandle?.imageTintList = handleTint(look)
     }
 
     /** The screen fills the sheet and is clipped to its rounded top; the handle overlays it. */
@@ -153,20 +163,26 @@ internal class ExperienceNativeLayerWindow(
     }
 
     companion object {
+        private fun <T> styled(look: Context, attr: Int, read: (TypedArray) -> T): T {
+            val values = look.obtainStyledAttributes(
+                com.google.android.material.R.style.Widget_Material3_BottomSheet_DragHandle, intArrayOf(attr))
+            try { return read(values) } finally { values.recycle() }
+        }
+
+        private fun sheetColor(look: Context) = ColorStateList.valueOf(MaterialColors.getColor(look,
+            com.google.android.material.R.attr.colorSurfaceContainerLow, Color.TRANSPARENT))
+
+        private fun handleTint(look: Context): ColorStateList? = styled(look, androidx.appcompat.R.attr.tint) { it.getColorStateList(0) }
+
         /** Material 3's drag handle look (drawable, tint and spacing) on a plain, inert view. */
         private fun materialDragHandle(look: Context): ImageView {
-            val style = com.google.android.material.R.style.Widget_Material3_BottomSheet_DragHandle
-            fun <T> styled(attr: Int, read: (TypedArray) -> T): T {
-                val values = look.obtainStyledAttributes(style, intArrayOf(attr))
-                try { return read(values) } finally { values.recycle() }
-            }
             return ImageView(look).apply {
-                setImageDrawable(styled(androidx.appcompat.R.attr.srcCompat) { it.getDrawable(0) })
-                imageTintList = styled(androidx.appcompat.R.attr.tint) { it.getColorStateList(0) }
+                setImageDrawable(styled(look, androidx.appcompat.R.attr.srcCompat) { it.getDrawable(0) })
+                imageTintList = handleTint(look)
                 scaleType = ImageView.ScaleType.CENTER
-                minimumWidth = styled(android.R.attr.minWidth) { it.getDimensionPixelSize(0, 0) }
-                minimumHeight = styled(android.R.attr.minHeight) { it.getDimensionPixelSize(0, 0) }
-                setPadding(0, 0, 0, styled(android.R.attr.paddingBottom) { it.getDimensionPixelSize(0, 0) })
+                minimumWidth = styled(look, android.R.attr.minWidth) { it.getDimensionPixelSize(0, 0) }
+                minimumHeight = styled(look, android.R.attr.minHeight) { it.getDimensionPixelSize(0, 0) }
+                setPadding(0, 0, 0, styled(look, android.R.attr.paddingBottom) { it.getDimensionPixelSize(0, 0) })
                 isClickable = false
                 isFocusable = false
                 importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
