@@ -2357,6 +2357,7 @@ class ExperiencePresentationServiceTest {
             val nativeLayers = mutableListOf<String>()
             val leases = mutableListOf<Lease>()
             val edges = mutableListOf<String>()
+            val nestedReports = mutableListOf<String>()
             val batches = mutableListOf<JourneyScreenEmissionBatch>()
             val sharedValues = ExperienceRunValues()
             var heldNavigation: CompletableDeferred<Unit>? = null
@@ -2418,8 +2419,15 @@ class ExperiencePresentationServiceTest {
                     onScreenDismissed = { hidden, shown, method ->
                         edges += "hidden:$hidden:$shown:$method"
                         JourneyScreenDismissalResult.HANDLED
-                    }, onScreenChanged = { edges += "active:$it"; true },
-                    onPresentationRevealed = { edges += "reveal:$it" },
+                    }, onScreenChanged = {
+                        edges += "active:$it"
+                        if (kotlin.coroutines.coroutineContext[CloseCaller] != null) nestedReports += "active:$it"
+                        true
+                    },
+                    onPresentationRevealed = {
+                        edges += "reveal:$it"
+                        if (kotlin.coroutines.coroutineContext[CloseCaller] != null) nestedReports += "reveal:$it"
+                    },
                     onEmissionBatch = { batch, _ -> batches += batch; JourneyEmissionBatchResult.ACCEPTED },
                     onOutcome = {}, transition = transition, runValues = sharedValues) }
                 runCurrent()
@@ -2449,14 +2457,17 @@ class ExperiencePresentationServiceTest {
                         val content = checkNotNull(PresentationRegistry.resolve(outgoingId))
                         val lower = checkNotNull(PresentationRegistry.resolve(lowerId))
                         edges.clear()
-                        assertTrue(checkNotNull(content.closeLayer).invoke(object : PreparedLayerReveal {
+                        // The close runs in its caller's coroutine (the Activity's, or the Journey
+                        // worker's for an authored close); the reveal reports must not.
+                        assertTrue(withContext(CloseCaller()) { checkNotNull(content.closeLayer).invoke(object : PreparedLayerReveal {
                             override suspend fun prepare() {
                                 PresentationRegistry.detach(outgoingId, hosts.getValue(outgoingId))
                                 nativeLayers.removeAt(nativeLayers.lastIndex)
                                 edges += "retain:${lower.screenId}"
                             }
                             override fun activate() { edges += "publish:${lower.screenId}" }
-                        }))
+                        }) })
+                        assertTrue("Reveal reports run in the service scope: $nestedReports", nestedReports.isEmpty())
                         draftsByLayer.removeAt(draftsByLayer.lastIndex)
                         assertEquals(listOf("hidden:${content.screenId}:${lower.screenId}:native_sheet",
                             "retain:${lower.screenId}", "active:${lower.screenId}", "reveal:${lower.screenId}",
@@ -2708,4 +2719,9 @@ class ExperiencePresentationServiceTest {
         return JourneyPresentationFences(identity, identity.captureScope(), execution, execution.token())
     }
 
+}
+
+/** Marks the coroutine that asks for a layer close, so reports run inside it can be seen. */
+private class CloseCaller : kotlin.coroutines.AbstractCoroutineContextElement(Key) {
+    companion object Key : kotlin.coroutines.CoroutineContext.Key<CloseCaller>
 }

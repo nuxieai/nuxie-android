@@ -1363,9 +1363,13 @@ internal class ExperiencePresentationService(
             fun ownsIncoming() = synchronized(stateLock) {
                 current === incoming && incoming.outcomeReason.get() == null && incoming.journey.fences.isCurrent()
             }
-            if (!ownsIncoming() || !incoming.journey.onScreenChanged(incoming.journey.screenId)) return false
+            // Like the dismissal above, the reveal reports run in the service's own scope: their
+            // journal writes stay off the main thread, and an authored close (which runs in the
+            // Journey worker's coroutine) does not handle a $screen_shown route nested inside its
+            // own waiting dismiss.
+            if (!ownsIncoming() || !scope.async { incoming.journey.onScreenChanged(incoming.journey.screenId) }.await()) return false
             if (!ownsIncoming()) return false
-            incoming.journey.onPresentationRevealed(incoming.journey.screenId)
+            scope.async { incoming.journey.onPresentationRevealed(incoming.journey.screenId) }.await()
             if (!ownsIncoming()) return false
             reveal.activate()
             true
