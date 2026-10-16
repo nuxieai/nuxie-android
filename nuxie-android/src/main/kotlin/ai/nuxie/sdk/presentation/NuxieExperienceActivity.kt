@@ -196,6 +196,9 @@ internal class NuxieExperienceActivity : Activity() {
             closed.await()
         }
         override suspend fun dismissLayerFromJourney(): Boolean = withContext(Dispatchers.Main.immediate) {
+            // A native close of this same layer is already running. It reports the dismissal
+            // itself, and that report may be queued behind the Journey work waiting here.
+            if (closingLayer?.screen === this@Screen) return@withContext true
             val layer = layers.lastOrNull()?.takeIf { it.screen === this@Screen } ?: return@withContext false
             closeLayer(layer, authored = true)
         }

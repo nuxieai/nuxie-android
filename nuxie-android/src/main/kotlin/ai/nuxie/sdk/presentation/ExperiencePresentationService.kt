@@ -1511,8 +1511,11 @@ internal class ExperiencePresentationService(
             // can emit a user-close lifecycle callback.
             JourneyActionType.DISMISS -> {
                 if (action.string("scope") != "all" && hasPresentedJourneyLayer(owner)) {
-                    if (PresentationRegistry.currentScreen(active.id)?.dismissLayerFromJourney() == true)
-                        JourneyPresentationActionResult.Handled else JourneyPresentationActionResult.Failed
+                    val closed = PresentationRegistry.currentScreen(active.id)?.dismissLayerFromJourney() == true
+                    // Losing the race to another close of the same layer (a swipe, say) is not a
+                    // Journey failure: the layer is closed or closing either way.
+                    if (closed || synchronized(stateLock) { current !== active }) JourneyPresentationActionResult.Handled
+                    else JourneyPresentationActionResult.Failed
                 } else JourneyPresentationActionResult.Completed(
                     action.string("reason")?.takeIf(String::isNotEmpty) ?: "completed",
                 )
