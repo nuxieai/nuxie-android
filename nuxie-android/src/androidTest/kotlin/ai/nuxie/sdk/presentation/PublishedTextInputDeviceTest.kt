@@ -112,10 +112,16 @@ class PublishedTextInputDeviceTest {
         withTwoPublishedFields(true)
     }
 
-    /** Runs unchanged against main for the before images; no production fallback switch. */
+    /** Native ink must differ from a debug-only primary-font missing-glyph control. */
     @Test
     @SdkSuppress(minSdkVersion = 31)
-    fun publishedFieldsRetainFallbackScriptsAndDrawInk() {
+    fun publishedFieldsRetainFallbackScriptsAndDrawInk() = qualifyFallbackFields(false)
+
+    @Test
+    @SdkSuppress(minSdkVersion = 31)
+    fun publishedFieldColorEmojiAwaitsRuntimeRepin() = qualifyFallbackFields(true)
+
+    private fun qualifyFallbackFields(emojiOnly: Boolean) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val fixture = loadPublishedFixture(instrumentation, "runtime/published-two-fields")
         val descriptor = fixture.release.descriptor
@@ -170,8 +176,9 @@ class PublishedTextInputDeviceTest {
                 first = overlay.semanticViews().values.map { it as EditText }.single { it.text.toString() == "Ada" }
                 second = overlay.semanticViews().values.map { it as EditText }.single { it.text.toString() == "Hopper" }
             }
-            for ((name, value) in listOf("japanese" to "日本語", "arabic" to "مرحبا", "hebrew" to "שלום",
-                "hindi" to "नमस्ते", "symbols" to "▷ ✶ ●", "emoji" to "😀")) {
+            val values = if (emojiOnly) listOf("emoji" to "😀") else listOf("japanese" to "日本語", "arabic" to "مرحبا",
+                "hebrew" to "שלום", "hindi" to "नमस्ते", "symbols" to "▷ ✶ ●")
+            for ((name, value) in values) {
                 instrumentation.runOnMainSync { assertTrue(first.requestFocus()) }
                 waitFor("First field must focus the runtime") { surface.riveFocusState.expectsKeyboardInput }
                 instrumentation.runOnMainSync {
@@ -183,6 +190,26 @@ class PublishedTextInputDeviceTest {
                 SystemClock.sleep(300)
                 lateinit var empty: Bitmap
                 instrumentation.runOnMainSync { empty = checkNotNull(surface.bitmap) }
+                ai.nuxie.sdk.runtime.SystemFontFallback.suppressForTesting(true)
+                instrumentation.runOnMainSync {
+                    assertTrue(first.requestFocus())
+                    assertTrue(checkNotNull(first.onCreateInputConnection(EditorInfo())).commitText(value, 1))
+                    assertTrue(second.requestFocus())
+                }
+                waitFor("Missing-glyph control must reach runtime") { captured.get().any { it.text == value } }
+                SystemClock.sleep(300)
+                lateinit var missing: Bitmap
+                instrumentation.runOnMainSync { missing = checkNotNull(surface.bitmap) }
+                saveFallbackScreenshot(instrumentation, "$prefix-$name-missing-control.png")
+                instrumentation.runOnMainSync {
+                    assertTrue(first.requestFocus())
+                    first.selectAll()
+                    checkNotNull(first.onCreateInputConnection(EditorInfo())).commitText("", 1)
+                    assertTrue(second.requestFocus())
+                }
+                waitFor("Control must reset before fallback rendering") { captured.get().any { it.text.isEmpty() } }
+                SystemClock.sleep(300)
+                ai.nuxie.sdk.runtime.SystemFontFallback.suppressForTesting(false)
                 selections.clear()
                 instrumentation.runOnMainSync {
                     assertTrue(first.requestFocus())
@@ -196,6 +223,7 @@ class PublishedTextInputDeviceTest {
                 instrumentation.runOnMainSync { assertEquals(value, first.text.toString()) }
                 SystemClock.sleep(300)
                 saveFallbackScreenshot(instrumentation, "$prefix-$name-committed.png")
+                var emojiInk = 0
                 try {
                     instrumentation.runOnMainSync {
                         assertFalse(first.hasFocus())
@@ -212,16 +240,25 @@ class PublishedTextInputDeviceTest {
                                 drawn.getPixel(x, y) != empty.getPixel(x, y)
                             } }
                             android.util.Log.i("FontFallbackProof", "field $name changed=$changed baseline=$baseline selections=$selections")
-                            if (!baseline && name != "emoji") assertTrue("Committed $name must draw native ink", changed > 10)
-                            if (!baseline && name == "emoji") assertEquals("Pinned runtime leaves typed color emoji blank", 0, changed)
+                            if (!baseline && name != "emoji") {
+                                assertTrue("Committed $name must draw native ink", changed > 10)
+                                val different = (top until bottom).sumOf { y -> (left until right).count { x ->
+                                    drawn.getPixel(x, y) != missing.getPixel(x, y)
+                                } }
+                                assertTrue("Committed $name must differ from primary-font missing glyphs", different > 10)
+                            }
+                            if (name == "emoji") emojiInk = changed
                         } finally { drawn.recycle() }
                     }
                     if (!baseline && name in listOf("japanese", "arabic", "hebrew", "hindi", "emoji")) {
                         assertTrue("Actual C hook must select a system face for $name", selections.containsKey(value.codePointAt(0)))
                     }
-                } finally { empty.recycle() }
+                } finally { empty.recycle(); missing.recycle() }
+                if (!baseline && name == "emoji") org.junit.Assume.assumeTrue(
+                    "UNIV-4921: typed color emoji requires the pending runtime release and Android repin", emojiInk > 10)
             }
         } finally {
+            ai.nuxie.sdk.runtime.SystemFontFallback.suppressForTesting(false)
             ai.nuxie.sdk.runtime.SystemFontFallback.selectionObserver = null
             instrumentation.runOnMainSync { overlay.close(); surface.release(); activity.finish() }
             runBlocking { run.retire() }

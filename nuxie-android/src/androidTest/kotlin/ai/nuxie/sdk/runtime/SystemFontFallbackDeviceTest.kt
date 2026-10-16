@@ -86,7 +86,7 @@ class SystemFontFallbackDeviceTest {
                 assertEquals("Warm requests reuse borrowed font handles", handle,
                     SystemFontFallback.requestFromNativeThreadForTesting(character, 1, 400))
             }
-            assertEquals(0L, SystemFontFallback.requestFromNativeThreadForTesting(0x65e5, 2, 400))
+            assertTrue(SystemFontFallback.requestFromNativeThreadForTesting(0x65e5, 7, 400) != 0L)
             assertEquals(0L, SystemFontFallback.requestFromNativeThreadForTesting(0x10ffff, 0, 400))
             val emoji = checkNotNull(selections[0x1f600])
             val format = fontTables(emoji)
@@ -97,6 +97,23 @@ class SystemFontFallbackDeviceTest {
             File(instrumentation.targetContext.cacheDir, "fallback-api${Build.VERSION.SDK_INT}-selections.txt").writeText(report)
             android.util.Log.i("FontFallbackProof", report)
         } finally { SystemFontFallback.selectionObserver = null }
+    }
+
+    @Test
+    fun laterFallbacksPreserveOriginalWeightAndAttachOnlyOncePerNativeThread() {
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val callers = java.util.concurrent.Executors.newFixedThreadPool(4)
+        try {
+            val requests = (0 until 12).map { callers.submit<LongArray> { SystemFontFallback.sequenceFromNativeThreadForTesting() } }
+            for (request in requests) {
+                val result = request.get(30, java.util.concurrent.TimeUnit.SECONDS)
+                assertEquals(7, result.size)
+                for (i in 0..2) { assertTrue(result[i * 2] != 0L); assertEquals(700L, result[i * 2 + 1]) }
+                assertEquals("One attachment for three callbacks on the same pthread", 1L, result[6])
+                assertEquals(SystemFontFallback.request(0x928, 0, 700), result[2])
+                assertEquals(result[2], result[4])
+            }
+        } finally { callers.shutdownNow() }
     }
 
     @Test
@@ -170,12 +187,17 @@ class SystemFontFallbackDeviceTest {
                         val empty = render("")
                         for ((name, text) in listOf("japanese" to "日本語", "arabic" to "مرحبا", "hebrew" to "שלום",
                             "hindi" to "नमस्ते", "symbols" to "▷ ✶ ●", "emoji" to "😀")) {
+                            render("")
+                            SystemFontFallback.suppressForTesting(true)
+                            val missing = try { render(text) } finally { SystemFontFallback.suppressForTesting(false) }
+                            render("")
                             selections.clear()
                             val drawn = render(text)
                             val changed = (drawn.indices step 4).count { at -> (0..2).any { drawn[at + it] != empty[at + it] } }
                             android.util.Log.i("FontFallbackProof", "ordinary bound $name changed=$changed baseline=$baseline")
                             if (!baseline) {
                                 assertTrue("Ordinary $name adds native ink", changed > 10)
+                                assertFalse("Ordinary $name must differ from primary-font missing glyphs", drawn.contentEquals(missing))
                                 assertTrue("Actual C hook must choose a face for ordinary $name",
                                     selections.containsKey(text.codePointAt(0)))
                             }
@@ -191,6 +213,7 @@ class SystemFontFallbackDeviceTest {
                 } finally { artboard.close() }
             } finally { file.close() }
         } finally {
+            SystemFontFallback.suppressForTesting(false)
             SystemFontFallback.selectionObserver = null
             renderer.close()
         }
@@ -207,6 +230,22 @@ class SystemFontFallbackDeviceTest {
         val bytes = asset("ordinary-roboto.nux")
         val catalog = checkNotNull(runtime.inspectFileAssets(bytes))
         val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(390, 844))
+        val missing: ByteArray
+        SystemFontFallback.suppressForTesting(true)
+        try {
+            val file = checkNotNull(runtime.importFile(renderer, bytes, catalog,
+                mapOf(catalog.single { it.kind == FileAssetKind.FONT }.ordinal to asset("ordinary-latin.ttf"))))
+            try {
+                val artboard = checkNotNull(file.newArtboard("One"))
+                try {
+                    val player = checkNotNull(artboard.newPlayer())
+                    try {
+                        player.step(0.0)
+                        missing = renderer.renderToCpuFrame(player, 0xff000000.toInt(), 1f).rgba
+                    } finally { player.close() }
+                } finally { artboard.close() }
+            } finally { file.close() }
+        } finally { SystemFontFallback.suppressForTesting(false) }
         try {
             val file = checkNotNull(runtime.importFile(renderer, bytes, catalog,
                 mapOf(catalog.single { it.kind == FileAssetKind.FONT }.ordinal to asset("ordinary-latin.ttf"))))
@@ -233,7 +272,14 @@ class SystemFontFallbackDeviceTest {
                         for ((name, top) in listOf("japanese" to 32, "arabic" to 140, "hebrew" to 248,
                             "hindi" to 356, "emoji" to 464, "latin" to 680)) {
                             android.util.Log.i("FontFallbackProof", "$name ink=${ink(top)} baseline=$baseline")
-                            if (!baseline) assertTrue("$name must draw native ink", ink(top) > 100)
+                            if (!baseline) {
+                                assertTrue("$name must draw native ink", ink(top) > 100)
+                                if (name != "latin") assertTrue("$name must differ from primary-font missing glyphs",
+                                    (top until top + 104).any { y -> (0 until 390 * 4).any { x ->
+                                        val at = y * 390 * 4 + x
+                                        frame.rgba[at] != missing[at]
+                                    } })
+                            }
                         }
                         if (!baseline) {
                             val color = (464 until 568).sumOf { y -> (0 until 390).count { x ->

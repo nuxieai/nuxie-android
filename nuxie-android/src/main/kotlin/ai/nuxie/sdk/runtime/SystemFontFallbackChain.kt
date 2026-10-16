@@ -27,23 +27,31 @@ internal object SystemFontFallbackChain {
     }
 
     @Synchronized
-    fun load(locale: Locale): List<Face> = order(families(), locale) { name ->
-        // Configured names come from the OS, but only immutable OS partitions meet the C API contract.
-        val configured = File(name)
-        if (configured.isAbsolute) configured.takeIf { file ->
-            directories.any { file.path.startsWith("$it/") } && file.isFile
-        }?.absolutePath else directories.asSequence().map { File(it, name) }
-            .firstOrNull { it.isFile }?.absolutePath
+    fun load(locale: Locale): List<Face> = order(families(), locale) { resolvePath(it, directories.map(::File)) }
+
+    fun resolvePath(name: String, roots: List<File>): String? {
+        // Resolve both the candidate and trusted roots before checking containment.
+        // Reject traversal outright, including paths which happen to end inside a root.
+        if (name.split('/').any { it == ".." }) return null
+        return try {
+            val allowed = roots.map { it.canonicalFile }
+            val configured = File(name)
+            val candidates = if (configured.isAbsolute) sequenceOf(configured) else roots.asSequence().map { File(it, name) }
+            candidates.map { it.canonicalFile }.firstOrNull { file ->
+                file.isFile && allowed.any { file.path.startsWith("${it.path}/") }
+            }?.path
+        } catch (_: java.io.IOException) { null }
     }
 
     fun order(families: List<Family>, locale: Locale, path: (String) -> String?): List<Face> {
-        fun regular(family: Family) = family.fonts.filter { it.style == "normal" && it.fallbackFor == null }
-            .minByOrNull { abs(it.weight - 400) }
+        fun regular(family: Family): Face? = family.fonts.asSequence()
+            .filter { it.style == "normal" && it.fallbackFor == null }
+            .mapNotNull { font -> path(font.name)?.let { font to it } }
+            .minByOrNull { abs(it.first.weight - 400) }?.let { Face(it.second, it.first.index) }
         val defaults = families.firstOrNull { it.name == "sans-serif" }?.let(::regular)
         val (preferred, others) = families.filter { it.name.isNullOrBlank() && it.variant != "elegant" }
             .partition { matches(it.lang, locale) }
-        return (listOfNotNull(defaults) + (preferred + others).mapNotNull(::regular))
-            .mapNotNull { font -> path(font.name)?.let { Face(it, font.index) } }.distinct()
+        return (listOfNotNull(defaults) + (preferred + others).mapNotNull(::regular)).distinct()
     }
 
     fun matches(languages: String?, locale: Locale): Boolean {
@@ -68,10 +76,12 @@ internal object SystemFontFallbackChain {
         var variant: String? = null
         var fonts = mutableListOf<Font>()
         var inFamily = false
+        var ignored = false
         while (parser.eventType != XmlPullParser.END_DOCUMENT) {
             if (parser.eventType == XmlPullParser.START_TAG) when (parser.name) {
                 "family" -> {
                     inFamily = true
+                    ignored = parser.getAttributeValue(null, "ignore") in listOf("true", "1")
                     name = parser.getAttributeValue(null, "name")
                     lang = parser.getAttributeValue(null, "lang")
                     variant = parser.getAttributeValue(null, "variant")
@@ -99,7 +109,7 @@ internal object SystemFontFallbackChain {
                 }
             }
             if (parser.eventType == XmlPullParser.END_TAG && parser.name == "family") {
-                result += Family(name, lang, variant, fonts)
+                if (!ignored && fonts.isNotEmpty()) result += Family(name, lang, variant, fonts)
                 inFamily = false
             }
             parser.next()
