@@ -38,13 +38,19 @@ import org.junit.Test
  */
 class PublishedParlaSheetJourneyDeviceTest {
     @Test fun backToLearningClosesSavedAndRevealsTheSameOfferOnce() = parla(large = false) { run ->
+        // Lesson as drawn before any sheet opens, so a reflow when the first sheet takes focus or
+        // after the last one closes shows against it.
+        val lessonLayers = run.checkpoint("lesson", layers = 1)
+        val lessonDrawn = run.settledContent("Lesson", run.lessonArea(lessonLayers))
         run.tapControl()
         run.expectRevealed(OFFER)
-        val offerLayers = run.checkpoint("offer", layers = 2) { layers ->
+        val offerLayers = run.checkpoint("offer", layers = 2, previous = lessonLayers) { layers ->
             assertEquals(PresentationShell.Sheet(PresentationShell.Sheet.Detent.MEDIUM, true), layers[1].prepared.shell)
         }
         run.assertSheetChrome(offerLayers[1], handle = true)
-        val lessonBaseline = run.content(run.lessonArea(offerLayers))
+        // The rows above Offer's top edge, as Lesson drew them before Offer opened.
+        val lessonBaseline = lessonDrawn.copyOf(run.lessonArea(offerLayers).height())
+        run.assertSameContent("Lesson under Offer", lessonBaseline, run.content(run.lessonArea(offerLayers)))
         val offerBaseline = run.content(checkNotNull(offerLayers[1].panel))
         val offerAppearances = offerLayers[1].appearances
 
@@ -88,8 +94,9 @@ class PublishedParlaSheetJourneyDeviceTest {
         run.swipeDown(checkNotNull(again[1].panel))
         run.expectRevealed(LESSON)
         assertEquals(Triple(OFFER, LESSON, "native_sheet"), run.dismissed.poll(10, TimeUnit.SECONDS))
-        val lessonAgain = run.checkpoint("lesson revealed", layers = 1, previous = offerLayers)
-        assertEquals(offerLayers[0].appearances, lessonAgain[0].appearances, 0.0)
+        val lessonAgain = run.checkpoint("lesson revealed", layers = 1, previous = lessonLayers)
+        assertEquals(lessonLayers[0].appearances, lessonAgain[0].appearances, 0.0)
+        run.assertSameContent("Lesson after the last sheet closes", lessonDrawn, run.content(run.lessonArea(lessonAgain)))
     }
 
     @Test fun largeClosedByNoneOfferStaysOpenAfterSwipeAndBack() = parla(large = true) { run ->
@@ -201,7 +208,7 @@ class PublishedParlaSheetJourneyDeviceTest {
             assertEquals(screenId, revealed.poll(30, TimeUnit.SECONDS))
         }
 
-        /** The part of Lesson that the Offer sheet leaves uncovered, below the status bar. */
+        /** The part of Lesson that the Offer sheet (if open) leaves uncovered, below the status bar. */
         fun lessonArea(layers: List<LayerState>): Rect {
             var statusBar = 0
             onMain {
@@ -211,7 +218,8 @@ class PublishedParlaSheetJourneyDeviceTest {
                 }
             }
             val surface = layers[0].surface
-            return Rect(surface.left, maxOf(surface.top, statusBar), surface.right, checkNotNull(layers[1].panel).top)
+            val bottom = if (layers.size > 1) checkNotNull(layers[1].panel).top else surface.bottom
+            return Rect(surface.left, maxOf(surface.top, statusBar), surface.right, bottom)
         }
 
         private fun screenshot(): Bitmap = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
@@ -247,6 +255,28 @@ class PublishedParlaSheetJourneyDeviceTest {
             }
         }
 
+        /**
+         * [content] once two captures half a second apart agree, so a screen's own entrance
+         * drawing has finished before it becomes a baseline.
+         */
+        fun settledContent(name: String, area: Rect): BooleanArray {
+            val deadline = SystemClock.uptimeMillis() + 10_000
+            var last = inkBands(content(area))
+            var captures = 1
+            while (true) {
+                SystemClock.sleep(500)
+                val next = content(area)
+                captures++
+                val bands = inkBands(next)
+                if (!moved(last, bands) && bands.isNotEmpty()) {
+                    Log.i(TAG, "$name settled after $captures captures: $bands")
+                    return next
+                }
+                assertTrue("$name settles (last $last, now $bands)", SystemClock.uptimeMillis() < deadline)
+                last = bands
+            }
+        }
+
         /** Runs of ink rows (text lines, controls), with one- and two-row gaps closed. */
         private fun inkBands(rows: BooleanArray): List<IntRange> {
             val bands = mutableListOf<IntRange>()
@@ -275,11 +305,14 @@ class PublishedParlaSheetJourneyDeviceTest {
             Log.i(TAG, "$name: ${expected.size}/${actual.size} rows, bands before $before, now $after")
             assertTrue("$name: drawn content", before.isNotEmpty())
             assertEquals("$name: area", expected.size, actual.size)
+            assertFalse("$name: content moved from $before to $after", moved(before, after))
+        }
+
+        private fun moved(before: List<IntRange>, after: List<IntRange>): Boolean {
             val tolerance = 4 * density
-            val moved = before.size != after.size || before.zip(after).any { (old, new) ->
+            return before.size != after.size || before.zip(after).any { (old, new) ->
                 Math.abs(old.first - new.first) > tolerance || Math.abs(old.last - new.last) > tolerance
             }
-            assertFalse("$name: content moved from $before to $after", moved)
         }
 
         /**
