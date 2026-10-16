@@ -3,7 +3,6 @@ package ai.nuxie.sdk.presentation
 import ai.nuxie.sdk.runtime.NuxieRuntime
 import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import ai.nuxie.sdk.runtime.NuxieHostCommand
-import ai.nuxie.sdk.runtime.NuxieHostValue
 import ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome
 import ai.nuxie.sdk.experiences.JourneyReleaseIdentity
 import ai.nuxie.sdk.experiences.JourneyReleaseReplayPolicy
@@ -29,6 +28,11 @@ import org.junit.Test
 
 /** Qualifies signed publisher releases through SDK admission and native editing. */
 class PublishedNativeConverterDeviceTest {
+    private companion object {
+        /** The duration field binds to the Journey's "duration" response form. */
+        val DURATION_PATH = listOf("experience", "responses:duration", "durationSeconds")
+    }
+
     @Test fun plainDurationRejectsInvalidEditAndRecovers() = qualify(false)
     @Test fun secureDurationRejectsInvalidEditAndRecovers() = qualify(true)
     @Test fun plainDurationValidatesDraftBeforeSubmission() = qualify(false, true)
@@ -63,7 +67,14 @@ class PublishedNativeConverterDeviceTest {
         val input = ExperienceTextInput.forScreen(descriptor, screenId).single()
         assertNotNull("Publisher must emit the native endpoint", input.textInputName)
         assertEquals(secure, input.secure)
-        assertEquals(ExperienceTextInput.ResponseCapture.BINDING, input.responseCapture)
+        // Version 3 declares the answer as the named "duration" response form; the field binds to
+        // that form's model instead of carrying its own capture mode.
+        val form = descriptor.getValue("responses").jsonObject.getValue("duration").jsonObject
+        assertEquals("Responses:duration", form.getValue("model").jsonPrimitive.content)
+        val answer = form.getValue("fields").jsonArray.single().jsonObject
+        assertEquals("durationSeconds", answer.getValue("key").jsonPrimitive.content)
+        assertEquals("number", answer.getValue("type").jsonPrimitive.content)
+        assertTrue("The leg declares no answer outputs", descriptor.getValue("leg").jsonObject.getValue("outputs").jsonArray.isEmpty())
         val directory = File(instrumentation.targetContext.cacheDir, "$prefix-${System.nanoTime()}").apply { mkdirs() }
         fun stage(declaration: JsonObject): Pair<String, File> {
             val key = declaration.getValue("key").jsonPrimitive.content
@@ -139,19 +150,14 @@ class PublishedNativeConverterDeviceTest {
                 fun complete(draft: String, expected: Double?) {
                     instrumentation.runOnMainSync { field.requestFocus(); field.setText(draft); field.clearFocus() }
                     checkNotNull(commits.poll(10, TimeUnit.SECONDS)) { "Expected draft notification before validation" }
-                    if (expected == null) {
-                        assertNull("Invalid draft must not emit a response or continuation", commands.poll(1, TimeUnit.SECONDS))
-                    } else {
-                        val response = checkNotNull(commands.poll(10, TimeUnit.SECONDS)) { "Expected validated response" }
-                        assertEquals("\$response_set", response.name)
-                        val fields = (response.value as NuxieHostValue.Object).fields.associate { it.key to it.value }
-                        assertEquals(NuxieHostValue.String("durationSeconds"), fields["field"])
-                        assertEquals(NuxieHostValue.Number(expected), fields["value"])
-                        assertEquals("duration_ready", checkNotNull(commands.poll(10, TimeUnit.SECONDS)).name)
-                        submissions += 1
-                    }
+                    val emitted = generateSequence { commands.poll(2, TimeUnit.SECONDS) }.map { it.name }.toList()
+                    // The script writes a valid answer through Nuxie.responses.set (no command) and
+                    // emits duration_ready; every completion then emits input_finished.
+                    assertEquals("Commands after \"$draft\"",
+                        if (expected == null) listOf("input_finished") else listOf("duration_ready", "input_finished"), emitted)
+                    if (expected != null) submissions += 1
                     failure.get()?.let { throw AssertionError("Published validation failed", it) }
-                    assertTrue("Retired answer commands must not populate the journal", persisted.responses().isEmpty())
+                    assertTrue("The answer lives in the duration form, not the journal", persisted.responses().isEmpty())
                     assertEquals("Only valid drafts submit", submissions, persisted.submissions())
                 }
                 complete("2:00", 120.0)
@@ -169,7 +175,7 @@ class PublishedNativeConverterDeviceTest {
                 failure.get()?.let { throw AssertionError("Published native edit failed", it) }
                 assertEquals(text, event.first)
                 assertEquals(ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.NumberValue(seconds),
-                    event.second?.resolveScalar(listOf("response", "values", "durationSeconds")))
+                    event.second?.resolveScalar(DURATION_PATH))
             }
             edited("2:00", 120.0)
             // A property write accepts the draft, not its validity. Failed reverse
@@ -196,7 +202,7 @@ class PublishedNativeConverterDeviceTest {
                 val committed = checkNotNull(precedingCommit)
                 assertEquals("Completion must follow the latest value notification", draft, committed.first)
                 assertEquals(ai.nuxie.sdk.runtime.NuxieViewModelScalarValue.NumberValue(seconds),
-                    committed.second?.resolveScalar(listOf("response", "values", "durationSeconds")))
+                    committed.second?.resolveScalar(DURATION_PATH))
             }
             blurAfterEdit("3:00", 180.0)
             // Authored validation must receive the invalid draft, not a reformatted

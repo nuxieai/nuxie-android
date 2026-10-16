@@ -37,31 +37,40 @@ failure/recovery. Those require the full publication path.
 
 ## Published plain and secure custom converters
 
-`native-converter/` and `native-converter-secure/` contain unchanged publication
-outputs from the parent repository's
+All four `native-converter*/` folders hold `release-entry.json` and `bundle/`
+from one run of the parent repository's
 `packages/view-compiler/src/compiler-backends/rive-ios-production-artifact.test.ts`,
-test `publishes a numeric duration response with a custom editable formatter`.
-Export using `NUXIE_CONVERTER_DEVICE_ARTIFACT_DIR=<new absolute directory>`;
-the secure case exports to that directory suffixed with `-secure`.
+test `publishes a numeric duration response with a custom editable formatter`
+(all four secure and validate cases), run from `packages/view-compiler` with
+`NUXIE_CONVERTER_DEVICE_ARTIFACT_DIR=<new absolute directory>/native-converter`.
+The secure case exports to that directory suffixed with `-secure`, and the
+validated cases add `-validated`. Each output's `release-artifact-envelope.json`
+and `publish-snapshot.json` are not copied. The releases are Journey release
+version 3, signed with the parent's test-only key.
 
 The fixture converts numeric seconds to minutes:seconds and reverse-converts
 valid edits. Invalid edits preserve the previous numeric source, leaving the
-draft available for authored validation. Secure and plain descriptors both use
-binding capture. The instrumentation test admits the signed release through
-the production verifier, including schema, locator identity, replay policy, and
-the embedded runtime's compatibility requirements. It also verifies every staged
-artifact hash and size before mounting.
+draft available for authored validation. The descriptor declares the answer as
+the named `duration` response form (`Responses:duration`, one number field,
+`durationSeconds`), and the field binds two-way to
+`experience/responses:duration/durationSeconds`; the leg declares no outputs.
+The instrumentation test admits the signed release through the production
+verifier, including schema, locator identity, replay policy, and the embedded
+runtime's compatibility requirements. It also verifies every staged artifact
+hash and size before mounting.
 
 The `native-converter-validated/` and `native-converter-secure-validated/`
 variants add the authored editing-ended action. The publisher's real release
 assembler packages and signs its compiled action artifact. It shares the
-converter's parser and emits `$response_set` and `duration_ready` only when the
-draft parses. Device tests use actual UI edit/blur delivery and runtime commands,
-checking malformed, empty, invalid-seconds, corrected, and equivalent-value edits.
-The validated cases also route the actual native outcomes through
-`JourneyRuntimeEmissionCoordinator` and `JourneyService`. After each edit they
-reload the disk journal and check the typed numeric response and submission
-count. Invalid drafts preserve the previous answer without submitting;
-corrected and equivalent-value drafts submit. Admission uses the production
-catalog and installed runtime compatibility. The test supplies a local profile
-and mount adapter; it does not exercise network delivery or the public app API.
+converter's parser: when the draft parses it writes the answer with
+`Nuxie.responses.set("duration.durationSeconds", ...)` (a view-model write, not
+a command) and emits `duration_ready`, and every completion then emits
+`input_finished`. Device tests use actual UI edit/blur delivery and runtime
+commands, checking malformed, empty, invalid-seconds, corrected, and
+equivalent-value edits. The validated cases also route the actual native
+outcomes through `JourneyRuntimeEmissionCoordinator` and `JourneyService` and
+reload the disk journal after each edit: valid drafts count as submissions,
+invalid drafts do not, and no answer is copied into the journal's response
+context. Admission uses the production catalog and installed runtime
+compatibility. The test supplies a local profile and mount adapter; it does not
+exercise network delivery or the public app API.
