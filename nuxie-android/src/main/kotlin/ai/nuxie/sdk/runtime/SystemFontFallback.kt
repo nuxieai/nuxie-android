@@ -3,6 +3,9 @@ package ai.nuxie.sdk.runtime
 import android.os.SystemClock
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicReference
+import java.io.Closeable
 
 /** Process-owned borrowed C handles. Native callbacks can arrive on any shaping thread. */
 internal object SystemFontFallback {
@@ -22,7 +25,18 @@ internal object SystemFontFallback {
         private val native: Native,
         private val chain: (Locale) -> List<SystemFontFallbackChain.Face>,
         private val now: () -> Long,
-    ) {
+    ) : Closeable {
+        // Only this worker touches probes, face state, and the ordered chain.
+        private val worker = Executors.newSingleThreadExecutor { task ->
+            Thread(task, "NuxieFontFallback").apply { isDaemon = true }
+        }
+        private data class Generation(val locale: Locale, val id: Long)
+        private data class Key(val character: Int, val weight: Int, val generation: Long)
+        private val generation = AtomicReference(Generation(Locale.ROOT, 0))
+        private val characters = ConcurrentHashMap<Key, Answer>()
+        private val insertionOrder = java.util.ArrayDeque<Key>()
+        override fun close() { worker.shutdownNow() }
+        fun warm(locale: Locale) { worker.execute { ensureChain(locale, now()) } }
         private class FaceState {
             var probe = 0L
             var font = 0L
@@ -35,19 +49,34 @@ internal object SystemFontFallback {
         private var locale: Locale? = null
         private var ordered: List<SystemFontFallbackChain.Face> = emptyList()
         private var chainRetry = 0L
-        // Unicode input is untrusted; a document cannot grow the character cache without bound.
-        private val characters = object : LinkedHashMap<Pair<Int, Int>, Answer>(128, .75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Pair<Int, Int>, Answer>?) = size > 4096
-        }
-
-        @Synchronized
         fun resolve(character: Int, weight: Int, requestedLocale: Locale): Resolution? {
-            if (character !in 0..0x10ffff || character in 0xd800..0xdfff || weight !in 1..1000 ||
+            if (character !in 0..0x10ffff || character in 0xd800..0xdfff ||
                 character < 0x20 || character in 0x7f..0x9f || character in 0x200b..0x200f ||
                 character in 0x2028..0x202e || character == 0xfeff) return null
-            val time = now()
+            var current = generation.get()
+            while (current.locale != requestedLocale) {
+                val next = Generation(requestedLocale, current.id + 1)
+                if (generation.compareAndSet(current, next)) { current = next; break }
+                current = generation.get()
+            }
+            val key = Key(character, weight.coerceIn(1, 1000), current.id)
+            // No task, monitor, or worker wait on a warm (including negative) answer.
+            characters[key]?.takeIf { now() < it.until }?.let { return it.resolution }
+            return try {
+                worker.submit<Resolution?> {
+                    val time = now()
+                    characters[key]?.takeIf { time < it.until }?.let { return@submit it.resolution }
+                    ensureChain(requestedLocale, time)
+                    resolveOnWorker(key, time)
+                }.get()
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                null
+            }
+        }
+
+        private fun ensureChain(requestedLocale: Locale, time: Long) {
             if (locale != requestedLocale || (chainRetry != 0L && time >= chainRetry)) {
-                characters.clear()
                 locale = requestedLocale
                 try {
                     ordered = chain(requestedLocale)
@@ -57,8 +86,18 @@ internal object SystemFontFallback {
                     chainRetry = time + RETRY_MILLIS
                 }
             }
-            val key = character to weight
-            characters[key]?.takeIf { time < it.until }?.let { return it.resolution }
+        }
+
+        private fun remember(key: Key, answer: Answer): Resolution? {
+            if (characters.put(key, answer) == null) insertionOrder.addLast(key)
+            // Bounded FIFO keeps reads lock-free, including across locale generations.
+            while (insertionOrder.size > 4096) characters.remove(insertionOrder.removeFirst())
+            return answer.resolution
+        }
+
+        private fun resolveOnWorker(key: Key, time: Long): Resolution? {
+            val character = key.character
+            val weight = key.weight
             var until = if (chainRetry != 0L) chainRetry else Long.MAX_VALUE
             for (face in ordered) {
                 val state = faces.getOrPut(face) { FaceState() }
@@ -108,11 +147,9 @@ internal object SystemFontFallback {
                     state.weightFailures.remove(weight)
                 }
                 val resolution = Resolution(handle, face)
-                characters[key] = Answer(resolution, until)
-                return resolution
+                return remember(key, Answer(resolution, until))
             }
-            characters[key] = Answer(null, until)
-            return null
+            return remember(key, Answer(null, until))
         }
 
         private fun failureDeadline(status: Int, time: Long, promotion: Boolean = false): Long =
@@ -136,31 +173,36 @@ internal object SystemFontFallback {
         override fun withWeight(font: Long, weight: Int) = nativeWithWeight(font, weight).result()
     }, SystemFontFallbackChain::load, SystemClock::uptimeMillis)
 
-    // NuxFontFileProbe is thread-affine, unlike the shareable decoded NuxFont.
-    // A single process-owned worker preserves probes across different runtime lanes.
-    private val fontThread = Executors.newSingleThreadExecutor { task ->
-        Thread(task, "NuxieFontFallback").apply { isDaemon = true }
-    }
+    // Debug seams are inert in release: the native build, rather than a mutable
+    // Kotlin flag, decides whether instrumentation can observe or suppress selection.
+    @Volatile private var observer: ((Int, SystemFontFallbackChain.Face) -> Unit)? = null
+    internal var selectionObserver: ((Int, SystemFontFallbackChain.Face) -> Unit)?
+        get() = observer
+        set(value) { if (nativeTestingEnabled()) observer = value }
 
-    @Volatile internal var selectionObserver: ((Int, SystemFontFallbackChain.Face) -> Unit)? = null
+    @JvmStatic fun warm() { cache.warm(Locale.getDefault()) }
 
-    // Called from JNI; indices 0 and 1 mirror iOS's provider. A new missing scalar
-    // on retry 1 must select again (e.g. a second script within the same run).
+    // The pinned runtime stops when it receives the same FontRef again. Every
+    // index may introduce a different missing scalar, so do not truncate the walk.
     @JvmStatic
+    @Suppress("UNUSED_PARAMETER")
     fun request(character: Int, index: Int, weight: Int): Long {
-        if (index !in 0..1) return 0
-        val locale = Locale.getDefault()
-        val resolution = try {
-            fontThread.submit<Resolution?> { cache.resolve(character, weight, locale) }.get()
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
-            return 0
-        } ?: return 0
-        selectionObserver?.invoke(character, resolution.face)
+        val resolution = cache.resolve(character, weight, Locale.getDefault()) ?: return 0
+        observer?.invoke(character, resolution.face)
         return resolution.handle
     }
 
-    external fun requestFromNativeThreadForTesting(character: Int, index: Int, weight: Int): Long
+    fun requestFromNativeThreadForTesting(character: Int, index: Int, weight: Int): Long =
+        if (nativeTestingEnabled()) nativeRequestFromThread(character, index, weight) else 0
+    fun sequenceFromNativeThreadForTesting(): LongArray =
+        if (nativeTestingEnabled()) nativeSequenceFromThread() else longArrayOf()
+    fun suppressForTesting(suppress: Boolean) {
+        if (nativeTestingEnabled()) nativeSuppress(suppress)
+    }
+    private external fun nativeTestingEnabled(): Boolean
+    private external fun nativeRequestFromThread(character: Int, index: Int, weight: Int): Long
+    private external fun nativeSequenceFromThread(): LongArray
+    private external fun nativeSuppress(suppress: Boolean)
 
     private external fun nativeProbe(path: String, index: Int): LongArray
     private external fun nativeCovers(probe: Long, character: Int): Boolean

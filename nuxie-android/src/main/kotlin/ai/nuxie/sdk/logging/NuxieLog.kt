@@ -21,6 +21,15 @@ internal object NuxieLog {
             sensitive("code", code?.decodeToString()), sensitive("details", details?.decodeToString()))
     }
 
+    private val fontExceptionKinds = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    @JvmStatic
+    fun nativeFontException(error: Throwable) {
+        val cause = if (error is java.util.concurrent.ExecutionException) error.cause ?: error else error
+        if (fontExceptionKinds.putIfAbsent(cause.javaClass.name, true) == null)
+            logger.log(LogLevel.WARN, "Nuxie", "System font fallback failed", cause)
+    }
+
     fun v(tag: String, message: String, error: Throwable? = null, vararg fields: NuxieLogger.Field) =
         logger.log(LogLevel.VERBOSE, tag, message, error, *fields)
     fun d(tag: String, message: String, error: Throwable? = null, vararg fields: NuxieLogger.Field) =

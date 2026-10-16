@@ -1,6 +1,17 @@
 # JNI_OnLoad resolves this policy boundary by class and static method name.
 -keep class ai.nuxie.sdk.logging.NuxieLog {
     public static void nativeWarning(java.lang.String, int, byte[], byte[]);
+    public static void nativeFontException(java.lang.Throwable);
+}
+
+# Asset inspection constructs these records through JNI, outside R8's call graph.
+-keep class ai.nuxie.sdk.runtime.NativeExpectedFileAsset {
+    public <init>(int, int, boolean, long, java.lang.String, java.lang.String, boolean, boolean, int);
+}
+
+# Native CPU frame readback also constructs this value through JNI.
+-keep class ai.nuxie.sdk.runtime.NuxieCpuFrame {
+    public <init>(int, int, byte[]);
 }
 
 # Native semantic snapshots construct immutable copied nodes through JNI.
@@ -30,4 +41,13 @@
 -keep class ai.nuxie.sdk.runtime.NativeRuleGroup { *; }
 
 # The process font hook resolves this static callback before native shaping threads start.
--keep class ai.nuxie.sdk.runtime.SystemFontFallback { *; }
+-keep,allowoptimization class ai.nuxie.sdk.runtime.SystemFontFallback {
+    public static long request(int, int, int);
+    public static void warm();
+    private native long[] nativeProbe(java.lang.String, int);
+    private native boolean nativeCovers(long, int);
+    private native boolean nativeFontCovers(long, int);
+    private native long[] nativeMakeFont(long);
+    private native long[] nativeWithWeight(long, int);
+    private native boolean nativeTestingEnabled();
+}

@@ -8,6 +8,8 @@ require(purchaseProvider in setOf("nuxie", "revenuecat", "superwall")) {
   "nuxieExamplePurchaseProvider must be nuxie, revenuecat, or superwall."
 }
 
+val qualifyFontFallback = providers.gradleProperty("nuxieMinifyExampleRelease").orNull == "true"
+
 android {
   namespace = "ai.nuxie.example"
   compileSdk = 36
@@ -24,6 +26,18 @@ android {
   }
 
   buildFeatures { buildConfig = true }
+  buildTypes.getByName("release") {
+    if (qualifyFontFallback) {
+      isMinifyEnabled = true
+      signingConfig = signingConfigs.getByName("debug")
+      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+    }
+  }
+  if (qualifyFontFallback) sourceSets.getByName("release") {
+    java.srcDir("src/fontFallbackQualification/java")
+    assets.srcDir("../nuxie-android/src/androidTest/assets/authored-font-fallback")
+    manifest.srcFile("src/fontFallbackQualification/AndroidManifest.xml")
+  }
   testOptions { unitTests.isIncludeAndroidResources = true }
   sourceSets.getByName("main").java.srcDir("src/$purchaseProvider/kotlin")
   sourceSets.getByName("test").java.srcDir("src/${purchaseProvider}Test/kotlin")

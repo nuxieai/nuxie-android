@@ -2,6 +2,8 @@ package ai.nuxie.sdk.runtime
 
 import org.junit.Assert.*
 import org.junit.Test
+import org.junit.After
+import java.util.concurrent.CountDownLatch
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -9,8 +11,15 @@ import java.util.concurrent.TimeUnit
 class SystemFontFallbackTest {
     private val first = SystemFontFallbackChain.Face("/system/fonts/first.ttc", 2)
     private val second = SystemFontFallbackChain.Face("/system/fonts/second.ttf", 0)
+    private val caches = mutableListOf<SystemFontFallback.Cache>()
+    @After fun closeWorkers() { caches.forEach { it.close() } }
+    private fun cache(native: Native, chain: (Locale) -> List<SystemFontFallbackChain.Face>, now: () -> Long) =
+        SystemFontFallback.Cache(native, chain, now).also { caches += it }
     private class Native : SystemFontFallback.Native {
-        val calls = mutableListOf<String>()
+        val calls = java.util.Collections.synchronizedList(mutableListOf<String>())
+        private val probeOwners = mutableMapOf<Long, Thread>()
+        var beforeCoverage: (Int) -> Unit = {}
+        private fun assertOwner(probe: Long) = assertSame("Probe operations must stay on their creating thread", probeOwners[probe], Thread.currentThread())
         var probeStatus = 0
         var fontStatus = 0
         var weightStatus = 0
@@ -18,17 +27,23 @@ class SystemFontFallbackTest {
         override fun probe(face: SystemFontFallbackChain.Face): SystemFontFallback.Acquisition {
             calls += "probe:${face.path}:${face.index}"
             val status = if (face.path.endsWith("first.ttc")) probeStatus else 0
-            return SystemFontFallback.Acquisition(status, if (status == 0) if (face.index == 2) 10 else 20 else 0)
+            val handle = if (status == 0) if (face.index == 2) 10L else 20L else 0L
+            if (handle != 0L) probeOwners[handle] = Thread.currentThread()
+            return SystemFontFallback.Acquisition(status, handle)
         }
         override fun covers(probe: Long, character: Int): Boolean {
+            assertOwner(probe)
+            beforeCoverage(character)
             calls += "covers:$probe:$character"
             return character in covers
         }
         override fun fontCovers(font: Long, character: Int): Boolean {
+            beforeCoverage(character)
             calls += "fontCovers:$font:$character"
             return character in covers
         }
         override fun makeFont(probe: Long): SystemFontFallback.Acquisition {
+            assertOwner(probe)
             calls += "font:$probe"
             return SystemFontFallback.Acquisition(fontStatus, if (fontStatus == 0) probe + 100 else 0)
         }
@@ -40,7 +55,7 @@ class SystemFontFallbackTest {
 
     @Test fun charactersShareProbesAndDecodedFacesButRespectWeight() {
         val native = Native()
-        val cache = SystemFontFallback.Cache(native, { listOf(first, second) }, { 0 })
+        val cache = cache(native, { listOf(first, second) }, { 0 })
         val a = cache.resolve(0x65e5, 400, Locale.JAPAN)
         assertEquals(first, a?.face)
         assertEquals(a, cache.resolve(0x65e5, 400, Locale.JAPAN))
@@ -55,7 +70,7 @@ class SystemFontFallbackTest {
 
     @Test fun cacheMissAndInvalidScalarDoNotKeepWalkingTheChain() {
         val native = Native()
-        val cache = SystemFontFallback.Cache(native, { listOf(first, second) }, { 0 })
+        val cache = cache(native, { listOf(first, second) }, { 0 })
         assertNull(cache.resolve(0x10ffff, 400, Locale.US))
         val calls = native.calls.toList()
         repeat(4) { assertNull(cache.resolve(0x10ffff, 400, Locale.US)) }
@@ -68,7 +83,7 @@ class SystemFontFallbackTest {
 
     @Test fun localeChangeReordersAnswersWithoutReopeningFaces() {
         val native = Native()
-        val cache = SystemFontFallback.Cache(native, { if (it == Locale.JAPAN) listOf(first, second) else listOf(second, first) }, { 0 })
+        val cache = cache(native, { if (it == Locale.JAPAN) listOf(first, second) else listOf(second, first) }, { 0 })
         assertEquals(first, cache.resolve(0x65e5, 400, Locale.JAPAN)?.face)
         assertEquals(second, cache.resolve(0x65e5, 400, Locale.CHINA)?.face)
         assertEquals(first, cache.resolve(0x65e5, 400, Locale.JAPAN)?.face)
@@ -78,7 +93,7 @@ class SystemFontFallbackTest {
     @Test fun transientEarlierFailureExpiresEvenWhenALaterFaceSucceeded() {
         val native = Native().apply { probeStatus = 2 }
         var time = 100L
-        val cache = SystemFontFallback.Cache(native, { listOf(first, second) }, { time })
+        val cache = cache(native, { listOf(first, second) }, { time })
         assertEquals(second, cache.resolve(0x65e5, 400, Locale.US)?.face)
         native.probeStatus = 0
         time += 29_999
@@ -92,7 +107,7 @@ class SystemFontFallbackTest {
         for (status in listOf(5, 11)) {
             val native = Native().apply { probeStatus = status }
             var time = 0L
-            val cache = SystemFontFallback.Cache(native, { listOf(first) }, { time })
+            val cache = cache(native, { listOf(first) }, { time })
             assertNull(cache.resolve(0x65e5, 400, Locale.US))
             native.probeStatus = 0
             time = 1_000_000
@@ -105,7 +120,7 @@ class SystemFontFallbackTest {
         for (failWeight in listOf(false, true)) {
             val native = Native().apply { if (failWeight) weightStatus = 2 else fontStatus = 2 }
             var time = 0L
-            val cache = SystemFontFallback.Cache(native, { listOf(first) }, { time })
+            val cache = cache(native, { listOf(first) }, { time })
             assertNull(cache.resolve(0x1f600, 400, Locale.US))
             native.fontStatus = 0
             native.weightStatus = 0
@@ -121,7 +136,7 @@ class SystemFontFallbackTest {
         val native = Native()
         var reads = 0
         var time = 0L
-        val cache = SystemFontFallback.Cache(native, {
+        val cache = cache(native, {
             if (++reads == 1) error("file temporarily unavailable") else listOf(first)
         }, { time })
         assertNull(cache.resolve(0x65e5, 400, Locale.US))
@@ -135,14 +150,14 @@ class SystemFontFallbackTest {
     @Test fun unusablePromotionIsNotRetriedButMissingFilesAre() {
         val native = Native().apply { fontStatus = 3 }
         var time = 0L
-        val cache = SystemFontFallback.Cache(native, { listOf(first) }, { time })
+        val cache = cache(native, { listOf(first) }, { time })
         assertNull(cache.resolve(0x65e5, 400, Locale.US))
         native.fontStatus = 0
         time = 1_000_000
         assertNull(cache.resolve(0x672c, 400, Locale.JAPAN))
         assertEquals(1, native.calls.count { it.startsWith("font:") })
         val files = Native().apply { probeStatus = 3 }
-        val retry = SystemFontFallback.Cache(files, { listOf(first) }, { time })
+        val retry = cache(files, { listOf(first) }, { time })
         assertNull(retry.resolve(0x65e5, 400, Locale.US))
         files.probeStatus = 0
         time += 30_000
@@ -151,7 +166,7 @@ class SystemFontFallbackTest {
 
     @Test fun untrustedCharactersCannotGrowTheAnswerCacheWithoutBound() {
         val native = Native().apply { covers = emptySet() }
-        val cache = SystemFontFallback.Cache(native, { listOf(first) }, { 0 })
+        val cache = cache(native, { listOf(first) }, { 0 })
         for (character in 0x3000..0x4000) assertNull(cache.resolve(character, 400, Locale.US))
         val before = native.calls.size
         assertNull(cache.resolve(0x3000, 400, Locale.US))
@@ -161,7 +176,7 @@ class SystemFontFallbackTest {
 
     @Test fun concurrentRequestsAcquireOneFace() {
         val native = Native()
-        val cache = SystemFontFallback.Cache(native, { listOf(first) }, { 0 })
+        val cache = cache(native, { listOf(first) }, { 0 })
         val executor = Executors.newFixedThreadPool(4)
         try {
             val results = (1..32).map { executor.submit<Long> { checkNotNull(cache.resolve(0x65e5, 400, Locale.US)).handle } }
@@ -169,4 +184,35 @@ class SystemFontFallbackTest {
             assertEquals(1, native.calls.count { it.startsWith("font:") })
         } finally { executor.shutdownNow() }
     }
+    @Test fun warmAnswersDoNotQueueBehindAColdRequest() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val native = Native()
+        val cache = cache(native, { listOf(first) }, { 0 })
+        val warm = cache.resolve(0x65e5, 400, Locale.US)
+        // A negative answer is also a warm hit.
+        assertNull(cache.resolve(0x10ffff, 400, Locale.US))
+        native.beforeCoverage = { if (it == 0x672c) { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)) } }
+        val callers = Executors.newFixedThreadPool(2)
+        try {
+            val cold = callers.submit { cache.resolve(0x672c, 400, Locale.US) }
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            val hit = callers.submit<SystemFontFallback.Resolution?> {
+                assertNull(cache.resolve(0x10ffff, 400, Locale.US))
+                cache.resolve(0x65e5, 400, Locale.US)
+            }
+            assertEquals(warm, hit.get(1, TimeUnit.SECONDS))
+            release.countDown()
+            cold.get(5, TimeUnit.SECONDS)
+        } finally { release.countDown(); callers.shutdownNow() }
+    }
+
+    @Test fun weightsClampAtThePublicCallbackBoundaryAndShareAnswers() {
+        val native = Native()
+        val cache = cache(native, { listOf(first) }, { 0 })
+        assertEquals(cache.resolve(0x65e5, 1, Locale.US), cache.resolve(0x65e5, Int.MIN_VALUE, Locale.US))
+        assertEquals(cache.resolve(0x65e5, 1000, Locale.US), cache.resolve(0x65e5, Int.MAX_VALUE, Locale.US))
+        assertEquals(2, native.calls.count { it.startsWith("weight:") })
+    }
+
 }

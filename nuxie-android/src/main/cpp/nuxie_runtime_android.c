@@ -17,6 +17,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,46 +26,107 @@
 #include "nuxie_logging_policy.h"
 #include "nuxie_host_installs.h"
 
-// The hook is installed once by JNI_OnLoad. Keep the application class global:
-// FindClass on a runtime-owned worker would use the wrong class loader.
-#if defined(__ANDROID__)
-static JavaVM *font_vm;
-static jclass font_class;
-static jmethodID font_request;
-
-static const struct NuxFont *system_font_fallback(void *context, uint32_t missing,
-                                                 uint32_t index, uint16_t weight) {
-  (void)context;
-  if (index > 1 || font_vm == NULL || font_class == NULL) return NULL;
-  JNIEnv *env = NULL;
-  bool attached = false;
-  jint status = (*font_vm)->GetEnv(font_vm, (void **)&env, JNI_VERSION_1_6);
-  if (status == JNI_EDETACHED) {
-    if ((*font_vm)->AttachCurrentThread(font_vm, &env, NULL) != JNI_OK) return NULL;
-    attached = true;
-  } else if (status != JNI_OK) return NULL;
-  // Never consume an exception that belongs to a Java caller.
-  if ((*env)->ExceptionCheck(env)) {
-    if (attached) (*font_vm)->DetachCurrentThread(font_vm);
-    return NULL;
-  }
-  jlong handle = (*env)->CallStaticLongMethod(env, font_class, font_request,
-                                             (jint)missing, (jint)index, (jint)weight);
-  // Font acquisition is best effort. A file/parser/allocation error cannot
-  // unwind through the C hook or leave an exception on a native shaping thread.
-  if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); handle = 0; }
-  if (attached) (*font_vm)->DetachCurrentThread(font_vm);
-  return (const struct NuxFont *)(intptr_t)handle;
-}
-#endif
-
-
-// Native diagnostics use the same Kotlin policy as every other SDK log. Never
-// redirect process-wide stderr: it belongs to the embedding application.
+// Native diagnostics use the same Kotlin policy as every other SDK log.
 #if defined(__ANDROID__)
 static JavaVM *logging_vm;
 static jclass logging_class;
 static jmethodID logging_method;
+static jmethodID font_exception_method;
+static void log_native_warning(const char *, int, const char *, uint64_t, const char *, uint64_t);
+
+// Resolve application classes on load, never through a foreign thread's loader.
+static JavaVM *font_vm;
+static jclass font_class;
+static jmethodID font_request;
+static bool font_hook_installed;
+static _Thread_local uint16_t original_font_weight = 400;
+static pthread_key_t font_attachment_key;
+static bool font_attachment_key_ready;
+#if defined(NUXIE_FONT_TESTING)
+static atomic_bool font_suppressed;
+static _Thread_local uint16_t forwarded_font_weight;
+static _Thread_local int font_attach_count;
+#endif
+
+static void detach_font_thread(void *attached_vm) {
+  JavaVM *vm = attached_vm;
+  if (vm != NULL) (*vm)->DetachCurrentThread(vm);
+}
+
+static void log_font_exception(JNIEnv *env) {
+  // JNI forbids Java calls with a pending exception. Retain the original until
+  // the policy logger has recorded it (once per exception kind), then discard it.
+  jthrowable error = (*env)->ExceptionOccurred(env);
+  (*env)->ExceptionClear(env);
+  if (error != NULL && font_exception_method != NULL)
+    (*env)->CallStaticVoidMethod(env, logging_class, font_exception_method, error);
+  if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+  if (error != NULL) (*env)->DeleteLocalRef(env, error);
+}
+
+static const struct NuxFont *system_font_fallback(void *context, uint32_t missing,
+                                                 uint32_t index, uint16_t weight) {
+  (void)context;
+  if (index == 0) original_font_weight = weight;
+#if defined(NUXIE_FONT_TESTING)
+  if (atomic_load(&font_suppressed)) return NULL;
+  forwarded_font_weight = original_font_weight;
+#endif
+  if (font_vm == NULL || font_class == NULL) return NULL;
+  JNIEnv *env = NULL;
+  jint status = (*font_vm)->GetEnv(font_vm, (void **)&env, JNI_VERSION_1_6);
+  if (status == JNI_EDETACHED) {
+    if (!font_attachment_key_ready ||
+        (*font_vm)->AttachCurrentThread(font_vm, &env, NULL) != JNI_OK) return NULL;
+    // A foreign worker attaches once; pthread exit owns the matching detach.
+    if (pthread_setspecific(font_attachment_key, font_vm) != 0) {
+      (*font_vm)->DetachCurrentThread(font_vm);
+      return NULL;
+    }
+#if defined(NUXIE_FONT_TESTING)
+    font_attach_count++;
+#endif
+  } else if (status != JNI_OK) return NULL;
+  // Never consume an exception that belongs to a Java caller.
+  if ((*env)->ExceptionCheck(env)) return NULL;
+  jlong handle = (*env)->CallStaticLongMethod(env, font_class, font_request,
+      (jint)missing, (jint)index, (jint)original_font_weight);
+  if ((*env)->ExceptionCheck(env)) { log_font_exception(env); handle = 0; }
+  return (const struct NuxFont *)(intptr_t)handle;
+}
+
+// Hook installation is optional. The renderer remains usable with authored
+// fonts if class resolution, VM allocation, or runtime registration fails.
+static void install_font_fallback(JNIEnv *env, JavaVM *vm) {
+  jclass local = (*env)->FindClass(env, "ai/nuxie/sdk/runtime/SystemFontFallback");
+  if (local != NULL) {
+    font_class = (*env)->NewGlobalRef(env, local);
+    (*env)->DeleteLocalRef(env, local);
+  }
+  if (font_class != NULL && !(*env)->ExceptionCheck(env))
+    font_request = (*env)->GetStaticMethodID(env, font_class, "request", "(III)J");
+  if ((*env)->ExceptionCheck(env)) log_font_exception(env);
+  if (font_request != NULL && font_class != NULL &&
+      pthread_key_create(&font_attachment_key, detach_font_thread) == 0) {
+    font_attachment_key_ready = true;
+    font_vm = vm;
+    NuxStatus status = nux_font_set_fallback_proc(system_font_fallback, NULL);
+    if (status == NUX_STATUS_OK) {
+      font_hook_installed = true;
+      jmethodID warm = (*env)->GetStaticMethodID(env, font_class, "warm", "()V");
+      if (warm != NULL) (*env)->CallStaticVoidMethod(env, font_class, warm);
+      if ((*env)->ExceptionCheck(env)) log_font_exception(env);
+      return;
+    }
+  }
+  log_native_warning("install_system_font_fallback", -1, NULL, 0, NULL, 0);
+  if (font_class != NULL) (*env)->DeleteGlobalRef(env, font_class);
+  font_class = NULL;
+  font_request = NULL;
+  font_vm = NULL;
+  if (font_attachment_key_ready) pthread_key_delete(font_attachment_key);
+  font_attachment_key_ready = false;
+}
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
   (void)reserved;
@@ -80,15 +142,10 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
   logging_class = global;
   logging_method = method;
   logging_vm = vm;
-  local = (*env)->FindClass(env, "ai/nuxie/sdk/runtime/SystemFontFallback");
-  if (local == NULL) return JNI_ERR;
-  font_class = (*env)->NewGlobalRef(env, local);
-  (*env)->DeleteLocalRef(env, local);
-  if (font_class == NULL) return JNI_ERR;
-  font_request = (*env)->GetStaticMethodID(env, font_class, "request", "(III)J");
-  if (font_request == NULL) return JNI_ERR;
-  font_vm = vm;
-  if (nux_font_set_fallback_proc(system_font_fallback, NULL) != NUX_STATUS_OK) return JNI_ERR;
+  font_exception_method = (*env)->GetStaticMethodID(env, global, "nativeFontException", "(Ljava/lang/Throwable;)V");
+  // An unavailable optional diagnostic must not disable the SDK either.
+  if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+  install_font_fallback(env, vm);
   return JNI_VERSION_1_6;
 }
 
@@ -96,7 +153,8 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *reserved) {
   (void)reserved;
   JNIEnv *env = NULL;
   // Replacement waits for any active font callback before class references die.
-  nux_font_set_fallback_proc(NULL, NULL);
+  if (font_hook_installed) nux_font_set_fallback_proc(NULL, NULL);
+  font_hook_installed = false;
   if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) == JNI_OK) {
     if (font_class != NULL) (*env)->DeleteGlobalRef(env, font_class);
     if (logging_class != NULL) (*env)->DeleteGlobalRef(env, logging_class);
@@ -106,6 +164,7 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *reserved) {
   font_vm = NULL;
   logging_class = NULL;
   logging_method = NULL;
+  font_exception_method = NULL;
   logging_vm = NULL;
 }
 
@@ -207,24 +266,64 @@ Java_ai_nuxie_sdk_runtime_SystemFontFallback_nativeWithWeight(JNIEnv *env, jobje
   return result;
 }
 
-#if defined(__ANDROID__)
-// Internal qualification seam: exercise the exact registered callback from a
-// pthread with no JVM attachment, including cold class loading and detachment.
-struct FontWorkerRequest { uint32_t character; uint32_t index; uint16_t weight; const struct NuxFont *font; };
+JNIEXPORT jboolean JNICALL
+Java_ai_nuxie_sdk_runtime_SystemFontFallback_nativeTestingEnabled(JNIEnv *env, jobject self) {
+  (void)env; (void)self;
+#if defined(NUXIE_FONT_TESTING)
+  return JNI_TRUE;
+#else
+  return JNI_FALSE;
+#endif
+}
+
+#if defined(__ANDROID__) && defined(NUXIE_FONT_TESTING)
+// These exports and switches do not exist in release native libraries.
+struct FontWorkerRequest {
+  uint32_t character, index;
+  uint16_t weight;
+  const struct NuxFont *font;
+  bool sequence;
+  jlong results[7];
+};
 static void *font_worker_request(void *context) {
-  struct FontWorkerRequest *request = context;
-  request->font = system_font_fallback(NULL, request->character, request->index, request->weight);
+  struct FontWorkerRequest *r = context;
+  if (!r->sequence) {
+    r->font = system_font_fallback(NULL, r->character, r->index, r->weight);
+  } else {
+    const uint32_t characters[] = { 0x1f525, 0x928, 0x928 };
+    for (int i = 0; i < 3; i++) {
+      r->results[i * 2] = as_handle((void *)system_font_fallback(NULL, characters[i], i, i == 0 ? 700 : 400));
+      r->results[i * 2 + 1] = forwarded_font_weight;
+    }
+    r->results[6] = font_attach_count;
+  }
   return NULL;
 }
 JNIEXPORT jlong JNICALL
-Java_ai_nuxie_sdk_runtime_SystemFontFallback_requestFromNativeThreadForTesting(
+Java_ai_nuxie_sdk_runtime_SystemFontFallback_nativeRequestFromThread(
     JNIEnv *env, jobject self, jint character, jint index, jint weight) {
   (void)env; (void)self;
-  struct FontWorkerRequest request = { (uint32_t)character, (uint32_t)index, (uint16_t)weight, NULL };
+  struct FontWorkerRequest request = { .character = character, .index = index, .weight = weight };
   pthread_t worker;
   if (pthread_create(&worker, NULL, font_worker_request, &request) != 0) return 0;
   if (pthread_join(worker, NULL) != 0) return 0;
   return as_handle((void *)request.font);
+}
+JNIEXPORT jlongArray JNICALL
+Java_ai_nuxie_sdk_runtime_SystemFontFallback_nativeSequenceFromThread(JNIEnv *env, jobject self) {
+  (void)self;
+  struct FontWorkerRequest request = { .sequence = true };
+  pthread_t worker;
+  if (pthread_create(&worker, NULL, font_worker_request, &request) != 0) return NULL;
+  if (pthread_join(worker, NULL) != 0) return NULL;
+  jlongArray result = (*env)->NewLongArray(env, 7);
+  if (result != NULL) (*env)->SetLongArrayRegion(env, result, 0, 7, request.results);
+  return result;
+}
+JNIEXPORT void JNICALL
+Java_ai_nuxie_sdk_runtime_SystemFontFallback_nativeSuppress(JNIEnv *env, jobject self, jboolean suppress) {
+  (void)env; (void)self;
+  atomic_store(&font_suppressed, suppress);
 }
 #endif
 

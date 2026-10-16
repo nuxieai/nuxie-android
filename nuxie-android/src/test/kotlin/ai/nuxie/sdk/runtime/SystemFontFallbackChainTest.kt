@@ -51,4 +51,57 @@ class SystemFontFallbackChainTest {
         assertTrue(SystemFontFallbackChain.matches("zh-Hans", Locale.CHINA))
         assertTrue(SystemFontFallbackChain.matches("ar", Locale.forLanguageTag("ar-EG")))
     }
+    @Test fun ignoresLegacyEmojiFamiliesUsingBothAndroidBooleanSpellings() {
+        // API 36 fonts.xml puts the ignored CBDT face before the active emoji face.
+        val xml = """<familyset>
+            <family lang="und-Zsye" ignore="true"><font weight="400" style="normal">NotoColorEmojiLegacy.ttf</font></family>
+            <family lang="und-Zsye" ignore="1"><font>NotoColorEmojiLegacy2.ttf</font></family>
+            <family lang="und-Zsye"><font weight="400" style="normal">NotoColorEmoji.ttf</font></family>
+        </familyset>"""
+        val families = SystemFontFallbackChain.parse(xml.byteInputStream())
+        assertEquals(listOf("NotoColorEmoji.ttf"), SystemFontFallbackChain.order(families, Locale.US) { it }.map { it.path })
+    }
+
+    @Test fun selectsTheNearestRegularFaceAmongExistingFiles() {
+        val families = SystemFontFallbackChain.parse("""<familyset><family>
+            <font weight="400">missing.ttf</font><font weight="500" index="2">existing.ttc</font>
+            <font weight="700">bold.ttf</font><font style="italic">italic.ttf</font>
+        </family></familyset>""".byteInputStream())
+        assertEquals(listOf(SystemFontFallbackChain.Face("existing.ttc", 2)),
+            SystemFontFallbackChain.order(families, Locale.US) { if (it == "missing.ttf") null else it })
+    }
+
+    @Test fun pathsAreCanonicalAndCannotTraverseOrFollowSymlinksOutsideTrustedRoots() {
+        val directory = java.nio.file.Files.createTempDirectory("nuxie-font-paths").toFile()
+        try {
+            val root = java.io.File(directory, "fonts").apply { mkdir() }
+            val font = java.io.File(root, "face.ttf").apply { writeText("font") }
+            val outside = java.io.File(directory, "outside.ttf").apply { writeText("outside") }
+            java.nio.file.Files.createSymbolicLink(java.io.File(root, "escape.ttf").toPath(), outside.toPath())
+            java.nio.file.Files.createSymbolicLink(java.io.File(root, "alias.ttf").toPath(), font.toPath())
+            fun resolve(name: String) = SystemFontFallbackChain.resolvePath(name, listOf(root))
+            assertEquals(font.canonicalPath, resolve("./face.ttf"))
+            assertEquals(font.canonicalPath, resolve("alias.ttf"))
+            assertEquals(font.canonicalPath, resolve(font.absolutePath))
+            assertNull(resolve("../outside.ttf"))
+            assertNull(resolve(java.io.File(root, "../outside.ttf").path))
+            assertNull(resolve("escape.ttf"))
+            assertNull(resolve(outside.absolutePath))
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test fun callbackExceptionsAreLoggedOncePerUnderlyingKind() {
+        class FontIoFailure : RuntimeException("private path")
+        class FontParserFailure : RuntimeException("private document")
+        org.robolectric.shadows.ShadowLog.clear()
+        ai.nuxie.sdk.logging.NuxieLog.configure(ai.nuxie.sdk.LogLevel.WARN)
+        repeat(3) {
+            ai.nuxie.sdk.logging.NuxieLog.nativeFontException(java.util.concurrent.ExecutionException(FontIoFailure()))
+            ai.nuxie.sdk.logging.NuxieLog.nativeFontException(FontParserFailure())
+        }
+        val logs = org.robolectric.shadows.ShadowLog.getLogsForTag("Nuxie").filter { it.msg.contains("System font fallback failed") }
+        assertEquals(2, logs.size)
+        assertTrue(logs.all { "redacted" in it.msg && "private path" !in it.msg && "private document" !in it.msg })
+    }
+
 }
