@@ -2,7 +2,9 @@ package ai.nuxie.sdk.presentation
 
 import android.app.Activity
 import android.app.Dialog
+import android.content.Context
 import android.content.res.ColorStateList
+import android.content.res.TypedArray
 import android.graphics.Color
 import android.graphics.Outline
 import android.graphics.Rect
@@ -13,9 +15,9 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
 import android.widget.FrameLayout
+import android.widget.ImageView
 import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
-import com.google.android.material.bottomsheet.BottomSheetDragHandleView
 import com.google.android.material.color.MaterialColors
 import com.google.android.material.shape.MaterialShapeDrawable
 import com.google.android.material.shape.ShapeAppearanceModel
@@ -54,9 +56,14 @@ internal class ExperienceNativeLayerWindow(
         }
     }
 
-    /** Shown, like the iPhone grabber, only when the sheet can be swiped closed (closedby any). */
-    internal val dragHandle: View? = sheetLook?.let { look ->
-        BottomSheetDragHandleView(look).apply { visibility = if (shell.dismissible) View.VISIBLE else View.GONE }
+    /**
+     * Shown, like the iPhone grabber, only when the sheet can be swiped closed (closedby any). It is a
+     * picture drawn from Material's drag handle style rather than BottomSheetDragHandleView, which
+     * becomes clickable whenever any accessibility service is on: over the screen it would take the
+     * screen's taps and collapse the sheet. This one takes no touches and has no actions.
+     */
+    internal val dragHandle: ImageView? = sheetLook?.let { look ->
+        materialDragHandle(look).apply { visibility = if (shell.dismissible) View.VISIBLE else View.GONE }
     }
 
     init {
@@ -126,6 +133,10 @@ internal class ExperienceNativeLayerWindow(
                     if (view.background !== sheetBackground) view.background = sheetBackground
                     if (view.layoutParams.height != height) view.layoutParams = view.layoutParams.apply { this.height = height }
                 }
+                // A sheet has one place: collapsing (an accessibility action, or any caller) lands
+                // exactly where it is expanded, so nothing can leave it half shown.
+                val placed = if (height > 0) height else availableHeight
+                if (sheet.behavior.peekHeight != placed) sheet.behavior.peekHeight = placed
             }
 
         }
@@ -142,6 +153,26 @@ internal class ExperienceNativeLayerWindow(
     }
 
     companion object {
+        /** Material 3's drag handle look (drawable, tint and spacing) on a plain, inert view. */
+        private fun materialDragHandle(look: Context): ImageView {
+            val style = com.google.android.material.R.style.Widget_Material3_BottomSheet_DragHandle
+            fun <T> styled(attr: Int, read: (TypedArray) -> T): T {
+                val values = look.obtainStyledAttributes(style, intArrayOf(attr))
+                try { return read(values) } finally { values.recycle() }
+            }
+            return ImageView(look).apply {
+                setImageDrawable(styled(androidx.appcompat.R.attr.srcCompat) { it.getDrawable(0) })
+                imageTintList = styled(androidx.appcompat.R.attr.tint) { it.getColorStateList(0) }
+                scaleType = ImageView.ScaleType.CENTER
+                minimumWidth = styled(android.R.attr.minWidth) { it.getDimensionPixelSize(0, 0) }
+                minimumHeight = styled(android.R.attr.minHeight) { it.getDimensionPixelSize(0, 0) }
+                setPadding(0, 0, 0, styled(android.R.attr.paddingBottom) { it.getDimensionPixelSize(0, 0) })
+                isClickable = false
+                isFocusable = false
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }
+        }
+
         fun windowBounds(activity: Activity): Rect {
             if (android.os.Build.VERSION.SDK_INT >= 30) return Rect(activity.windowManager.currentWindowMetrics.bounds)
             val bounds = Rect()
