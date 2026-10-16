@@ -121,7 +121,7 @@ internal object JourneyGrammar {
                 shape(optional = setOf("reason", "scope"))
                 action["reason"]?.let { text(it) }
                 action["scope"]?.let { scope ->
-                    require((scope as? JsonPrimitive)?.takeIf { it.isString }?.content == "all")
+                    if ((scope as? JsonPrimitive)?.takeIf { it.isString }?.content != "all") fail("dismiss scope")
                 }
             }
             "exit" -> { shape(optional = setOf("reason")); action["reason"]?.let { text(it) } }

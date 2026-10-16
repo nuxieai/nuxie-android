@@ -46,7 +46,8 @@ class ExperienceScreenTransitionPlanTest {
         for (scope in listOf(JsonPrimitive("top"), JsonPrimitive("layer"), JsonPrimitive(1), kotlinx.serialization.json.JsonNull)) {
             val result = runCatching { ai.nuxie.sdk.experiences.JourneyGrammar.action(
                 JsonObject(mapOf("type" to JsonPrimitive("dismiss"), "scope" to scope)), emptySet(), emptySet()) }
-            assertTrue("Unknown or non-string dismiss scope is refused", result.isFailure)
+            assertTrue("Unknown or non-string dismiss scope is refused like every other grammar check: ${result.exceptionOrNull()}",
+                result.exceptionOrNull() is ai.nuxie.sdk.experiences.JourneyReleaseAuthenticationException)
         }
     }
 
