@@ -18,7 +18,7 @@ concurrency:
 jobs:
   local-gate:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
       NUXIE_BAZEL_BATCH: "1"
       NUXIE_BAZEL_JOBS: "2"
