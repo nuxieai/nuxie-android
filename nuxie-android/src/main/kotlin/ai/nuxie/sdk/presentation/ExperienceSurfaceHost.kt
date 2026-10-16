@@ -410,7 +410,11 @@ internal class ExperienceSurfaceHost(
         while (pendingRuntimeWrites.isNotEmpty()) pendingRuntimeWrites.removeFirst().completion.complete(false)
     }
 
-    /** Reports accepted paths after applying the latest values; queued writes stay coalesced. */
+    /**
+     * Reports whether every path was accepted after applying the latest values;
+     * queued writes stay coalesced. An optional path the scene does not have,
+     * such as `screen/exitReason`, is skipped and counts as not accepted.
+     */
     fun updateRuntimeValues(values: Map<String, NuxieViewModelScalarValue>): kotlinx.coroutines.Deferred<Boolean> {
         val completion = CompletableDeferred<Boolean>()
         if (released.get() || failureReported.get()) return completion.apply { complete(false) }
@@ -535,8 +539,6 @@ internal class ExperienceSurfaceHost(
             // A screen without a default view model ignores the write without a
             // warning; the write's result still reports it as not accepted.
         }, onRejected = { path, error ->
-            // Reserved environment fields are optional in older releases. One
-            // rejected field must not prevent valid siblings or close the screen.
             if (reportedStatePaths.add(path)) Log.w(LOG_TAG, "Experience state path rejected", error, Log.sensitive("path", path))
         })
         return accepted
