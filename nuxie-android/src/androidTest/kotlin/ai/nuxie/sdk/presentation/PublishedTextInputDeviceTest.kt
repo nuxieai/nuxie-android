@@ -112,6 +112,133 @@ class PublishedTextInputDeviceTest {
         withTwoPublishedFields(true)
     }
 
+    /** Runs unchanged against main for the before images; no production fallback switch. */
+    @Test
+    @SdkSuppress(minSdkVersion = 31)
+    fun publishedFieldsRetainFallbackScriptsAndDrawInk() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val fixture = loadPublishedFixture(instrumentation, "runtime/published-two-fields")
+        val descriptor = fixture.release.descriptor
+        val screen = descriptor.getValue("render").jsonObject.getValue("screens").jsonArray.single().jsonObject
+        val inputs = ExperienceTextInput.forScreen(descriptor, screen.getValue("id").jsonPrimitive.content)
+        val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
+            SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val run = ExperienceRunValues()
+        val captured = AtomicReference<List<ExperienceNativeTextField>>(emptyList())
+        val failure = AtomicReference<Throwable?>()
+        val ready = CountDownLatch(1)
+        lateinit var overlay: ExperienceTextInputOverlay
+        lateinit var surface: ExperienceSurfaceHost
+        val size = ExperienceArtboardSize(393f, 852f)
+        val selections = java.util.concurrent.ConcurrentHashMap<Int, ai.nuxie.sdk.runtime.SystemFontFallbackChain.Face>()
+        ai.nuxie.sdk.runtime.SystemFontFallback.selectionObserver = { character, face -> selections[character] = face }
+        val baseline = InstrumentationRegistry.getArguments().getString("fontFallbackBaseline") == "true"
+        val prefix = "fallback-api${android.os.Build.VERSION.SDK_INT}-${if (baseline) "before" else "after"}"
+        try {
+            instrumentation.runOnMainSync {
+                surface = ExperienceSurfaceHost(activity, run.lane, artboardSize = size, runValues = run,
+                    listener = object : ExperienceSurfaceHost.Listener {
+                        override fun onFirstFrame() = Unit
+                        override fun onNativeTextFields(fields: List<ExperienceNativeTextField>): Map<Long, View> {
+                            captured.set(fields)
+                            overlay.updateNativeFields(fields)
+                            if (fields.size == 2) ready.countDown()
+                            return overlay.semanticViews()
+                        }
+                        override fun onFailure(error: ExperiencePresentationException) { failure.set(error) }
+                    })
+                overlay = ExperienceTextInputOverlay(activity, size, inputs, emptyMap(),
+                    nativeWriter = surface::writeNativeText, nativeNotification = surface::notifyNativeText,
+                    nativeEvent = surface::nativeTextEvent, nativeFocus = surface::beginNativeEditing)
+                activity.setContentView(android.widget.FrameLayout(activity).apply {
+                    setPadding(0, (80 * resources.displayMetrics.density).toInt(), 0, 0)
+                    addView(surface, android.widget.FrameLayout.LayoutParams(-1, -1))
+                    addView(overlay, android.widget.FrameLayout.LayoutParams(-1, -1))
+                })
+                surface.loadArtboard(fixture.riv.readBytes(), "input", descriptor, fixture.assets, textInputs = inputs)
+            }
+            assertTrue("Published fields must be presented", ready.await(30, TimeUnit.SECONDS))
+            fun waitFor(message: String, predicate: () -> Boolean) {
+                val deadline = SystemClock.uptimeMillis() + 10_000
+                while (!predicate() && failure.get() == null && SystemClock.uptimeMillis() < deadline) SystemClock.sleep(25)
+                assertNull(failure.get())
+                assertTrue(message, predicate())
+            }
+            lateinit var first: EditText
+            lateinit var second: EditText
+            instrumentation.runOnMainSync {
+                first = overlay.semanticViews().values.map { it as EditText }.single { it.text.toString() == "Ada" }
+                second = overlay.semanticViews().values.map { it as EditText }.single { it.text.toString() == "Hopper" }
+            }
+            for ((name, value) in listOf("japanese" to "日本語", "arabic" to "مرحبا", "hebrew" to "שלום",
+                "hindi" to "नमस्ते", "symbols" to "▷ ✶ ●", "emoji" to "😀")) {
+                instrumentation.runOnMainSync { assertTrue(first.requestFocus()) }
+                waitFor("First field must focus the runtime") { surface.riveFocusState.expectsKeyboardInput }
+                instrumentation.runOnMainSync {
+                    first.selectAll()
+                    checkNotNull(first.onCreateInputConnection(EditorInfo())).commitText("", 1)
+                    assertTrue(second.requestFocus())
+                }
+                waitFor("Empty field must reach the runtime") { captured.get().any { it.text.isEmpty() } }
+                SystemClock.sleep(300)
+                lateinit var empty: Bitmap
+                instrumentation.runOnMainSync { empty = checkNotNull(surface.bitmap) }
+                selections.clear()
+                instrumentation.runOnMainSync {
+                    assertTrue(first.requestFocus())
+                    assertTrue(checkNotNull(first.onCreateInputConnection(EditorInfo())).commitText(value, 1))
+                }
+                waitFor("Typed $name must reach the runtime") { captured.get().any { it.text == value } }
+                SystemClock.sleep(300)
+                saveFallbackScreenshot(instrumentation, "$prefix-$name-editing.png")
+                instrumentation.runOnMainSync { assertTrue(second.requestFocus()) }
+                waitFor("Focus transfer must preserve $name") { captured.get().any { it.text == value } }
+                instrumentation.runOnMainSync { assertEquals(value, first.text.toString()) }
+                SystemClock.sleep(300)
+                saveFallbackScreenshot(instrumentation, "$prefix-$name-committed.png")
+                try {
+                    instrumentation.runOnMainSync {
+                        assertFalse(first.hasFocus())
+                        assertTrue(second.hasFocus())
+                        val drawn = checkNotNull(surface.bitmap)
+                        try {
+                            // Native TextureView pixels only: the transparent Android editor
+                            // cannot satisfy this ink check. The empty control has identical focus.
+                            val left = first.left.coerceIn(0, drawn.width)
+                            val top = first.top.coerceIn(0, drawn.height)
+                            val right = first.right.coerceIn(left, drawn.width)
+                            val bottom = first.bottom.coerceIn(top, drawn.height)
+                            val changed = (top until bottom).sumOf { y -> (left until right).count { x ->
+                                drawn.getPixel(x, y) != empty.getPixel(x, y)
+                            } }
+                            android.util.Log.i("FontFallbackProof", "field $name changed=$changed baseline=$baseline selections=$selections")
+                            if (!baseline && name != "emoji") assertTrue("Committed $name must draw native ink", changed > 10)
+                            if (!baseline && name == "emoji") assertEquals("Pinned runtime leaves typed color emoji blank", 0, changed)
+                        } finally { drawn.recycle() }
+                    }
+                    if (!baseline && name in listOf("japanese", "arabic", "hebrew", "hindi", "emoji")) {
+                        assertTrue("Actual C hook must select a system face for $name", selections.containsKey(value.codePointAt(0)))
+                    }
+                } finally { empty.recycle() }
+            }
+        } finally {
+            ai.nuxie.sdk.runtime.SystemFontFallback.selectionObserver = null
+            instrumentation.runOnMainSync { overlay.close(); surface.release(); activity.finish() }
+            runBlocking { run.retire() }
+            assertTrue(run.lane.awaitQuiescence(30_000))
+        }
+    }
+
+    private fun saveFallbackScreenshot(instrumentation: Instrumentation, name: String) {
+        instrumentation.waitForIdleSync()
+        val bitmap = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
+        try {
+            File(instrumentation.targetContext.cacheDir, name).outputStream().use {
+                check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it))
+            }
+        } finally { bitmap.recycle() }
+    }
+
     private fun withTwoPublishedFields(realKeyboard: Boolean) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val fixture = loadPublishedFixture(instrumentation, "runtime/published-two-fields")

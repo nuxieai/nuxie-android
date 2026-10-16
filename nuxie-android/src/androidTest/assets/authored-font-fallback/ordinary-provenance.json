@@ -1,0 +1,73 @@
+{
+  "generatorSha256": "09180b12d3ade326520a3601136fb3ad9a30191a54e9b1cc9f234a5106aba2bc",
+  "scenes": [
+    {
+      "family": "Roboto",
+      "file": "ordinary-roboto.nux",
+      "sha256": "069dad7733430259353d825ab3ba846f8df09ff86c3de33bafb6267e2ab5a655",
+      "primarySourceSha256": "ea879cc16b566f2b07ddc73e2576080bf0ebe2c10198c561caac5cf3c7f3fdea",
+      "fonts": [
+        {
+          "family": "Roboto",
+          "weight": "400",
+          "style": "normal",
+          "authoredAssetId": 0,
+          "assetUniqueName": "font-roboto-400-normal-544ed647-0",
+          "location": "cdn",
+          "sha256": "ea879cc16b566f2b07ddc73e2576080bf0ebe2c10198c561caac5cf3c7f3fdea",
+          "sizeBytes": 22156,
+          "contentType": "font/ttf",
+          "format": "ttf",
+          "required": true
+        }
+      ]
+    }
+  ],
+  "width": 390,
+  "height": 844,
+  "fontSize": 64,
+  "rows": [
+    {
+      "name": "Japanese",
+      "text": "日本語",
+      "x": 24,
+      "y": 32
+    },
+    {
+      "name": "Arabic",
+      "text": "مرحبا",
+      "x": 24,
+      "y": 140
+    },
+    {
+      "name": "Hebrew",
+      "text": "שלום",
+      "x": 24,
+      "y": 248
+    },
+    {
+      "name": "Hindi",
+      "text": "नमस्ते",
+      "x": 24,
+      "y": 356
+    },
+    {
+      "name": "emoji",
+      "text": "😀",
+      "x": 24,
+      "y": 464
+    },
+    {
+      "name": "missing",
+      "text": "􏿿",
+      "x": 24,
+      "y": 572
+    },
+    {
+      "name": "Latin",
+      "text": "Ada",
+      "x": 24,
+      "y": 680
+    }
+  ]
+}
