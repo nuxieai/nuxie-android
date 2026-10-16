@@ -110,6 +110,50 @@ class ExperienceNativeLayerWindowTest {
         } finally { activity.finish() }
     }
 
+    @Test fun `drag handle stays inert with an accessibility service on and a collapse cannot move the sheet`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val accessibility = activity.getSystemService(android.view.accessibility.AccessibilityManager::class.java)
+        Shadows.shadowOf(accessibility).setEnabled(true)
+        try {
+            for (shell in listOf(
+                PresentationShell.Sheet(PresentationShell.Sheet.Detent.MEDIUM, true),
+                PresentationShell.Sheet(PresentationShell.Sheet.Detent.LARGE, true),
+                PresentationShell.Sheet(PresentationShell.Sheet.Detent.FIT_CONTENT, true),
+            )) {
+                val content = FrameLayout(activity)
+                var touches = 0
+                content.setOnTouchListener { _, _ -> touches++; true }
+                val window = ExperienceNativeLayerWindow(activity, content, shell) {}
+                try {
+                    window.setInputEnabled(true)
+                    window.updateContentHeight(152f)
+                    window.show()
+                    Shadows.shadowOf(Looper.getMainLooper()).idle()
+                    val handle = checkNotNull(window.dragHandle)
+                    assertEquals(android.view.View.VISIBLE, handle.visibility)
+                    assertFalse("The handle is a picture, not a control", handle.isClickable || handle.isFocusable)
+                    assertEquals(android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO, handle.importantForAccessibility)
+                    // A tap on the handle reaches the screen it is drawn over.
+                    val frame = handle.parent as android.view.ViewGroup
+                    assertTrue("The handle is laid out", handle.width > 0 && handle.height > 0)
+                    val x = handle.left + handle.width / 2f
+                    val y = handle.top + handle.height / 2f
+                    for (action in listOf(android.view.MotionEvent.ACTION_DOWN, android.view.MotionEvent.ACTION_UP)) {
+                        val event = android.view.MotionEvent.obtain(0, 0, action, x, y, 0)
+                        try { frame.dispatchTouchEvent(event) } finally { event.recycle() }
+                    }
+                    assertEquals("${shell.detent}: both touches reach the screen", 2, touches)
+                    // Collapsed and expanded are the same place, so no collapse can half show the sheet.
+                    val sheet = window.dialog.findViewById<android.view.View>(com.google.android.material.R.id.design_bottom_sheet)
+                    val placed = sheet.layoutParams.height.takeIf { it > 0 } ?: (sheet.parent as android.view.View).height
+                    assertTrue(placed > 0)
+                    assertEquals("${shell.detent}: peek height", placed,
+                        (window.dialog as com.google.android.material.bottomsheet.BottomSheetDialog).behavior.peekHeight)
+                } finally { window.retire() }
+            }
+        } finally { activity.finish() }
+    }
+
     @Test fun `content sheet waits caps updates and ignores retired measurement`() {
         val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
         val shell = PresentationShell.Sheet(PresentationShell.Sheet.Detent.FIT_CONTENT, true)
