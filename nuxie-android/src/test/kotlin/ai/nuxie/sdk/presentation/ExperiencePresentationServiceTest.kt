@@ -2361,6 +2361,8 @@ class ExperiencePresentationServiceTest {
             val batches = mutableListOf<JourneyScreenEmissionBatch>()
             val sharedValues = ExperienceRunValues()
             var heldNavigation: CompletableDeferred<Unit>? = null
+            var refuseClose = false
+            var raceNativeClose = false
             lateinit var service: ExperiencePresentationService
             class Host(val id: String) : PresentationScreenHandle {
                 var reason: CloseReason? = null
@@ -2376,8 +2378,20 @@ class ExperiencePresentationServiceTest {
                     }
                 }
                 override suspend fun dismissLayerFromJourney(): Boolean {
+                    if (refuseClose) return false
                     val content = checkNotNull(PresentationRegistry.resolve(id))
                     val lowerId = nativeLayers[nativeLayers.lastIndex - 1]
+                    if (raceNativeClose) {
+                        // A swipe closed this same layer first: the authored close finds nothing left.
+                        assertTrue(checkNotNull(content.closeLayer).invoke(object : PreparedLayerReveal {
+                            override suspend fun prepare() {
+                                PresentationRegistry.detach(id, this@Host)
+                                nativeLayers.removeAt(nativeLayers.lastIndex)
+                            }
+                            override fun activate() = Unit
+                        }))
+                        return false
+                    }
                     return checkNotNull(content.closeLayer).invoke(object : PreparedLayerReveal {
                         override val method = "journey"
                         override suspend fun prepare() {
@@ -2580,6 +2594,20 @@ class ExperiencePresentationServiceTest {
             heldNavigation = null
             navigate("screen_details", JsonObject(mapOf("type" to JsonPrimitive("modal"))))
             val owner = JourneyPresentationOwner("journey-1", "customer-1")
+            // A close that really fails is still a failure.
+            refuseClose = true
+            assertEquals(JourneyPresentationActionResult.Failed,
+                service.dispatchJourneyAction(owner, JsonObject(mapOf("type" to JsonPrimitive("dismiss"))), "refused"))
+            refuseClose = false
+            // An authored dismiss that loses the race to a swipe of the same layer is handled, so the
+            // Journey is not abandoned; the swipe's close is the one that happened.
+            val beforeRace = service.layerScreenIds()
+            raceNativeClose = true
+            assertEquals(JourneyPresentationActionResult.Handled,
+                service.dispatchJourneyAction(owner, JsonObject(mapOf("type" to JsonPrimitive("dismiss"))), "raced"))
+            raceNativeClose = false
+            assertEquals(beforeRace.dropLast(1), service.layerScreenIds())
+            navigate("screen_details", JsonObject(mapOf("type" to JsonPrimitive("modal"))))
             val closeAll = service.dispatchJourneyAction(owner,
                 JsonObject(mapOf("type" to JsonPrimitive("dismiss"), "scope" to JsonPrimitive("all"),
                     "reason" to JsonPrimitive("finished"))), "close-all")
