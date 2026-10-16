@@ -2804,7 +2804,7 @@ class PublishedTextInputDeviceTest {
                     }, onOutcome = { outcome ->
                         request.onOutcome(outcome)
                         terminalOutcomes.add(outcome)
-                    })
+                    }, transition = request.transition)
                 if (presentationNumber > 1) navigationPresented.countDown()
                 return JourneyPresentationResult.Shown
             }
