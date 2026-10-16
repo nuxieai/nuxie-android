@@ -80,6 +80,36 @@ class ExperienceNativeLayerWindowTest {
         } finally { window.retire(); activity.finish() }
     }
 
+    @Test fun `sheet drag handle follows closedby and draws over the screen without adding height`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        try {
+            for ((shell, shown) in listOf(
+                PresentationShell.Sheet(PresentationShell.Sheet.Detent.MEDIUM, true) to true,
+                PresentationShell.Sheet(PresentationShell.Sheet.Detent.FIT_CONTENT, true) to true,
+                PresentationShell.Sheet(PresentationShell.Sheet.Detent.LARGE, false) to false,
+            )) {
+                val content = FrameLayout(activity)
+                val window = ExperienceNativeLayerWindow(activity, content, shell) {}
+                try {
+                    window.setInputEnabled(true)
+                    window.updateContentHeight(152f)
+                    window.show()
+                    Shadows.shadowOf(Looper.getMainLooper()).idle()
+                    val handle = checkNotNull(window.dragHandle)
+                    assertEquals("closedby ${if (shell.dismissible) "any" else "none"}", shown, handle.visibility == android.view.View.VISIBLE)
+                    // The handle overlays the screen: both share one frame, and the screen fills it.
+                    assertSame(content.parent, handle.parent)
+                    assertEquals(android.view.ViewGroup.LayoutParams.MATCH_PARENT, content.layoutParams.height)
+                    val sheet = window.dialog.findViewById<android.view.View>(com.google.android.material.R.id.design_bottom_sheet)
+                    if (shell.fitsContent) assertEquals(152, sheet.layoutParams.height)
+                    assertTrue("The screen is clipped to the sheet's rounded top", (content.parent as android.view.View).clipToOutline)
+                } finally { window.retire() }
+            }
+            val fullScreen = ExperienceNativeLayerWindow(activity, FrameLayout(activity), PresentationShell.FullScreen(true)) {}
+            try { assertNull("Full-screen layers keep no sheet chrome", fullScreen.dragHandle) } finally { fullScreen.retire() }
+        } finally { activity.finish() }
+    }
+
     @Test fun `content sheet waits caps updates and ignores retired measurement`() {
         val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
         val shell = PresentationShell.Sheet(PresentationShell.Sheet.Detent.FIT_CONTENT, true)

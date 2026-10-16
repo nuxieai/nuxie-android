@@ -2,11 +2,23 @@ package ai.nuxie.sdk.presentation
 
 import android.app.Activity
 import android.app.Dialog
+import android.content.res.ColorStateList
+import android.graphics.Color
+import android.graphics.Outline
 import android.graphics.Rect
+import android.graphics.RectF
+import android.view.ContextThemeWrapper
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewOutlineProvider
+import android.widget.FrameLayout
 import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
+import com.google.android.material.bottomsheet.BottomSheetDragHandleView
+import com.google.android.material.color.MaterialColors
+import com.google.android.material.shape.MaterialShapeDrawable
+import com.google.android.material.shape.ShapeAppearanceModel
 
 /** Each modal owns a native window; the platform owns its scrim, animation and back handling. */
 internal class ExperienceNativeLayerWindow(
@@ -23,11 +35,35 @@ internal class ExperienceNativeLayerWindow(
     private var inputEnabled = false
     private val layoutListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateBounds() }
 
+    /**
+     * Material's current sheet look, drawn over the screen without adding space: the Material 3
+     * sheet shape (rounded top corners) and its drag handle. The window keeps the dialog theme
+     * whose geometry the sheet sizes are measured against; only these pieces use Material 3.
+     */
+    private val sheetLook = (shell as? PresentationShell.Sheet)?.let {
+        ContextThemeWrapper(activity, com.google.android.material.R.style.Theme_Material3_DayNight_BottomSheetDialog)
+    }
+    private val sheetShape: ShapeAppearanceModel? = sheetLook?.let {
+        ShapeAppearanceModel.builder(it, com.google.android.material.R.style.ShapeAppearance_Material3_Corner_ExtraLarge,
+            com.google.android.material.R.style.ShapeAppearanceOverlay_Material3_Corner_Top).build()
+    }
+    private val sheetBackground: MaterialShapeDrawable? = sheetShape?.let { shape ->
+        MaterialShapeDrawable(shape).apply {
+            fillColor = ColorStateList.valueOf(MaterialColors.getColor(checkNotNull(sheetLook),
+                com.google.android.material.R.attr.colorSurfaceContainerLow, Color.TRANSPARENT))
+        }
+    }
+
+    /** Shown, like the iPhone grabber, only when the sheet can be swiped closed (closedby any). */
+    internal val dragHandle: View? = sheetLook?.let { look ->
+        BottomSheetDragHandleView(look).apply { visibility = if (shell.dismissible) View.VISIBLE else View.GONE }
+    }
+
     init {
         dialog = when (shell) {
             is PresentationShell.Sheet -> {
                 BottomSheetDialog(activity, com.google.android.material.R.style.Theme_MaterialComponents_DayNight_BottomSheetDialog).apply {
-                    setContentView(content, ViewGroup.LayoutParams(-1, -1))
+                    setContentView(sheetContent(), ViewGroup.LayoutParams(-1, -1))
                     behavior.skipCollapsed = true
                 }
             }
@@ -37,6 +73,22 @@ internal class ExperienceNativeLayerWindow(
         }
         dialog.setOnDismissListener { if (!retired) onClosed() }
         activity.window.decorView.addOnLayoutChangeListener(layoutListener)
+    }
+
+    /** The screen fills the sheet and is clipped to its rounded top; the handle overlays it. */
+    private fun sheetContent(): View = FrameLayout(activity).apply {
+        val shape = checkNotNull(sheetShape)
+        addView(content, FrameLayout.LayoutParams(-1, -1))
+        dragHandle?.let { addView(it, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL)) }
+        outlineProvider = object : ViewOutlineProvider() {
+            override fun getOutline(view: View, outline: Outline) {
+                val bounds = RectF(0f, 0f, view.width.toFloat(), view.height.toFloat())
+                val radius = shape.topLeftCornerSize.getCornerSize(bounds)
+                // Extend below the bottom edge so only the top corners round.
+                outline.setRoundRect(0, 0, view.width, view.height + kotlin.math.ceil(radius).toInt(), radius)
+            }
+        }
+        clipToOutline = true
     }
 
     fun show() {
@@ -70,6 +122,8 @@ internal class ExperienceNativeLayerWindow(
                     } ?: ViewGroup.LayoutParams.MATCH_PARENT
                 }
                 panel?.let { view ->
+                    // The behavior installs its own square background on first layout; replace it once.
+                    if (view.background !== sheetBackground) view.background = sheetBackground
                     if (view.layoutParams.height != height) view.layoutParams = view.layoutParams.apply { this.height = height }
                 }
             }
