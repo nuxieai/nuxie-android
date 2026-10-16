@@ -43,6 +43,11 @@ jobs:
             ndk;29.0.14206865
             cmake;3.22.1
 
+      # The hosted image presets ANDROID_NDK_HOME to its own default NDK, which
+      # scripts/bazel/sdk.py would otherwise prefer over the pinned one.
+      - name: Use the pinned NDK
+        run: echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
