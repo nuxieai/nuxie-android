@@ -104,6 +104,8 @@ class PublishedParlaSheetDeviceTest {
                     assertEquals("The entire authored surface is reachable above system bars", sheet.height, bounds.height())
                     assertTrue(visibleArea.contains(bounds))
                     assertEquals(if (large) parent.height else parent.height / 2, sheet.height)
+                    // Like the iPhone grabber, the drag handle shows only when the sheet can be swiped closed.
+                    assertEquals("Drag handle for closedby ${if (large) "none" else "any"}", !large, window!!.dragHandle!!.isShown)
                     onScreen = screenRect(sheet)
                     // The visible rectangle is in the dialog window's coordinates; touches use the screen's.
                     android.util.Log.i("ParlaSheet", "sheet in window $bounds, on screen $onScreen")

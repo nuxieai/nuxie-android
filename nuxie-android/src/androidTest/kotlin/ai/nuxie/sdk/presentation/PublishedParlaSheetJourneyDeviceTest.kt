@@ -43,6 +43,7 @@ class PublishedParlaSheetJourneyDeviceTest {
         val offerLayers = run.checkpoint("offer", layers = 2) { layers ->
             assertEquals(PresentationShell.Sheet(PresentationShell.Sheet.Detent.MEDIUM, true), layers[1].prepared.shell)
         }
+        run.assertSheetChrome(offerLayers[1], handle = true)
         val lessonBaseline = run.content(run.lessonArea(offerLayers))
         val offerBaseline = run.content(checkNotNull(offerLayers[1].panel))
         val offerAppearances = offerLayers[1].appearances
@@ -54,6 +55,7 @@ class PublishedParlaSheetJourneyDeviceTest {
             assertTrue("Saved fits its content inside the space Offer leaves",
                 checkNotNull(layers[2].panel).height() < checkNotNull(layers[1].panel).height())
         }
+        run.assertSheetChrome(savedLayers[2], handle = true)
         assertTrue("Covering is not a hidden lifecycle edge", run.dismissed.isEmpty())
         // The covered screens keep their own layout while Saved is prepared and shown.
         val savedTop = checkNotNull(savedLayers[2].panel).top
@@ -96,6 +98,7 @@ class PublishedParlaSheetJourneyDeviceTest {
         val offerLayers = run.checkpoint("large offer", layers = 2) { layers ->
             assertEquals(PresentationShell.Sheet(PresentationShell.Sheet.Detent.LARGE, false), layers[1].prepared.shell)
         }
+        run.assertSheetChrome(offerLayers[1], handle = false)
         run.swipeDown(checkNotNull(offerLayers[1].panel))
         SystemClock.sleep(1_000)
         run.checkpoint("large offer after swipe", layers = 2, previous = offerLayers)
@@ -124,6 +127,8 @@ class PublishedParlaSheetJourneyDeviceTest {
         val panel: Rect?,
         val phase: String,
         val appearances: Double,
+        /** The sheet's drag handle on screen, or null when the layer shows none. */
+        val handle: Rect?,
     )
 
     internal class Run(
@@ -158,7 +163,8 @@ class PublishedParlaSheetJourneyDeviceTest {
                     val snapshot = prepared.screenLifecycle.snapshot()
                     LayerState(screen, prepared, window, screenRect(mounted.surface), panel?.let(::screenRect),
                         (snapshot.getValue("screen/phase") as NuxieViewModelScalarValue.StringValue).value,
-                        (snapshot.getValue("screen/appearances") as NuxieViewModelScalarValue.NumberValue).value)
+                        (snapshot.getValue("screen/appearances") as NuxieViewModelScalarValue.NumberValue).value,
+                        window?.dragHandle?.takeIf { panel != null && it.isShown }?.let(::screenRect))
                 }
             }
             return result
@@ -216,7 +222,10 @@ class PublishedParlaSheetJourneyDeviceTest {
          * or reflows changes which rows hold ink; one more scrim over it does not.
          */
         fun content(area: Rect, bottom: Int = area.bottom): BooleanArray {
-            val rect = Rect(area.left, area.top, area.right, minOf(area.bottom, bottom))
+            // Leave out the sheet's rounded corners: what shows through them depends on which
+            // window the system dims, not on the covered screen's own drawing.
+            val corner = (32 * density).toInt()
+            val rect = Rect(area.left + corner, area.top, area.right - corner, minOf(area.bottom, bottom))
             val deadline = SystemClock.uptimeMillis() + 5_000
             while (true) {
                 val shot = screenshot()
@@ -312,6 +321,36 @@ class PublishedParlaSheetJourneyDeviceTest {
                 }
                 found?.let { return it }
                 assertTrue("A rendered authored control in $area", SystemClock.uptimeMillis() < deadline)
+                SystemClock.sleep(200)
+            }
+        }
+
+        /**
+         * The sheet's own chrome, drawn over its screen: rounded top corners (the pixel just inside
+         * each corner shows the scrimmed layer beneath, not the screen) and, when the sheet can be
+         * swiped closed, a drag handle on its top edge.
+         */
+        fun assertSheetChrome(layer: LayerState, handle: Boolean) {
+            val panel = checkNotNull(layer.panel)
+            val name = layer.prepared.screenId
+            if (handle) {
+                val shown = checkNotNull(layer.handle) { "$name shows a drag handle" }
+                assertTrue("$name: the handle sits on the sheet's top edge", shown.top >= panel.top && shown.top < panel.top + 24 * density)
+                assertEquals("$name: the handle is centred", panel.centerX().toFloat(), shown.exactCenterX(), 2f)
+            } else {
+                assertNull("$name: closedby none shows no drag handle", layer.handle)
+            }
+            fun luminance(pixel: Int) = (Color.red(pixel) * 299 + Color.green(pixel) * 587 + Color.blue(pixel) * 114) / 1000
+            val inset = (2 * density).toInt()
+            val deadline = SystemClock.uptimeMillis() + 5_000
+            while (true) {
+                val shot = screenshot()
+                val inside = luminance(shot.getPixel(panel.left + panel.width() / 4, panel.top + inset))
+                val corners = listOf(panel.left + inset, panel.right - 1 - inset).map { luminance(shot.getPixel(it, panel.top + inset)) }
+                Log.i(TAG, "$name corners $corners inside $inside")
+                if (inside > 8 && corners.all { it * 10 < inside * 8 }) return
+                assertTrue("$name: top corners show the layer beneath (corners $corners, inside $inside)",
+                    SystemClock.uptimeMillis() < deadline)
                 SystemClock.sleep(200)
             }
         }
