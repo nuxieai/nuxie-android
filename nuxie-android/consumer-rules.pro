@@ -28,3 +28,6 @@
 -keep class ai.nuxie.sdk.runtime.NativeValueRule { *; }
 -keep class ai.nuxie.sdk.runtime.NativeRuleGroupMember { *; }
 -keep class ai.nuxie.sdk.runtime.NativeRuleGroup { *; }
+
+# The process font hook resolves this static callback before native shaping threads start.
+-keep class ai.nuxie.sdk.runtime.SystemFontFallback { *; }
