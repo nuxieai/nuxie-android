@@ -232,10 +232,14 @@ class PublishedTextInputDeviceTest {
                         try {
                             // Native TextureView pixels only: the transparent Android editor
                             // cannot satisfy this ink check. The empty control has identical focus.
-                            val left = first.left.coerceIn(0, drawn.width)
-                            val top = first.top.coerceIn(0, drawn.height)
-                            val right = first.right.coerceIn(left, drawn.width)
-                            val bottom = first.bottom.coerceIn(top, drawn.height)
+                            // The field's on-surface rectangle, including the placement
+                            // translations that its layout bounds do not include.
+                            val fieldAt = IntArray(2).also { first.getLocationInWindow(it) }
+                            val surfaceAt = IntArray(2).also { surface.getLocationInWindow(it) }
+                            val left = (fieldAt[0] - surfaceAt[0]).coerceIn(0, drawn.width)
+                            val top = (fieldAt[1] - surfaceAt[1]).coerceIn(0, drawn.height)
+                            val right = (left + first.width).coerceIn(left, drawn.width)
+                            val bottom = (top + first.height).coerceIn(top, drawn.height)
                             val changed = (top until bottom).sumOf { y -> (left until right).count { x ->
                                 drawn.getPixel(x, y) != empty.getPixel(x, y)
                             } }
@@ -250,13 +254,15 @@ class PublishedTextInputDeviceTest {
                             if (name == "emoji") {
                                 // Colour emoji, not text-colour outlines: count changed
                                 // pixels whose channels differ strongly (the field's text is grey).
-                                emojiInk = (top until bottom).sumOf { y -> (left until right).count { x ->
-                                    val pixel = drawn.getPixel(x, y)
+                                fun saturated(bitmap: Bitmap) = (top until bottom).sumOf { y -> (left until right).count { x ->
+                                    val pixel = bitmap.getPixel(x, y)
                                     val r = android.graphics.Color.red(pixel)
                                     val g = android.graphics.Color.green(pixel)
                                     val b = android.graphics.Color.blue(pixel)
                                     pixel != empty.getPixel(x, y) && maxOf(r, g, b) - minOf(r, g, b) > 80
                                 } }
+                                // Colour the missing-glyph control does not also add.
+                                emojiInk = saturated(drawn) - saturated(missing)
                                 android.util.Log.i("FontFallbackProof", "field emoji saturated=$emojiInk")
                             }
                         } finally { drawn.recycle() }

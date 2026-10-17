@@ -41,7 +41,7 @@
 -keep class ai.nuxie.sdk.runtime.NativeRuleGroup { *; }
 
 # The process font hook resolves this static callback before native shaping threads start.
--keep,allowoptimization class ai.nuxie.sdk.runtime.SystemFontFallback {
+-keep class ai.nuxie.sdk.runtime.SystemFontFallback {
     public static long request(int, int, int);
     public static void warm();
     private native long[] nativeProbe(java.lang.String, int);

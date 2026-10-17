@@ -197,7 +197,8 @@ class SystemFontFallbackDeviceTest {
                             android.util.Log.i("FontFallbackProof", "ordinary bound $name changed=$changed baseline=$baseline")
                             if (!baseline) {
                                 assertTrue("Ordinary $name adds native ink", changed > 10)
-                                assertFalse("Ordinary $name must differ from primary-font missing glyphs", drawn.contentEquals(missing))
+                                val differs = (drawn.indices step 4).count { at -> (0..2).any { drawn[at + it] != missing[at + it] } }
+                                assertTrue("Ordinary $name must differ from primary-font missing glyphs", differs > 10)
                                 assertTrue("Actual C hook must choose a face for ordinary $name",
                                     selections.containsKey(text.codePointAt(0)))
                             }
@@ -275,10 +276,10 @@ class SystemFontFallbackDeviceTest {
                             if (!baseline) {
                                 assertTrue("$name must draw native ink", ink(top) > 100)
                                 if (name != "latin") assertTrue("$name must differ from primary-font missing glyphs",
-                                    (top until top + 104).any { y -> (0 until 390 * 4).any { x ->
-                                        val at = y * 390 * 4 + x
-                                        frame.rgba[at] != missing[at]
-                                    } })
+                                    (top until top + 104).sumOf { y -> (0 until 390).count { x ->
+                                        val at = (y * 390 + x) * 4
+                                        (0..2).any { frame.rgba[at + it] != missing[at + it] }
+                                    } } > 10)
                             }
                         }
                         if (!baseline) {
