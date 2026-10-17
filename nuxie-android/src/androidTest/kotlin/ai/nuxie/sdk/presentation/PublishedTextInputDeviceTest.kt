@@ -119,7 +119,7 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 31)
-    fun publishedFieldColorEmojiAwaitsRuntimeRepin() = qualifyFallbackFields(true)
+    fun publishedFieldDrawsColorEmoji() = qualifyFallbackFields(true)
 
     private fun qualifyFallbackFields(emojiOnly: Boolean) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -240,22 +240,33 @@ class PublishedTextInputDeviceTest {
                                 drawn.getPixel(x, y) != empty.getPixel(x, y)
                             } }
                             android.util.Log.i("FontFallbackProof", "field $name changed=$changed baseline=$baseline selections=$selections")
-                            if (!baseline && name != "emoji") {
+                            if (!baseline) {
                                 assertTrue("Committed $name must draw native ink", changed > 10)
                                 val different = (top until bottom).sumOf { y -> (left until right).count { x ->
                                     drawn.getPixel(x, y) != missing.getPixel(x, y)
                                 } }
                                 assertTrue("Committed $name must differ from primary-font missing glyphs", different > 10)
                             }
-                            if (name == "emoji") emojiInk = changed
+                            if (name == "emoji") {
+                                // Colour emoji, not text-colour outlines: count changed
+                                // pixels whose channels differ strongly (the field's text is grey).
+                                emojiInk = (top until bottom).sumOf { y -> (left until right).count { x ->
+                                    val pixel = drawn.getPixel(x, y)
+                                    val r = android.graphics.Color.red(pixel)
+                                    val g = android.graphics.Color.green(pixel)
+                                    val b = android.graphics.Color.blue(pixel)
+                                    pixel != empty.getPixel(x, y) && maxOf(r, g, b) - minOf(r, g, b) > 80
+                                } }
+                                android.util.Log.i("FontFallbackProof", "field emoji saturated=$emojiInk")
+                            }
                         } finally { drawn.recycle() }
                     }
                     if (!baseline && name in listOf("japanese", "arabic", "hebrew", "hindi", "emoji")) {
                         assertTrue("Actual C hook must select a system face for $name", selections.containsKey(value.codePointAt(0)))
                     }
                 } finally { empty.recycle(); missing.recycle() }
-                if (!baseline && name == "emoji") org.junit.Assume.assumeTrue(
-                    "UNIV-4921: typed color emoji requires the pending runtime release and Android repin", emojiInk > 10)
+                if (!baseline && name == "emoji") assertTrue(
+                    "Typed emoji must draw in colour inside the field (UNIV-4921)", emojiInk > 200)
             }
         } finally {
             ai.nuxie.sdk.runtime.SystemFontFallback.suppressForTesting(false)
