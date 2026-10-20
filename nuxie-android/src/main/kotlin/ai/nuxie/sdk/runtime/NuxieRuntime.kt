@@ -329,10 +329,11 @@ internal class NuxieRuntimeArtboard internal constructor(
             .getOrDefault(false)
     } ?: false
 
-    fun fireDefaultTrigger(path: String) {
+    /** Writes the existing signed default in order: a confirmed save's kept values, then its trigger. */
+    fun confirmDefaultSave(writes: List<NativeViewModelWrite>) {
         owned.require()
-        requireNativeSuccess(native.mutateViewModel(checkNotNull(defaultViewModel).require(),
-            NativeViewModelWrite(NuxieViewModelMutationKind.FIRE_TRIGGER, path)), "confirm response save")
+        val model = checkNotNull(defaultViewModel).require()
+        for (write in writes) requireNativeSuccess(native.mutateViewModel(model, write), "confirm response save")
     }
 
     fun linkDefaultViewModel(property: String, value: NuxieRuntimeViewModelState): Boolean {

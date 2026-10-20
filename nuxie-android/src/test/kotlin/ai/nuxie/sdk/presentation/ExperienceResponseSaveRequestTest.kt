@@ -63,4 +63,40 @@ class ExperienceResponseSaveRequestTest {
         )))
         assertThrows(IllegalArgumentException::class.java) { ExperienceResponseSaveRequest.capture(duplicate, snapshot(), catalog, descriptor) }
     }
+
+    /** The screen's root with its `state`, holding what two awaited values keep. */
+    private fun kept() = NativeViewModelSnapshot(1, arrayOf(
+        NativeViewModelSnapshotInstance(1, 0), NativeViewModelSnapshotInstance(2, 1), NativeViewModelSnapshotInstance(3, 2),
+    ), arrayOf(
+        NativeViewModelSnapshotValue(1, 0, "responses:feedback", 9, byteArrayOf(), 2),
+        NativeViewModelSnapshotValue(1, 1, "state", 9, byteArrayOf(), 3),
+        NativeViewModelSnapshotValue(2, 0, "stars", 2, byteArrayOf(), 0, numberValue = 4f),
+        NativeViewModelSnapshotValue(2, 1, "isset:stars", 3, byteArrayOf(), 0, boolValue = true),
+        NativeViewModelSnapshotValue(3, 0, "await:rater:rated:1:stars", 2, byteArrayOf(), 0, numberValue = 4f),
+        NativeViewModelSnapshotValue(3, 1, "await:rater:rated:1:mood", 5, byteArrayOf(), 0, integerValue = 1),
+    ))
+
+    @Test fun `an awaited save keeps the values it names, and writes them back before its trigger`() {
+        val trigger = field("awaitTrigger", "state/save:rater:rated:1")
+        val valid = event(listOf(field("form", "feedback"), trigger,
+            field("keep:stars", "state/await:rater:rated:1:stars"), field("keep:mood", "state/await:rater:rated:1:mood")))
+        val captured = checkNotNull(ExperienceResponseSaveRequest.capture(valid, kept(), catalog, descriptor))
+        assertEquals(listOf("state/await:rater:rated:1:stars" to 4.0, "state/await:rater:rated:1:mood" to 1.0),
+            captured.kept.map { it.jsonObject.getValue("path").jsonPrimitive.content to it.jsonObject.getValue("value").jsonPrimitive.double })
+        val writes = ExperienceRunSnapshot(captured.kept).writes()
+        assertEquals(listOf(NuxieViewModelMutationKind.SET_NUMBER, NuxieViewModelMutationKind.SET_ENUM), writes.map { it.kind })
+        assertEquals(4f, writes[0].numberValue)
+        assertEquals(1L, writes[1].integerValue)
+        assertTrue(checkNotNull(ExperienceResponseSaveRequest.capture(event(listOf(field("form", "feedback"), trigger)),
+            kept(), catalog, descriptor)).kept.isEmpty())
+        // A kept value lives in the screen's state and needs an await to keep it for.
+        for (invalid in listOf(
+            listOf(field("form", "feedback"), trigger, field("keep:stars", "responses:feedback/stars")),
+            listOf(field("form", "feedback"), trigger, field("keep:stars", "state/await:one/stars")),
+            listOf(field("form", "feedback"), trigger, field("keep:stars", "state/await:absent:stars")),
+            listOf(field("form", "feedback"), field("keep:stars", "state/await:rater:rated:1:stars")),
+        )) assertThrows(IllegalArgumentException::class.java) {
+            ExperienceResponseSaveRequest.capture(event(invalid), kept(), catalog, descriptor)
+        }
+    }
 }
