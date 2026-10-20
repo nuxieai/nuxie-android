@@ -3174,7 +3174,10 @@ internal class JourneyService(
 
     private suspend fun scheduleNextWake() {
         cancelWake()
-        if (!foreground.get() || journal?.distinctId != identity.distinctId()) return
+        val distinctId = identity.distinctId()
+        // While a fetch holds the customer's events their waits do not
+        // resolve; the copy landing or the last fetch settling reschedules.
+        if (!foreground.get() || journal?.distinctId != distinctId || holdsEvents(distinctId)) return
         val upcoming = journal?.runs()?.asSequence()
             ?.filter { it.completion == null }
             ?.mapNotNull { run -> run.park?.let { park ->
