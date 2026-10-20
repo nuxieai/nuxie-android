@@ -4365,6 +4365,42 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun authenticatedRestoreFailsWhenTheServerRefusesAnyOfItsPurchases() = runTest {
+        for (authenticated in listOf(true, false)) {
+            val fixture = fixture(this)
+            val owner = fixture.core.identity.distinctId()
+            // Two purchases the server accepted for this customer before.
+            val first = retainedRestoreEvidence(owner)
+            val second = first.copy(purchaseToken = "second-token")
+            fixture.store.upsert(first)
+            fixture.store.upsert(second)
+            fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+                playPurchase(first.purchaseToken, obfuscatedAccountId = accountHash(owner)).copy(acknowledged = true),
+                playPurchase(second.purchaseToken, obfuscatedAccountId = accountHash(owner)).copy(acknowledged = true),
+            )
+            // The server accepts the first again and refuses the second.
+            fixture.synchronizer = {
+                if (it.purchaseToken == first.purchaseToken) {
+                    accepted(owner, it)
+                } else {
+                    PurchaseSyncOutcome.Rejected(refused = true)
+                }
+            }
+
+            val result = fixture.service.restorePurchases(
+                expectedOwnerDistinctId = owner.takeIf { authenticated },
+            )
+
+            if (authenticated) {
+                assertTrue("A signed Restore route advances only when every purchase is verified: $result", result is RestoreResult.Failed)
+            } else {
+                assertEquals("The host API reports a partial restore as restored", RestoreResult.Restored, result)
+            }
+            fixture.close()
+        }
+    }
+
+    @Test
     fun authenticatedRestoreWaitsForBackendVerification() = runTest {
         val fixture = fixture(this)
         val owner = fixture.core.identity.distinctId()
