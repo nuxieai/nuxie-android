@@ -187,6 +187,13 @@ internal class ProfileService(
         signals.trySend(Signal.Refresh(null))
     }
 
+    /** Queue a refresh; the result completes once it settles, or false if it cannot run. */
+    fun requestRefreshUntilSettled(): CompletableDeferred<Boolean> {
+        val done = CompletableDeferred<Boolean>()
+        if (signals.trySend(Signal.Refresh(done)).isFailure) done.complete(false)
+        return done
+    }
+
     /** Refresh and await the outcome (testing + transitions). */
     suspend fun refreshAndWait(): Boolean {
         val done = CompletableDeferred<Boolean>()
