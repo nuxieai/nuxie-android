@@ -6,6 +6,7 @@ import ai.nuxie.sdk.runtime.NuxieHostValue
 import ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome
 import ai.nuxie.sdk.runtime.NuxieRuntimeEvent
 import ai.nuxie.sdk.runtime.NuxieRuntimeEventPropertyValue
+import ai.nuxie.sdk.runtime.NuxieViewModelScalarValue
 import ai.nuxie.sdk.logging.NuxieLog as Log
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
@@ -259,28 +260,35 @@ internal class JourneyRuntimeEmissionCoordinator(
         var controlEventSource: JourneyRuntimeEventSource? = null
 
         outcome.events.forEach { event ->
-            val properties = event.propertiesMap(rejectDuplicates = event.name == GENERATED_INTERACTION_EVENT || controls.containsKey(event.name)) ?: run {
+            // The generated control press names its own source in its
+            // properties. An emit's source comes from the runtime's report
+            // alone: a value named screenId or instanceId is the author's
+            // (D2.54).
+            val generatedControl = event.name == GENERATED_INTERACTION_EVENT || controls.containsKey(event.name)
+            val properties = event.propertiesMap(rejectDuplicates = generatedControl) ?: run {
                 if (event.url.isNotEmpty() && event.name != GENERATED_INTERACTION_EVENT) {
                     links += OpenLink(event.url, event.target)
                 }
                 return@forEach
             }
-            val eventScreenId = properties.string("screenId", "screen_id") ?: screenId
-            val componentId = properties.string(
+            val eventScreenId = if (generatedControl) properties.string("screenId", "screen_id") ?: screenId else screenId
+            val componentId = if (generatedControl) properties.string(
                 "componentId",
                 "component_id",
                 "elementId",
                 "element_id",
-            )
-            val declaredInstanceId = properties.string("instanceId", "instance_id")
+            ) else null
+            val declaredInstanceId = if (generatedControl) properties.string("instanceId", "instance_id") else null
             val nativeId = event.sourceViewModelInstanceId
             val aliases = snapshot?.instanceAliases(nativeId).orEmpty()
             val instanceId = if (nativeId != 0L) aliases.singleOrNull() else declaredInstanceId
             val invalidSource = nativeId != 0L && (
                 snapshot == null || !snapshot.containsInstance(nativeId) || aliases.size > 1 ||
-                    event.properties.count { it.name == "instanceId" || it.name == "instance_id" } > 1 ||
-                    (properties.keys.any { it == "instanceId" || it == "instance_id" } &&
-                        (declaredInstanceId == null || declaredInstanceId != instanceId))
+                    (generatedControl && (
+                        event.properties.count { it.name == "instanceId" || it.name == "instance_id" } > 1 ||
+                            (properties.keys.any { it == "instanceId" || it == "instance_id" } &&
+                                (declaredInstanceId == null || declaredInstanceId != instanceId))
+                        ))
                 )
             if (event.url.isNotEmpty() && event.name != GENERATED_INTERACTION_EVENT) {
                 links += OpenLink(event.url, event.target, instanceId.takeUnless { invalidSource })
@@ -314,11 +322,11 @@ internal class JourneyRuntimeEmissionCoordinator(
                     }
                 }
                 event.name.isNotEmpty() -> {
-                    val payload = if (instanceId != null && nativeId != 0L && declaredInstanceId == null)
-                        JsonObject(properties + ("instanceId" to JsonPrimitive(instanceId))) else properties
-                    drafts += Draft.Event(event.name, payload)
+                    drafts += Draft.Event(event.name, event.emitValues(snapshot))
                     draftEventSources += eventSource
-                    if (source == null) {
+                    // A reserved event is dropped before publishing, so it
+                    // never names the batch's source.
+                    if (source == null && !event.name.startsWith('$')) {
                         source = JourneyScreenEmissionSource(
                             screenId = eventScreenId,
                             actionId = "runtime:$correlationId",
@@ -471,6 +479,31 @@ internal class JourneyRuntimeEmissionCoordinator(
                     actionId to behavior
                 }
                 .toMap()
+
+        /**
+         * An emit's values as the editor and Preview send them (the data
+         * plan's phone events step, D2.54): a literal property under its
+         * name, and for a text property named `$<field>`, the value at the
+         * path it names in the screen's root view model, as the step left
+         * it, under `<field>`. The emit's listener wrote that hidden value
+         * just before the event fired. No `$` property is sent itself, and
+         * the first of two properties with one name is kept.
+         */
+        fun NuxieRuntimeEvent.emitValues(snapshot: NuxieViewModelSnapshot?): JsonObject =
+            properties.distinctBy { it.name }.mapNotNull { property ->
+                if (!property.name.startsWith('$')) {
+                    return@mapNotNull property.value.toJsonElement()?.let { property.name to it }
+                }
+                val path = (property.value as? NuxieRuntimeEventPropertyValue.Bytes)?.value
+                    ?.let(::strictUtf8) ?: return@mapNotNull null
+                val value = when (val read = snapshot?.resolveScalar(path.split('/'))) {
+                    is NuxieViewModelScalarValue.StringValue -> JsonPrimitive(read.value)
+                    is NuxieViewModelScalarValue.NumberValue -> JsonPrimitive(read.value.toFloat())
+                    is NuxieViewModelScalarValue.BooleanValue -> JsonPrimitive(read.value)
+                    null -> return@mapNotNull null
+                }
+                property.name.drop(1) to value
+            }.toMap().let(::JsonObject)
 
         fun NuxieRuntimeEvent.propertiesMap(rejectDuplicates: Boolean): JsonObject? {
             val keys = properties.map { it.name }
