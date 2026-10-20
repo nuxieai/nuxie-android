@@ -787,6 +787,7 @@ internal class NuxieExperienceActivity : Activity() {
                 else {
                     if (newRoot) setContentView(shellView(contentRoot, prepared.shell))
                     layer.sheet = baseWindow
+                    if (screen.mounted?.isLayer == true) layer.sheet?.setBackHandler(::closeTopLayerOrExperience)
                 }
             }
             contentRoot.setBackgroundColor(prepared.clearColor)

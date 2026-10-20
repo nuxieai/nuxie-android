@@ -153,7 +153,8 @@ internal class ExperienceSurfaceHost(
         textInputs = layer.textInputsOnLane(screenId).associateBy(ExperienceTextInput::id)
     }
 
-    internal suspend fun applyLayerTransition(work: (ExperienceInteractiveLayer) -> Unit) {
+    internal suspend fun applyLayerTransition(presentationTimeoutMs: Long = 250,
+        work: (ExperienceInteractiveLayer) -> Unit): Boolean {
         val completion = CompletableDeferred<Unit>()
         val accepted = lane.enqueue {
             if (released.get() || failureReported.get()) completion.cancel()
@@ -163,7 +164,20 @@ internal class ExperienceSurfaceHost(
             }
         }
         if (!accepted) completion.cancel()
-        try { completion.await() } finally { completion.cancel() }
+        try {
+            if (kotlinx.coroutines.withTimeoutOrNull(presentationTimeoutMs) { completion.await(); true } == true) return true
+            // A healthy renderer may never present. Retire its submission before settling the
+            // phase on the lane, so later row mutations cannot race that submitted revision.
+            lane.call {
+                if (!completion.isCompleted) {
+                    check(retireSubmission()) { "Experience phase retirement failed" }
+                    drainTextWrites()
+                    settleHiddenTransitions(force = true)
+                }
+            }
+            completion.await()
+            return false
+        } finally { completion.cancel() }
     }
 
     internal suspend fun removeLayerRow(screenId: String, insertion: Pair<String, Int>? = null,
@@ -552,18 +566,24 @@ internal class ExperienceSurfaceHost(
         while (transitionWrites.isNotEmpty()) {
             val write = transitionWrites.removeFirst()
             if (!write.completion.isActive) continue
-            write.apply?.invoke()
-            runtimeValues.putAll(write.values)
-            if (write.apply == null) completeRuntimeWrites(applyRuntimeValues(runtimeValues))
-            runtimeValuesPending = false
-            presentedTransitionWrite = write
+            try {
+                write.apply?.invoke()
+                runtimeValues.putAll(write.values)
+                if (write.apply == null) completeRuntimeWrites(applyRuntimeValues(runtimeValues))
+                runtimeValuesPending = false
+                presentedTransitionWrite = write
+            } catch (error: Throwable) {
+                write.completion.completeExceptionally(error)
+                reportFailure(ExperiencePresentationException.Reason.HOST_FAILED,
+                    "Experience transition mutation failed", error)
+            }
             return
         }
     }
 
     /** A hidden screen settles its phase without presenting, matching the iOS zero-delta path. */
-    private fun settleHiddenTransitions() {
-        if (running || pendingPresentation) return
+    private fun settleHiddenTransitions(force: Boolean = false) {
+        if ((running && !force) || pendingPresentation) return
         if (released.get() || failureReported.get()) {
             cancelTransitionWrites()
             cancelRuntimeWrites()
@@ -587,7 +607,11 @@ internal class ExperienceSurfaceHost(
                 publishSteps()
             }
             presentedTransitionWrite = null
-            result.fold({ write.completion.complete(Unit) }, { write.completion.completeExceptionally(it) })
+            result.fold({ write.completion.complete(Unit) }, {
+                write.completion.completeExceptionally(it)
+                reportFailure(ExperiencePresentationException.Reason.HOST_FAILED, "Experience transition step failed", it)
+            })
+            if (result.isFailure) return
         }
     }
 
@@ -1434,6 +1458,7 @@ internal class ExperienceSurfaceHost(
                 if (!pendingPresentation) {
                     drainTextWrites()
                     applyNextTransitionWrite()
+                    if (failureReported.get()) return@enqueue
                     // A submitted frame owns its model revision through completion and semantic capture.
                     // Coalesce newer environment values and apply them before advancing the next frame.
                     if (runtimeValuesPending) {
@@ -1642,12 +1667,15 @@ internal class ExperienceSurfaceHost(
             pendingPresentation = false
             cancelTransitionWrites()
             cancelRuntimeWrites()
-            drainTextWrites() // Complete queued edits as failed before closing native handles.
-            applyRuntimeValues(finalValues)
+            var firstFailure = runCatching {
+                drainTextWrites() // Complete queued edits as failed before closing native handles.
+                if (!failureReported.get()) applyRuntimeValues(finalValues)
+            }.exceptionOrNull()
             // Capture on the original lane after input/exit writes and before releasing handles.
-            var firstFailure = retainedViewModel?.let { retained -> runCatching {
+            val snapshotFailure = retainedViewModel?.let { retained -> runCatching {
                 (viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot())?.let(::retainScreenValues)
             }.exceptionOrNull() }
+            snapshotFailure?.let { if (firstFailure == null) firstFailure = it else firstFailure?.addSuppressed(it) }
             attached = false
             val closeHandles = listOfNotNull(
                 window?.let { ownedWindow -> renderer?.let { active -> { active.detachSurface(ownedWindow); Unit } } },

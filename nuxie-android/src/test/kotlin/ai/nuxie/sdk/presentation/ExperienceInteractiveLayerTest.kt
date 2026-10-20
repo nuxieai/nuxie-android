@@ -216,13 +216,17 @@ class ExperienceInteractiveLayerTest {
     private fun string(value: String) = NuxieViewModelScalarValue.StringValue(value)
     private fun event(name: String, source: Long) = NativeRuntimeEvent(0, 0, name, "", "", 0f, emptyArray(), source)
 
-    private class RecordingNative : NuxieTypedRuntimeNative {
+    internal class RecordingNative : NuxieTypedRuntimeNative {
         val writes = mutableListOf<Pair<Long, NativeViewModelWrite>>()
         val trace = mutableListOf<String>()
         var events = emptyArray<NativeRuntimeEvent>()
         var players = 0
         var kind = 1
         var failStep = false
+        var failWrites = false
+        val freed = mutableListOf<String>()
+        var renders = 0
+        var detaches = 0
         var globals = false
         val globalBindings = mutableListOf<Pair<String, Long>>()
         var allocated = 0
@@ -260,6 +264,7 @@ class ExperienceInteractiveLayerTest {
             return NativeCallResult(0,NativeViewModelSnapshot(viewModelHandle,instances,values))
         }
         override fun mutateViewModel(viewModelHandle: Long, write: NativeViewModelWrite): Int {
+            if (failWrites) return 11
             writes += viewModelHandle to write
             if (write.kind == NuxieViewModelMutationKind.LIST_REMOVE) trace += "remove"
             return 0
@@ -273,10 +278,15 @@ class ExperienceInteractiveLayerTest {
             globalBindings += name.decodeToString() to viewModelHandle
             return 0
         }
-        override fun freePlayer(handle: Long) {}
-        override fun freeArtboard(handle: Long) {}
+        override fun attachRendererSurface(rendererHandle: Long, windowHandle: Long) = 0
+        override fun detachRendererSurface(rendererHandle: Long): Int { detaches++; return 0 }
+        override fun renderAndPresent(rendererHandle: Long, playerHandle: Long, windowHandle: Long, clearColor: Int, layoutScaleFactor: Float): Int { renders++; return 4 }
+        override fun releaseWindow(handle: Long) { freed += "window" }
+        override fun freeRenderer(handle: Long) { freed += "renderer" }
+        override fun freePlayer(handle: Long) { freed += "player" }
+        override fun freeArtboard(handle: Long) { freed += "artboard" }
         override fun freeFile(handle: Long) {}
-        override fun freeViewModel(handle: Long) = 0
+        override fun freeViewModel(handle: Long): Int { freed += "values:$handle"; return 0 }
         private fun prop(schema: Long,index: Long,name: String,kind: Int,ref: Long = -1,labels: Array<String> = emptyArray()) =
             NativeViewModelProperty(schema,index,name,kind,ref,labels)
         private fun value(owner: Long,name: String,kind: Int,ref: Long = 0) =

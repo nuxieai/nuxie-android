@@ -405,7 +405,7 @@ internal class JourneyService(
     private val revokingCustomers = mutableSetOf<String>()
     private val foregroundReceiptResetCustomers = mutableSetOf<String>()
     private val directlyRoutedRunByEventId = ConcurrentHashMap<String, String>()
-    private val presentingRunIds = ConcurrentHashMap<String, Unit>()
+    private val presentingRunIds = ConcurrentHashMap<String, Int>()
     private val activePresentedRunIds = ConcurrentHashMap<String, Unit>()
     private val pendingPresentationPurchasePlacements = mutableMapOf<String, String>()
     private data class CommerceExecutionKey(val runId: String, val owner: String, val generation: Long)
@@ -2344,17 +2344,28 @@ internal class JourneyService(
     }
 
     /**
-     * An upper layer's authored close reports the closing screen's dismissal and the reveal
-     * beneath it while this route waits for the close. Like presentScreen's callbacks, those
+     * An upper layer's authored close or native Back reports dismissal and reveal while
+     * presentation waits for those callbacks. Like presentScreen's callbacks, those
      * reports are handled under the presentation callback lock with deferred continuation,
      * never queued on this worker behind the route that is waiting for them.
      */
     private suspend inline fun <T> withNestedPresentationCallbacks(runId: String, nested: Boolean, block: () -> T): T {
-        val marked = nested && presentingRunIds.putIfAbsent(runId, Unit) == null
+        if (nested) beginPresentationCallbacks(runId)
         try {
             return block()
         } finally {
-            if (marked) presentingRunIds.remove(runId)
+            if (nested) endPresentationCallbacks(runId)
+        }
+    }
+
+    private fun beginPresentationCallbacks(runId: String) {
+        synchronized(presentingRunIds) { presentingRunIds[runId] = (presentingRunIds[runId] ?: 0) + 1 }
+    }
+
+    private fun endPresentationCallbacks(runId: String) {
+        synchronized(presentingRunIds) {
+            val depth = presentingRunIds[runId] ?: return
+            if (depth == 1) presentingRunIds.remove(runId) else presentingRunIds[runId] = depth - 1
         }
     }
 
@@ -2376,7 +2387,7 @@ internal class JourneyService(
             return null
         }
         val runId = run.id
-        presentingRunIds[runId] = Unit
+        beginPresentationCallbacks(runId)
         val result = try {
             presentation.present(
                 JourneyPresentationRequest(
@@ -2392,6 +2403,7 @@ internal class JourneyService(
                     canPresent = canPresent,
                     nextBatchSequence = run.nextPresentationBatchSequence,
                     nextEmissionSequence = run.nextPresentationEmissionSequence,
+                    withPresentationCallbacks = { work -> withNestedPresentationCallbacks(runId, true) { work() } },
                     onScreenChanged = { changedScreenId ->
                         handlePresentationScreenChanged(
                             runId = runId,
@@ -2457,7 +2469,7 @@ internal class JourneyService(
         } catch (_: Exception) {
             JourneyPresentationResult.Failed
         } finally {
-            presentingRunIds.remove(runId)
+            endPresentationCallbacks(runId)
             reservation?.close()
         }
         return PresentedScreen(run, result)
