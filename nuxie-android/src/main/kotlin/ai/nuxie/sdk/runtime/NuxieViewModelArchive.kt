@@ -40,7 +40,7 @@ internal class NuxieViewModelArchive private constructor(
     fun restore(
         native: NuxieTypedRuntimeNative,
         file: NuxieRuntimeFile,
-        artboard: NuxieRuntimeArtboard,
+        artboard: NuxieRuntimeArtboard?,
     ): NuxieRuntimeViewModelState {
         val catalog = value(native.viewModelCatalog(file.requireHandle()), "read retained graph catalog").toViewModelCatalog()
         val handles = linkedMapOf<Long, Long>()
@@ -55,7 +55,7 @@ internal class NuxieViewModelArchive private constructor(
                 require(schema != null && instance.schemaName != null && schema.name == instance.schemaName) {
                     "Retained view-model schema does not match this release"
                 }
-                val handle = if (instance.id == rootId) value(native.newDefaultViewModel(artboard.requireHandle()), "create retained root")
+                val handle = if (instance.id == rootId && artboard != null) value(native.newDefaultViewModel(artboard.requireHandle()), "create retained root")
                     else value(native.newViewModel(file.requireHandle(), instance.schemaIndex, null), "create retained child")
                 handles[instance.id] = handle
                 require(value(native.viewModelRootSchemaIndex(handle), "check retained schema") == instance.schemaIndex.toLong())
@@ -110,8 +110,10 @@ internal class NuxieViewModelArchive private constructor(
                 }
             }
             val root = handles.getValue(rootId)
-            val status = native.bindViewModel(artboard.requireHandle(), root)
-            check(status == STATUS_OK) { "Bind retained view model failed: $status" }
+            if (artboard != null) {
+                val status = native.bindViewModel(artboard.requireHandle(), root)
+                check(status == STATUS_OK) { "Bind retained view model failed: $status" }
+            }
             val newIds = handles.mapValues { (_, handle) -> value(native.snapshotViewModel(handle), "identify restored graph").rootInstanceId }
             return NuxieRuntimeViewModelState(root, handles.filterKeys { it != rootId }.values.toList(), native, catalog,
                 instances.single { it.id == rootId }.schemaIndex, aliases.mapValues { (_, old) -> newIds.getValue(old) },

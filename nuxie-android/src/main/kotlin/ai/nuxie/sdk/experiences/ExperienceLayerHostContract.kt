@@ -34,6 +34,9 @@ internal object ExperienceLayerHostContract {
 
     fun host(render: JsonObject): Host? = render["layerHost"]?.let(::readHost)
 
+    fun isEnabled(descriptor: JsonObject?): Boolean =
+        (descriptor?.get("render") as? JsonObject)?.let(::host) != null
+
     fun readHost(value: JsonElement): Host {
         val host = exact(value, setOf("artboardName", "list"))
         return Host(id(host["artboardName"], 256), oneOf(host["list"], "screens"))

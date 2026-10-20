@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.experiences.ExperienceLayerHostContract
 import ai.nuxie.sdk.experiences.JourneyReleaseValuePolicy
 import ai.nuxie.sdk.runtime.NuxieFocusInput
 import ai.nuxie.sdk.runtime.NuxieFocusState
@@ -95,6 +96,9 @@ internal class ExperienceSurfaceHost(
             viewModelSnapshot: NuxieViewModelSnapshot?,
             saves: List<ExperienceResponseSaveRequest>,
         ) {}
+        fun onLayerRuntimeStep(screenId: String, outcome: NuxiePlayerStepOutcome, correlationId: ULong,
+            snapshot: NuxieViewModelSnapshot, saves: List<ExperienceResponseSaveRequest>) {}
+        fun onLayerRuntimeEvent(screenId: String, event: NuxieRuntimeEvent, snapshot: NuxieViewModelSnapshot) {}
         fun onFailure(error: ExperiencePresentationException)
         fun onRuntimeEvent(event: NuxieRuntimeEvent, viewModelSnapshot: NuxieViewModelSnapshot?) {}
         /** UI-thread geometry update, after its frame has been presented. */
@@ -114,6 +118,83 @@ internal class ExperienceSurfaceHost(
     private var renderer: NuxieAndroidVulkanRenderer? = null
     private var window: NuxieRuntimeWindow? = null
     private var player: NuxieRuntimePlayer? = null
+    private var interactiveLayer: ExperienceInteractiveLayer? = null
+    private var activeRowId: String? = null
+    private val layerRetainedValues = mutableMapOf<String, java.util.concurrent.atomic.AtomicReference<NuxieViewModelSnapshot?>>()
+
+    /** Native mutations wait until this surface has delivered its submitted revision. */
+    internal suspend fun <T> layerOperation(work: (ExperienceInteractiveLayer) -> T): T {
+        val completion = CompletableDeferred<T>()
+        val accepted = lane.enqueue {
+            pendingTextWrites.addLast {
+                try {
+                    check(!released.get() && !failureReported.get()) { "Layer surface is unavailable" }
+                    completion.complete(work(checkNotNull(interactiveLayer)))
+                } catch (error: Throwable) { completion.completeExceptionally(error) }
+            }
+            drainTextWrites()
+        }
+        if (!accepted) completion.cancel()
+        return completion.await()
+    }
+
+    internal suspend fun prepareLayerRow(prepared: PreparedPresentation) = layerOperation { layer ->
+        val id = checkNotNull(prepared.screenId)
+        layer.prepareOnLane(id, projection = prepared.viewModelProjection, snapshot = prepared.retainedViewModel.get())
+        layerRetainedValues[id] = prepared.retainedViewModel
+        layer.applyRuntimeValuesOnLane(id, runtimeValues.filterKeys {
+            it == "fontScale" || it == "env/reduceMotion" || it.startsWith("safeArea/")
+        } + prepared.commerceValues.get())
+    }
+
+    internal suspend fun selectLayerRow(screenId: String) = layerOperation { layer ->
+        activeRowId = screenId
+        viewModelState = layer.valuesOnLane(screenId)
+        textInputs = layer.textInputsOnLane(screenId).associateBy(ExperienceTextInput::id)
+    }
+
+    internal suspend fun applyLayerTransition(work: (ExperienceInteractiveLayer) -> Unit) {
+        val completion = CompletableDeferred<Unit>()
+        val accepted = lane.enqueue {
+            if (released.get() || failureReported.get()) completion.cancel()
+            else {
+                transitionWrites.addLast(TransitionWrite(emptyMap(), completion) { work(checkNotNull(interactiveLayer)) })
+                settleHiddenTransitions()
+            }
+        }
+        if (!accepted) completion.cancel()
+        try { completion.await() } finally { completion.cancel() }
+    }
+
+    internal suspend fun removeLayerRow(screenId: String, insertion: Pair<String, Int>? = null,
+        waiters: List<Pair<String, kotlinx.coroutines.Deferred<Unit>>> = emptyList()) = layerOperation { layer ->
+        waiters.forEach { (id, waiter) -> layer.removeCompletionOnLane(id, waiter) }
+        insertion?.let { layer.insertOnLane(it.first, it.second) }
+        val correlation = nextCorrelationId++
+        captureLayerStep(layer.removeOnLane(screenId, correlation))
+        publishSteps()
+    }
+
+    internal fun queueLayerPhases(phases: List<Pair<String, ExperienceScreenLifecycle.Phase>>,
+        reason: ExperienceScreenLifecycle.ExitReason = ExperienceScreenLifecycle.ExitReason.NONE) {
+        lane.enqueue {
+            pendingTextWrites.addLast {
+                if (!released.get() && !failureReported.get()) interactiveLayer?.setPhasesOnLane(phases, exitReason = reason)
+            }
+            drainTextWrites()
+        }
+    }
+
+    internal suspend fun restoreLayerRow(sourceId: String, targetId: String) = layerOperation { layer ->
+        if (sourceId != targetId) {
+            if (targetId in layer.mountedScreenIdsOnLane()) captureLayerStep(layer.removeOnLane(targetId, nextCorrelationId++))
+            if (sourceId !in layer.mountedScreenIdsOnLane()) layer.insertOnLane(sourceId, 0)
+            layer.setPhasesOnLane(listOf(targetId to ExperienceScreenLifecycle.Phase.HIDDEN,
+                sourceId to ExperienceScreenLifecycle.Phase.ACTIVE))
+        }
+        publishSteps()
+    }
+
     private var videoPlayback: ExperienceVideoPlayback? = null
     private var file: NuxieRuntimeFile? = null
     private var artboard: NuxieRuntimeArtboard? = null
@@ -279,7 +360,7 @@ internal class ExperienceSurfaceHost(
     private val acceptedNativeText = mutableMapOf<ExperienceTextFieldTarget, AcceptedNativeText>()
 
     private fun publishSemantics(active: NuxieRuntimePlayer, generation: Long, epoch: Long) {
-        if (!semanticsEnabled || epoch != semanticEpoch.get()) return
+        if (!semanticsEnabled || epoch != semanticEpoch.get() || (interactiveLayer != null && !sceneInputEnabled.get())) return
         val next = active.captureSemantics()
         val fields = emptyMap<String, NativeSemanticNode>()
         val nextCaptureId = nativeTextCaptureId + 1
@@ -344,13 +425,14 @@ internal class ExperienceSurfaceHost(
     private var pendingPresentation = false
     private val pendingTextWrites = ArrayDeque<() -> Unit>()
 
-    fun confirmResponseSave(trigger: String) {
+    fun confirmResponseSave(trigger: String, screenId: String? = null) {
         val generation = frameGeneration.get()
         lane.enqueue {
             pendingTextWrites.addLast {
                 if (!released.get() && !failureReported.get() && generation == frameGeneration.get()) {
                     try {
-                        viewModelState?.fireTrigger(trigger) ?: checkNotNull(artboard).fireDefaultTrigger(trigger)
+                        val row = screenId?.let { interactiveLayer?.valuesOnLane(it) } ?: viewModelState
+                        row?.fireTrigger(trigger) ?: checkNotNull(artboard).fireDefaultTrigger(trigger)
                         val correlationId = nextCorrelationId
                         nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
                         val outcome = stepAndRefreshFocus {
@@ -444,6 +526,7 @@ internal class ExperienceSurfaceHost(
     private data class TransitionWrite(
         val values: Map<String, NuxieViewModelScalarValue>,
         val completion: CompletableDeferred<Unit>,
+        val apply: (() -> Unit)? = null,
     )
     private val transitionWrites = ArrayDeque<TransitionWrite>()
     private var presentedTransitionWrite: TransitionWrite? = null
@@ -469,8 +552,9 @@ internal class ExperienceSurfaceHost(
         while (transitionWrites.isNotEmpty()) {
             val write = transitionWrites.removeFirst()
             if (!write.completion.isActive) continue
+            write.apply?.invoke()
             runtimeValues.putAll(write.values)
-            completeRuntimeWrites(applyRuntimeValues(runtimeValues))
+            if (write.apply == null) completeRuntimeWrites(applyRuntimeValues(runtimeValues))
             runtimeValuesPending = false
             presentedTransitionWrite = write
             return
@@ -515,6 +599,17 @@ internal class ExperienceSurfaceHost(
 
     private fun applyRuntimeValues(values: Map<String, NuxieViewModelScalarValue>): Set<String> {
         val boundArtboard = artboard ?: return emptySet()
+        interactiveLayer?.let { layer ->
+            val accepted = mutableSetOf<String>()
+            val common = values.filterKeys { it == "fontScale" || it == "env/reduceMotion" || it.startsWith("safeArea/") }
+            val rowValues = values - common.keys
+            for (id in layerRetainedValues.keys) {
+                accepted += layer.applyRuntimeValuesOnLane(id, common)
+            }
+            activeRowId?.let { accepted += layer.applyRuntimeValuesOnLane(it, rowValues) }
+            runtimeValues.keys.retainAll { it == "fontScale" || it == "env/reduceMotion" || it.startsWith("safeArea/") }
+            return accepted
+        }
         val accepted = mutableSetOf<String>()
         screenRuntimeValues.apply(values, write = { path, value ->
             val globalPath = when (path) {
@@ -597,6 +692,7 @@ internal class ExperienceSurfaceHost(
         viewModelProjection: NuxieViewModelListProjection? = null,
         textInputs: List<ExperienceTextInput> = emptyList(),
         retainedViewModel: java.util.concurrent.atomic.AtomicReference<NuxieViewModelSnapshot?>? = null,
+        layerScreen: PreparedPresentation? = null,
         onLoaded: ((Boolean) -> Unit)? = null,
     ) {
         retireSemantics()
@@ -605,7 +701,7 @@ internal class ExperienceSurfaceHost(
         enqueuePreparation(onLoaded) {
             saveDescriptor = descriptor
             val requirements = descriptor?.get("requirements") as? JsonObject
-            semanticsEnabled = (requirements?.get("requiredCapabilities") as? JsonArray).orEmpty()
+            semanticsEnabled = layerScreen != null || (requirements?.get("requiredCapabilities") as? JsonArray).orEmpty()
                 .any { (it as? JsonPrimitive)?.content == "experience-accessibility" } ||
                 textInputs.isNotEmpty()
             this.textInputs = textInputs.associateBy(ExperienceTextInput::id)
@@ -699,6 +795,36 @@ internal class ExperienceSurfaceHost(
                     "Runtime rejected the prepared Experience content",
                 )
                 onLoaded?.invoke(false)
+                return@enqueuePreparation
+            }
+            if (layerScreen != null) {
+                try {
+                    requireLayerPresentation(layerScreen.fitsContentHeight)
+                    val layer = ExperienceInteractiveLayer.openOnLane(lane, runtime, loadedFile,
+                        checkNotNull(descriptor), shared?.values)
+                    interactiveLayer = layer
+                    artboard = layer.artboard
+                    player = layer.player
+                    val id = checkNotNull(layerScreen.screenId)
+                    layer.prepareOnLane(id, projection = viewModelProjection, snapshot = layerScreen.retainedViewModel.get())
+                    layerRetainedValues[id] = layerScreen.retainedViewModel
+                    activeRowId = id
+                    viewModelState = layer.valuesOnLane(id)
+                    layer.insertOnLane(id, 0)
+                    layer.setPhasesOnLane(listOf(id to ExperienceScreenLifecycle.Phase.ENTERING))
+                    completeRuntimeWrites(applyRuntimeValues(runtimeValues))
+                    if (semanticsEnabled) layer.player.enableSemantics()
+                    if (videoBindings.isNotEmpty()) {
+                        videoPlayback = ExperienceVideoPlayback(context.applicationContext, layer.player, videoBindings, videoTargets,
+                            decoderPool = videoDecoderPool, initialViewport = ai.nuxie.sdk.runtime.VideoViewport(0f, 0f, 0f, 0f))
+                        videoPlayback?.setVisible(running)
+                    }
+                    initialPresentationSize?.let { size -> layer.player.setLayoutSize(size.width, size.height) }
+                    onLoaded?.invoke(true)
+                } catch (error: Throwable) {
+                    reportFailure(ExperiencePresentationException.Reason.PREPARATION_FAILED, "Experience layer preparation failed", error)
+                    onLoaded?.invoke(false)
+                }
                 return@enqueuePreparation
             }
             artboard = if (artboardName != null) {
@@ -1020,7 +1146,9 @@ internal class ExperienceSurfaceHost(
             discardFocusInput()
             lane.enqueue { pointerInput.reset() }
         }
-        if (!enabled) accessibility.withdraw() else accessibility.invalidateState()
+        if (!enabled) {
+            if (interactiveLayer != null) retireSemantics(preserveFocus = true) else accessibility.withdraw()
+        } else accessibility.invalidateState()
     }
 
     /** UI-thread visibility input; a paused but visible Activity remains active. */
@@ -1121,6 +1249,8 @@ internal class ExperienceSurfaceHost(
 
     private fun currentVideoViewport(layout: ExperienceSurfaceLayout): ai.nuxie.sdk.runtime.VideoViewport {
         val bounds = layoutBounds
+        if (interactiveLayer != null && bounds != null) return ai.nuxie.sdk.runtime.VideoViewport(
+            bounds.originX, bounds.originY, bounds.originX + bounds.width, bounds.originY + bounds.height)
         return ai.nuxie.sdk.runtime.VideoViewport.layout(layout.pixelWidth, layout.pixelHeight, layout.density,
             bounds?.originX ?: 0f, bounds?.originY ?: 0f)
     }
@@ -1251,12 +1381,15 @@ internal class ExperienceSurfaceHost(
     private fun publishSteps() {
         while (firstFrameComposed && unpublishedSteps.isNotEmpty()) {
             val step = unpublishedSteps.removeFirst()
-            listener?.onRuntimeStep(step.outcome, step.correlationId, step.viewModelSnapshot, step.saves)
+            if (step.screenId != null) listener?.onLayerRuntimeStep(step.screenId, step.outcome, step.correlationId,
+                checkNotNull(step.viewModelSnapshot), step.saves)
+            else listener?.onRuntimeStep(step.outcome, step.correlationId, step.viewModelSnapshot, step.saves)
             if (step.outcome.events.isNotEmpty()) {
                 post {
                     if (!released.get()) {
                         step.outcome.events.forEach {
-                            listener?.onRuntimeEvent(it, step.viewModelSnapshot)
+                            if (step.screenId != null) listener?.onLayerRuntimeEvent(step.screenId, it, checkNotNull(step.viewModelSnapshot))
+                            else listener?.onRuntimeEvent(it, step.viewModelSnapshot)
                         }
                     }
                 }
@@ -1387,7 +1520,7 @@ internal class ExperienceSurfaceHost(
                         return@enqueue
                     }
                     val viewModelSnapshot = if (
-                        textInputs.isNotEmpty() || outcome.events.isNotEmpty() || outcome.hasPublishableEffects()
+                        interactiveLayer != null || textInputs.isNotEmpty() || outcome.events.isNotEmpty() || outcome.hasPublishableEffects()
                     ) {
                         try {
                             captureStepSnapshot(outcome, correlationId)
@@ -1520,16 +1653,17 @@ internal class ExperienceSurfaceHost(
                 window?.let { ownedWindow -> renderer?.let { active -> { active.detachSurface(ownedWindow); Unit } } },
                 window?.let { it::close },
                 videoPlayback?.let { owner -> { owner.closeAfterRetirement(onMediaReleased) } } ?: onMediaReleased,
-                player?.let { it::close },
+                interactiveLayer?.let { it::closeOnLane } ?: player?.let { it::close },
                 presentationHeight::close,
                 environment?.let { it::close },
-                viewModelState?.let { it::close },
-                artboard?.let { it::close },
+                viewModelState?.takeIf { interactiveLayer == null }?.let { it::close },
+                artboard?.takeIf { interactiveLayer == null }?.let { it::close },
                 file?.takeIf { ownsRuntimeFile }?.let { it::close },
                 renderer?.takeIf { ownsRuntimeFile }?.let { it::close },
             )
             window = null
             player = null
+            interactiveLayer = null
             videoPlayback = null
             viewModelState = null
             environment = null
@@ -1561,6 +1695,7 @@ internal class ExperienceSurfaceHost(
         discardFocusInput()
         captionPublication.incrementAndGet()
         lane.enqueue {
+            interactiveLayer?.fail(cause ?: IllegalStateException(message))
             cancelTransitionWrites()
             cancelRuntimeWrites()
             videoPlayback?.setVisible(false)
@@ -1579,6 +1714,11 @@ internal class ExperienceSurfaceHost(
 
     /** Called once after each player step, before any later native writes. */
     private fun captureStepSnapshot(outcome: NuxiePlayerStepOutcome, correlationId: ULong): NuxieViewModelSnapshot? {
+        interactiveLayer?.let { layer ->
+            val step = layer.captureOnLane(outcome, correlationId)
+            captureLayerStep(step)
+            return step.rows[activeRowId]?.snapshot
+        }
         val captured = viewModelState?.captureSnapshot(outcome.viewModelChanges) ?: artboard?.captureDefaultSnapshot()
         val saves = mutableListOf<ExperienceResponseSaveRequest>()
         val descriptor = saveDescriptor
@@ -1595,11 +1735,28 @@ internal class ExperienceSurfaceHost(
         return captured?.values
     }
 
+    /** Keep the complete step, even when a removed row requested the advance. */
+    private fun captureLayerStep(step: ExperienceInteractiveLayer.Step) {
+        for ((id, row) in step.rows) {
+            layerRetainedValues[id]?.set(row.snapshot.withoutRootProperty("experience"))
+            val saves = saveDescriptor?.let { descriptor ->
+                ExperienceResponseSaveRequest.captureFrame(row.outcome, row.nativeSnapshot,
+                    checkNotNull(file).viewModelCatalog(), descriptor) { Log.w(LOG_TAG, "Rejected native response save") }
+            }.orEmpty()
+            if (row.outcome.hasPublishableEffects()) unpublishedSteps.addLast(PublishedStep(step.correlationId,
+                row.outcome, row.snapshot, saves, id))
+        }
+        if (step.unattributedEvents.isNotEmpty() || step.unattributedHostCommands.isNotEmpty()) {
+            Log.w(LOG_TAG, "Experience layer effects have no unique Screen owner")
+        }
+    }
+
     private data class PublishedStep(
         val correlationId: ULong,
         val outcome: NuxiePlayerStepOutcome,
         val viewModelSnapshot: NuxieViewModelSnapshot?,
         val saves: List<ExperienceResponseSaveRequest>,
+        val screenId: String? = null,
     )
 
     /**
@@ -1615,7 +1772,12 @@ internal class ExperienceSurfaceHost(
         }
     }
 
-    private companion object {
+    internal companion object {
+        internal fun requireLayerPresentation(fitContent: Boolean) {
+            if (fitContent) Log.w(LOG_TAG, "Layer host refuses fit-content: runtime cannot measure the active Screen row")
+            require(!fitContent) { "Layer host cannot measure the active Screen row for fit-content presentation" }
+        }
+
         const val LOG_TAG = "Nuxie"
         const val CLEAR_COLOR_OPAQUE_BLACK = 0xFF000000.toInt()
         const val NUX_STATUS_OK = 0

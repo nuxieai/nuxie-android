@@ -24,6 +24,19 @@ class NuxieViewModelArchiveTest {
     }
 
     @Test
+    fun `row restore preserves graph and aliases without binding the layer artboard`() {
+        val native = RecordingNative()
+        val state = archive().restore(native, NuxieRuntimeFile(7, native), null)
+        assertNull(native.boundRoot)
+        assertEquals(listOf(0, 1, 1), native.schemas.values.toList())
+        assertEquals(102L, native.writes.single { it.second.path == "selected" }.second.relatedViewModel)
+        assertEquals(listOf(102L, 101L), native.writes.filter { it.second.kind == NuxieViewModelMutationKind.LIST_INSERT }
+            .map { it.second.relatedViewModel })
+        state.close()
+        assertEquals(setOf(100L, 101L, 102L), native.freed.toSet())
+    }
+
+    @Test
     fun `capture owns its bytes and list membership`() {
         val bytes = "second".encodeToByteArray()
         val list = longArrayOf(20, 10)

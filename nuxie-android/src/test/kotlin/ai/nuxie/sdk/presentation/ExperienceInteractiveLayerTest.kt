@@ -149,6 +149,55 @@ class ExperienceInteractiveLayerTest {
         assertTrue(completion.isCompleted); assertTrue(waiters.isEmpty())
     }
 
+    @Test fun `unqualified values lists and triggers target each retained row own root`() = runBlocking {
+        withLayer { layer, native ->
+            layer.prepare("a"); layer.prepare("b")
+            native.writes.clear()
+            layer.applyValues(null, mapOf("keptValue" to NuxieViewModelScalarValue.NumberValue(42.0)))
+            assertEquals(listOf(200L, 300L), native.writes.map { it.first })
+            native.writes.clear()
+            layer.applyListOperation(null, NativeViewModelWrite(NuxieViewModelMutationKind.LIST_CLEAR, "items"))
+            assertEquals(listOf(200L, 300L), native.writes.map { it.first })
+            native.writes.clear()
+            layer.fireTrigger(null, "accepted")
+            assertEquals(listOf(200L, 300L), native.writes.map { it.first })
+            native.writes.clear()
+            layer.applyValues(null, mapOf("keptValue" to NuxieViewModelScalarValue.NumberValue(7.0)), "B")
+            assertEquals(listOf(300L), native.writes.map { it.first })
+        }
+    }
+
+    @Test fun `late removed row steps still return every mounted row effect exactly once`() = runBlocking {
+        withLayer { layer, native ->
+            layer.insertIncoming("a", Style.NONE, false)
+            layer.insertIncoming("b", Style.NONE, false)
+            native.events = arrayOf(event("leave", 200), event("arrive", 300))
+            val both = layer.stepFromRow("a")
+            assertEquals(listOf("leave"), both.rows.getValue("a").outcome.events.map { it.name })
+            assertEquals(listOf("arrive"), both.rows.getValue("b").outcome.events.map { it.name })
+            native.events = emptyArray()
+            layer.remove("a")
+            native.events = arrayOf(event("mounted", 300))
+            val late = layer.stepFromRow("a")
+            assertEquals(setOf("b"), late.rows.keys)
+            assertEquals(listOf("mounted"), late.rows.getValue("b").outcome.events.map { it.name })
+        }
+    }
+
+    @Test fun `first preparation initializes once and revisiting never replays a cached snapshot`() = runBlocking {
+        withLayer { layer, native ->
+            assertTrue(layer.prepare("a"))
+            layer.applyValues("a", mapOf("keptValue" to NuxieViewModelScalarValue.NumberValue(21.0)))
+            native.writes.clear()
+            assertFalse(layer.prepare("a"))
+            layer.insertIncoming("a", Style.NONE, false)
+            layer.remove("a")
+            layer.insertIncoming("a", Style.NONE, false)
+            assertEquals(1, native.allocated)
+            assertFalse(native.writes.any { it.second.path == "keptValue" })
+        }
+    }
+
     private suspend fun withLayer(native: RecordingNative = RecordingNative(), body: suspend (ExperienceInteractiveLayer, RecordingNative) -> Unit) {
         val lane = NuxieRuntimeLane()
         val file = NuxieRuntimeFile(1, native)
