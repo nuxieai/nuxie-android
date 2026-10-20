@@ -103,6 +103,25 @@ class PurchaseServiceTest {
         assertEquals("play-pro", store.loadBindings().single().storeProductId)
     }
 
+    // iOS parity (UNIV-5182): iOS built its purchase token from the service
+    // environment while the server used the key's mode, so a Sandbox purchase
+    // went unclaimed. Play's account ID carries no environment or key mode:
+    // it is the hex SHA-256 of the customer's distinct ID, which the server
+    // recomputes from the purchase's customer (sha256Hex(distinctId) in
+    // nuxie-dev's Google Play SDK purchase runtime).
+    @Test
+    fun playAccountIdIsTheHexSha256OfTheCustomersDistinctId() = runTest {
+        val fixture = fixture(this)
+        fixture.core.identity.setDistinctId("rider_5182")
+        fixture.billing.launchCode = BillingClient.BillingResponseCode.USER_CANCELED
+        runCurrent()
+        assertEquals(PurchaseResult.Cancelled, fixture.service.purchase(activity(), product(), null))
+        assertEquals(
+            "9713f2e17270f72c6370d1be6dc9d80cfeedeac119b304099a074e57049a3560",
+            fixture.billing.launched?.obfuscatedAccountId,
+        )
+    }
+
     @Test
     fun onlyThePlayBillingLaunchRunsOnMain() = runTest {
         val hostMain = AtomicReference<Thread>()
