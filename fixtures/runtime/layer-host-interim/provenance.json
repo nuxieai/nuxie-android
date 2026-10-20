@@ -1,0 +1,35 @@
+{
+  "sourceFixture": "fixtures/journeys/rendered-custom-transition",
+  "sourceScene": "fixtures/journeys/rendered-custom-transition/renders/sha256/15764042bd3f08c014154b6f67e537be5d5da227937656e2bb4acf57629980bf.nux",
+  "sourceSHA256": "15764042bd3f08c014154b6f67e537be5d5da227937656e2bb4acf57629980bf",
+  "sourceReleaseSHA256": "e5d99944aeb31dcc7c5739f5368dfd51c61ca0b8063c57c7c5994b0c27c98a86",
+  "runtimeDefinitions": "/Users/levi/dev/nuxie-dev/.claude/worktrees/epic-driscoll-f31072/third_party/nuxie-runtime/defs",
+  "script": "/Users/levi/dev/nuxie-handoff/recreation-loop/magic-move-sdk-playback/tools/make-interim-layer-host.py",
+  "scriptSHA256": "98e967216172c34a71d2c8196ce4f50e30e10057541aa509482afc97db6397f4",
+  "outputSHA256": "bfeff40c394ce1307e611ed312c96b297b661d92048d3ca5ed737bfca3e47103",
+  "outputBytes": 892571,
+  "interim": true,
+  "rowLayout": "stage 1 plain Node, authored row sizes, overlapping origins",
+  "diagnosticScenes": {
+    "removal-probe-quiet.riv": {
+      "sha256": "6657faf26a8b00660369a0b76024c049b108cd77669340f0fb1e6e6cbdec3c45",
+      "bytes": 429
+    },
+    "removal-probe-readback.riv": {
+      "sha256": "03b471786f99cdf2a9aee4a5299f583a2c55a93aeb3b1253a4d97d8860863d05",
+      "bytes": 459
+    },
+    "removal-probe-marker.riv": {
+      "sha256": "fb04c982a210723a2db32d16a70ca2e1d1d24c5e885335450940f124262240db",
+      "bytes": 457
+    },
+    "removal-probe-active.riv": {
+      "sha256": "c899e71efb8a615f125e9bd1c34b27bdb00aba112be6e1202375e04034670570",
+      "bytes": 487
+    }
+  },
+  "assets": {
+    "assets/sha256/3b95bcece1f913d2c1196cff9474497a2f4c0aa1745b1cd241cde5dd2817c82d.png": "3b95bcece1f913d2c1196cff9474497a2f4c0aa1745b1cd241cde5dd2817c82d",
+    "assets/sha256/4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf.ttf": "4989b125924991b90d05b2d16e0e388c48f7d5bb8b30539bbf9c755278d0ccaf"
+  }
+}
