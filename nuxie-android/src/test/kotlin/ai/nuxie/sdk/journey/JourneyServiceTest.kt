@@ -3293,6 +3293,126 @@ class JourneyServiceTest {
         assertAuthoredDismiss("purchase", failReportOnce = true)
     }
 
+    @Test fun `native Back dismissed route defers navigation beyond the layer mutex`() = runBlocking {
+        assertNativeBackLifecycleNavigation(SystemEventNames.SCREEN_DISMISSED)
+    }
+
+    @Test fun `native Back shown route defers navigation beyond the layer mutex`() = runBlocking {
+        assertNativeBackLifecycleNavigation(SystemEventNames.SCREEN_SHOWN)
+    }
+
+    private suspend fun assertNativeBackLifecycleNavigation(eventName: String) {
+        val identity = identity("customer")
+        val entry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(entry)
+        val authority = authority(entry)
+        catalog.commit("customer", catalog.prepare(profile(releaseEntry = entry), authority))
+        val baseline = requireNotNull(catalog.snapshot("customer"))
+        val original = baseline.releasesByDigest.values.single()
+        val leg = JsonObject(original.leg + mapOf(
+            "entryStepId" to JsonPrimitive("present"),
+            "steps" to Json.parseToJsonElement("""[
+                {"kind":"action","id":"present","action":{"type":"navigate","screenId":"screen_welcome"},"outlets":{}},
+                {"kind":"action","id":"forward","action":{"type":"navigate","screenId":"screen_details"},"outlets":{}},
+                {"kind":"action","id":"routed","action":{"type":"navigate","screenId":"screen_after"},"outlets":{}}
+            ]"""),
+            "routes" to Json.parseToJsonElement("""[
+                {"host":{"kind":"screen","screenId":"screen_welcome"},"eventName":"forward","entryStepId":"forward"},
+                {"host":{"kind":"screen","screenId":"${if (eventName == SystemEventNames.SCREEN_SHOWN) "screen_welcome" else "screen_details"}"},"eventName":"$eventName","entryStepId":"routed"}
+            ]"""),
+            "screens" to Json.parseToJsonElement("""[{"id":"screen_welcome"},{"id":"screen_details"},{"id":"screen_after"}]""")))
+        val render = original.descriptor.getValue("render").jsonObject
+        val screen = render.getValue("screens").jsonArray.first().jsonObject
+        val release = AuthenticatedJourneyRelease(JourneyReleaseEnvelope.authenticate(entry.getValue("envelope").toString().encodeToByteArray(),
+            mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(fixture.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP))), original.identity,
+            JsonObject(original.descriptor + mapOf("leg" to leg, "render" to JsonObject(render + mapOf(
+                "layerHost" to Json.parseToJsonElement("""{"artboardName":"LayerList","list":"screens"}"""),
+                "screens" to JsonArray(listOf("screen_welcome", "screen_details", "screen_after").map { JsonObject(screen + ("id" to JsonPrimitive(it))) }))))), null)
+        val snapshot = baseline.copy(releasesByDigest = mapOf(release.descriptorSha256 to release))
+        val launched = CopyOnWriteArrayList<String>()
+        val presentations = ExperiencePresentationService(emit = { _, _, _ -> }, scope = scope,
+            runtimeAvailable = { true }, currentDistinctId = identity::distinctId, launch = launched::add)
+        val contents = CopyOnWriteArrayList<ai.nuxie.sdk.presentation.PreparedPresentation>()
+        val nativeBackStarted = java.util.concurrent.atomic.AtomicBoolean()
+        val routed = CompletableDeferred<Unit>()
+        fun host(id: String): ai.nuxie.sdk.presentation.PresentationScreenHandle = object : ai.nuxie.sdk.presentation.PresentationScreenHandle {
+            var reason: CloseReason? = null
+            override fun requestCloseFromService(reason: CloseReason): Boolean { this.reason = reason; return true }
+            override fun screenCloseReason() = reason
+            override fun finishAfterServiceClose() { if (reason != CloseReason.JourneyNavigation) PresentationRegistry.detach(id, this) }
+            override suspend fun prepareNavigation(target: String, content: ai.nuxie.sdk.presentation.PreparedPresentation): ai.nuxie.sdk.presentation.PreparedScreenNavigation {
+                contents += content
+                val source = this
+                return object : ai.nuxie.sdk.presentation.PreparedScreenNavigation {
+                    override suspend fun awaitExit() = Unit
+                    override fun activate() {
+                        PresentationRegistry.attach(target, host(target)); PresentationRegistry.detach(id, source)
+                        PresentationRegistry.reportFirstFrame(target)
+                        if (nativeBackStarted.get() && content.screenId == "screen_after") routed.complete(Unit)
+                    }
+                    override suspend fun abort() = Unit
+                }
+            }
+        }
+        val requests = CopyOnWriteArrayList<JourneyPresentationRequest>()
+        val presenter = object : JourneyPresenting {
+            override fun reserve(ownerDistinctId: String) = presentations.reserveJourney(ownerDistinctId)
+            override fun owns(owner: JourneyPresentationOwner) = presentations.ownsJourney(owner)
+            override fun screenId(owner: JourneyPresentationOwner) = presentations.journeyScreenId(owner)
+            override suspend fun openLink(owner: JourneyPresentationOwner, link: JourneyLinkRequest) = null
+            override suspend fun present(request: JourneyPresentationRequest): JourneyPresentationResult {
+                requests += request
+                val file = File(directory, "back-scene").apply { writeBytes(byteArrayOf(1)) }
+                val showing = scope.async {
+                    presentations.presentJourney(request.fences, release, request.screenId, request.journeyId, request.ownerDistinctId, request.reservation,
+                        acquire = { AcquiredJourneyRelease(release.identity, mapOf("renders/main.riv" to file), file, protection = Closeable {}) },
+                        onScreenChanged = { id ->
+                            // Only the native revisit consumes this route, not the first reveal.
+                            if (!nativeBackStarted.get() && eventName == SystemEventNames.SCREEN_SHOWN) true else request.onScreenChanged(id)
+                        }, onScreenDismissed = request.onScreenDismissed, onEmissionBatch = request.onEmissionBatch,
+                        onPresentationRevealed = request.onPresentationRevealed, onOutcome = request.onOutcome,
+                        withPresentationCallbacks = request.withPresentationCallbacks)
+                }
+                if (requests.size == 1) {
+                    withTimeout(5_000) { while (launched.isEmpty()) kotlinx.coroutines.delay(10) }
+                    val id = launched.single()
+                    withTimeout(5_000) { while (PresentationRegistry.observe(id)?.value !is ai.nuxie.sdk.presentation.PresentationContentState.Ready) kotlinx.coroutines.delay(10) }
+                    PresentationRegistry.attach(id, host(id)); PresentationRegistry.reportFirstFrame(id)
+                }
+                showing.await()
+                return JourneyPresentationResult.Shown
+            }
+            override suspend fun dispatchAction(owner: JourneyPresentationOwner, action: JsonObject, effectId: String) = presentations.dispatchJourneyAction(owner, action, effectId)
+            override suspend fun shutdownOwnedBy(ownerDistinctId: String) = presentations.shutdownOwnedBy(ownerDistinctId)
+        }
+        val journeys = JourneyService(identity = identity, events = store, catalog = catalog, journalDirectory = directory, scope = scope,
+            capture = { _, _, _, _ -> true },
+            captureScreenEvent = { name, properties, id, distinctId, occurredAt, admission, origin ->
+                val accepted = admission?.commitIfCurrent { true } == true
+                StableEventCaptureResult(accepted, StoredEvent(id, name, JsonValueConverter.fromMap(properties), occurredAt, distinctId,
+                    journeyOrigin = origin).takeIf { accepted })
+            }, capturePresentationEvent = { name, properties, id, distinctId, occurredAt, admission ->
+                val accepted = admission?.commitIfCurrent { true } == true
+                StableEventCaptureResult(accepted, StoredEvent(id, name, JsonValueConverter.fromMap(properties), occurredAt, distinctId).takeIf { accepted })
+            }, presenter = presenter, nowMillis = { 100_000L })
+        try {
+            journeys.initialize(); journeys.onAppWillEnterForeground(); journeys.profileDidCommit(snapshot, authority, "customer", 1)
+            val first = requests.first()
+            assertEquals(JourneyEmissionBatchResult.ACCEPTED, first.onEmissionBatch(JourneyScreenEmissionBatch(first.journeyId,
+                0, "forward", JourneyScreenEmissionSource("screen_welcome", "forward"),
+                listOf(JourneyScreenEmission("forward-event", 0, 100_001L, "forward", JsonObject(emptyMap())))), null))
+            withTimeout(5_000) { while (contents.lastOrNull()?.screenId != "screen_details") kotlinx.coroutines.delay(10) }
+            nativeBackStarted.set(true)
+            assertTrue(checkNotNull(contents.last().requestBack).invoke())
+            assertTrue("Native Back must finish its lifecycle route without re-entering its held layer mutex",
+                kotlinx.coroutines.withTimeoutOrNull(2_000) { routed.await(); true } == true)
+        } finally {
+            scope.cancel()
+            scope.coroutineContext[kotlinx.coroutines.Job]?.join()
+            PresentationRegistry.clearForTesting()
+        }
+    }
+
     @Test fun `dismissed lifecycle route retains pending purchase`() = runBlocking {
         assertAuthoredDismiss("purchase", runtimeFrames = true, pendingClose = true, lifecycleRoute = SystemEventNames.SCREEN_DISMISSED)
     }

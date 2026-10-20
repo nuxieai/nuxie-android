@@ -4,9 +4,11 @@ import ai.nuxie.sdk.experiences.ExperienceLayerHostContract.Style
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.launch
 import org.junit.Assert.*
 import org.junit.Test
 
+@org.junit.runner.RunWith(org.robolectric.RobolectricTestRunner::class)
 class ExperienceLayerStepTest {
     private val plan = ExperienceScreenTransitionPlan.Custom("pair", 400, true, "leave", "arrive")
     private class Trace : ExperienceLayerStep.Operations {
@@ -94,6 +96,36 @@ class ExperienceLayerStepTest {
             ExperienceLayerStep.Exit(null, null), false, operations)
         assertTrue(trace.events.indexOf("remove") < trace.events.indexOf("hidden"))
         assertTrue(trace.enabled)
+    }
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test fun `unpresented halves expire without a second completion timer and restore input`() = kotlinx.coroutines.test.runTest {
+        ai.nuxie.sdk.logging.NuxieLog.configure(ai.nuxie.sdk.LogLevel.WARN)
+        for (style in listOf(Style.MAGIC_MOVE, Style.NONE)) {
+            org.robolectric.shadows.ShadowLog.clear()
+            val trace = Trace()
+            var presentations = 0
+            val operations = object : ExperienceLayerStep.Operations by trace {
+                override suspend fun present() { presentations++; kotlinx.coroutines.awaitCancellation() }
+                override suspend fun wait(completions: List<Deferred<Unit>>, milliseconds: Long) {
+                    fail("An expired presentation has already consumed this half's watchdog")
+                }
+            }
+            val step = launch {
+                ExperienceLayerStep.perform("a", "b", style, false, plan,
+                    ExperienceLayerStep.Exit(null, null), false, operations)
+            }
+            testScheduler.advanceTimeBy(plan.watchdogMs * 2 + 1); testScheduler.runCurrent()
+            try {
+                assertTrue("Starved presentation must release navigation", step.isCompleted)
+                assertTrue(trace.enabled)
+                assertTrue("active" in trace.events)
+                assertEquals(if (style == Style.NONE) 2 else 1, presentations)
+                assertEquals("One presentation warning per navigation", 1,
+                    org.robolectric.shadows.ShadowLog.getLogsForTag("ExperienceLayerStep").count {
+                        it.msg.contains("presentation watchdog expired")
+                    })
+            } finally { step.cancel(); step.join() }
+        }
     }
     @Test fun `layer history retains each forward pair truncates revisits and resolves skipping back`() {
         val push = kotlinx.serialization.json.Json.parseToJsonElement("""{"type":"push","transitionId":"pair"}""") as kotlinx.serialization.json.JsonObject
