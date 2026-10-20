@@ -12,6 +12,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
+import ai.nuxie.sdk.identity.CustomerKind
 
 class OptimisticFeatureProjectionTest {
     @Test
@@ -208,8 +209,9 @@ class OptimisticFeatureProjectionTest {
         val descriptor = descriptor(FeatureAllowance("pro", FeatureType.BOOLEAN))
         val candidates = listOf(
             evidence(owner = "customer-b").copy(purchaseToken = "foreign"),
-            evidence(owner = "customer-a").copy(purchaseToken = "synced", backendSyncedAtMillis = 2L),
-            evidence(owner = "customer-a").copy(purchaseToken = "revoked", revoked = true),
+            evidence(owner = "customer-a").copy(purchaseToken = "synced", ownerDistinctId = "customer-a"),
+            // Play stopped owning it: no send is owed, so nothing unlocks early.
+            evidence(owner = "customer-a").copy(purchaseToken = "revoked", pendingSend = null),
         )
 
         assertNull(
@@ -378,12 +380,12 @@ class OptimisticFeatureProjectionTest {
     @Test
     fun bindingAllowanceMatchesAccountAndFullProductIdentity() {
         val purchaseEvidence = evidence(owner = "customer-a").copy(
-            obfuscatedAccountId = "account-a",
+            obfuscatedAccountId = ACCOUNT_A,
             basePlanId = "annual",
             offerId = "launch",
         )
         val unrelated = StoredPurchaseBinding(
-            obfuscatedAccountId = "account-a",
+            obfuscatedAccountId = ACCOUNT_A,
             distinctId = "customer-a",
             storeProductId = "play-product",
             nuxieProductId = "other-nuxie-product",
@@ -415,10 +417,10 @@ class OptimisticFeatureProjectionTest {
     @Test
     fun purchaseTimeBindingAllowanceWinsOverALaterDescriptorUpdate() {
         val purchaseEvidence = evidence(owner = "customer-a").copy(
-            obfuscatedAccountId = "account-a",
+            obfuscatedAccountId = ACCOUNT_A,
         )
         val purchaseTimeBinding = StoredPurchaseBinding(
-            obfuscatedAccountId = "account-a",
+            obfuscatedAccountId = ACCOUNT_A,
             distinctId = "customer-a",
             storeProductId = "play-product",
             nuxieProductId = "nuxie-product",
@@ -447,13 +449,13 @@ class OptimisticFeatureProjectionTest {
     @Test
     fun tokenPinnedAllowanceWinsOverLaterBindingAndDescriptorValues() {
         val purchaseEvidence = evidence(owner = "customer-a").copy(
-            obfuscatedAccountId = "account-a",
+            obfuscatedAccountId = ACCOUNT_A,
             pinnedFeatureAllowances = listOf(
                 StoredFeatureAllowance("credits", FeatureType.METERED.name, false, 1.0),
             ),
         )
         val laterBinding = StoredPurchaseBinding(
-            obfuscatedAccountId = "account-a",
+            obfuscatedAccountId = ACCOUNT_A,
             distinctId = "customer-a",
             storeProductId = "play-product",
             nuxieProductId = "nuxie-product",
@@ -481,11 +483,11 @@ class OptimisticFeatureProjectionTest {
     @Test
     fun emptyTokenPinDoesNotGainLaterBindingOrDescriptorAllowances() {
         val purchaseEvidence = evidence(owner = "customer-a").copy(
-            obfuscatedAccountId = "account-a",
+            obfuscatedAccountId = ACCOUNT_A,
             pinnedFeatureAllowances = emptyList(),
         )
         val laterBinding = StoredPurchaseBinding(
-            obfuscatedAccountId = "account-a",
+            obfuscatedAccountId = ACCOUNT_A,
             distinctId = "customer-a",
             storeProductId = "play-product",
             nuxieProductId = "nuxie-product",
@@ -511,10 +513,10 @@ class OptimisticFeatureProjectionTest {
     @Test
     fun emptyPurchaseTimeBindingDoesNotGainALaterDescriptorAllowance() {
         val purchaseEvidence = evidence(owner = "customer-a").copy(
-            obfuscatedAccountId = "account-a",
+            obfuscatedAccountId = ACCOUNT_A,
         )
         val purchaseTimeBinding = StoredPurchaseBinding(
-            obfuscatedAccountId = "account-a",
+            obfuscatedAccountId = ACCOUNT_A,
             distinctId = "customer-a",
             storeProductId = "play-product",
             nuxieProductId = "nuxie-product",
@@ -537,14 +539,30 @@ class OptimisticFeatureProjectionTest {
         assertNull(projection)
     }
 
+    @Test
+    fun onlyAPurchaseNamingTheCustomersPlayAccountProjects() {
+        val descriptors = listOf(descriptor(FeatureAllowance("premium", FeatureType.BOOLEAN)))
+        fun projectionFor(account: String?) = optimisticFeatureProjection(
+            distinctId = "customer-a",
+            authorityScope = AUTHORITY_SCOPE,
+            evidence = listOf(evidence(owner = "customer-a").copy(obfuscatedAccountId = account)),
+            descriptors = descriptors,
+        )
+
+        assertEquals(setOf("premium"), projectionFor(ACCOUNT_A)?.keys)
+        assertNull("Play named no account", projectionFor(null))
+        assertNull("Play named another customer's account", projectionFor(playAccountId("customer-b")))
+    }
+
     private fun evidence(owner: String) = PurchaseEvidence(
         purchaseToken = "token-1",
         packageName = "com.example.app",
         storeProductIds = listOf("play-product"),
         nuxieProductId = "nuxie-product",
         purchaseState = StoredPurchaseState.PURCHASED,
-        syncAttributionDistinctId = owner,
-        ownerDistinctId = owner,
+        buyerDistinctId = owner,
+        pendingSend = PurchaseSend(PurchaseSyncReason.PURCHASE, owner, CustomerKind.ANONYMOUS),
+        obfuscatedAccountId = playAccountId(owner),
         acknowledged = false,
         firstSeenMillis = 1L,
         catalogResolved = true,
@@ -566,5 +584,7 @@ class OptimisticFeatureProjectionTest {
 
     private companion object {
         const val AUTHORITY_SCOPE = ProjectionFixtureAdapters.AUTHORITY_SCOPE
+        /** The Play account the SDK set at customer-a's checkout. */
+        val ACCOUNT_A = playAccountId("customer-a")
     }
 }

@@ -41,6 +41,7 @@ import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import ai.nuxie.sdk.identity.CustomerKind
 
 @RunWith(RobolectricTestRunner::class)
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -99,13 +100,13 @@ class PurchaseFeatureUseTest {
         assertTrue(fixture.transport.firstRequestStarted.await(5, TimeUnit.SECONDS))
 
         assertEquals(RestoreResult.NoPurchases, fixture.service.restorePurchases())
-        assertFalse(fixture.store.load().getValue("token-1").revoked)
+        assertNotNull("A claimed spend keeps its owed send", fixture.store.load().getValue("token-1").pendingSend)
 
         fixture.transport.releaseFirst.countDown()
         assertNotNull(use.await())
         val accepted = fixture.store.load().getValue("token-1")
         assertTrue(accepted.synced)
-        assertFalse(accepted.revoked)
+        assertFalse(accepted.refused)
         fixture.core.stop()
     }
 
@@ -188,7 +189,7 @@ class PurchaseFeatureUseTest {
 
     @Test
     fun inFlightFailedSyncIsAwaitedThenTheAtomicGateRuns() = runTest {
-        val fixture = syncFixture(PurchaseSyncOutcome.Rejected(permanent = false))
+        val fixture = syncFixture(PurchaseSyncOutcome.Rejected())
         val recovery = async { fixture.service.recover() }
         fixture.synchronizer.started.await()
 
@@ -216,7 +217,7 @@ class PurchaseFeatureUseTest {
 
     @Test
     fun foreignOwnerEvidenceIsNotEligible() = assertDisqualified(
-        evidence(ownerDistinctId = "customer-b"),
+        evidence(buyerDistinctId = "customer-b"),
     )
 
     @Test
@@ -226,12 +227,12 @@ class PurchaseFeatureUseTest {
 
     @Test
     fun revokedEvidenceIsNotEligible() = assertDisqualified(
-        evidence(revoked = true),
+        evidence(withdrawn = true),
     )
 
     @Test
     fun permanentlyRejectedEvidenceIsNotEligible() = assertDisqualified(
-        evidence(permanentlyRejected = true),
+        evidence(refused = true),
     )
 
     @Test
@@ -424,8 +425,8 @@ class PurchaseFeatureUseTest {
         core: NuxieCore,
         store: PurchaseEvidenceStore,
         capture: suspend (String, Map<String, Any?>, String, String) -> Boolean = { _, _, _, _ -> true },
-        synchronizer: PurchaseSynchronizer = PurchaseSynchronizer {
-            PurchaseSyncOutcome.Rejected(permanent = false)
+        synchronizer: PurchaseSynchronizer = PurchaseSynchronizer { _, _ ->
+            PurchaseSyncOutcome.Rejected()
         },
         billing: PlayBillingGateway = NoopBilling,
     ): PurchaseService {
@@ -437,6 +438,7 @@ class PurchaseFeatureUseTest {
             synchronizer = synchronizer,
             features = core.features,
             distinctId = core.identity::distinctId,
+            customerKind = core.identity::customerKind,
             emit = { _, _ -> },
             settings = PurchaseSettings(null, PurchaseHandlingMode.NUXIE_MANAGED),
             scope = core.scope,
@@ -450,13 +452,14 @@ class PurchaseFeatureUseTest {
     private fun evidence(
         token: String = "token-1",
         authorityScope: String = "scope-a",
-        ownerDistinctId: String = "customer-a",
+        buyerDistinctId: String = "customer-a",
         packageName: String = "com.example.app",
         storeProductIds: List<String> = listOf("play-credit-pack"),
         purchaseState: StoredPurchaseState = StoredPurchaseState.PURCHASED,
         nuxieManaged: Boolean = true,
-        revoked: Boolean = false,
-        permanentlyRejected: Boolean = false,
+        /** Play stopped owning it, so its owed send was withdrawn. */
+        withdrawn: Boolean = false,
+        refused: Boolean = false,
         synced: Boolean = false,
         backendSyncedAtMillis: Long? = null,
         signatureVerificationRequired: Boolean = false,
@@ -470,16 +473,17 @@ class PurchaseFeatureUseTest {
         nuxieProductId = "credit-pack",
         productType = BillingClient.ProductType.INAPP,
         purchaseState = purchaseState,
-        obfuscatedAccountId = "account-hash",
-        syncAttributionDistinctId = "customer-a",
-        ownerDistinctId = ownerDistinctId,
+        obfuscatedAccountId = playAccountId(buyerDistinctId),
+        buyerDistinctId = buyerDistinctId,
+        // A backend sync time means the server accepted it for its buyer.
+        ownerDistinctId = buyerDistinctId.takeIf { synced || backendSyncedAtMillis != null },
+        refused = refused,
+        pendingSend = PurchaseSend(PurchaseSyncReason.PURCHASE, buyerDistinctId, CustomerKind.ANONYMOUS)
+            .takeUnless { withdrawn || refused || synced || backendSyncedAtMillis != null },
         acknowledged = false,
-        synced = synced,
         firstSeenMillis = 1_784_462_300_000L,
         catalogResolved = true,
         nuxieManaged = nuxieManaged,
-        revoked = revoked,
-        permanentlyRejected = permanentlyRejected,
         backendSyncedAtMillis = backendSyncedAtMillis,
         signatureVerificationRequired = signatureVerificationRequired,
         signatureVerified = signatureVerified,
@@ -661,7 +665,10 @@ class PurchaseFeatureUseTest {
         val started = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
 
-        override suspend fun sync(evidence: PurchaseEvidence): PurchaseSyncOutcome {
+        override suspend fun sync(
+            evidence: PurchaseEvidence,
+            request: PurchaseSyncRequest,
+        ): PurchaseSyncOutcome {
             started.complete(Unit)
             release.await()
             return outcome
@@ -731,7 +738,8 @@ class PurchaseFeatureUseTest {
             products = listOf("play-credit-pack"),
             state = StoredPurchaseState.PURCHASED,
             acknowledged = false,
-            obfuscatedAccountId = "account-hash",
+            // The buyer's own purchase names the account the SDK set at their checkout.
+            obfuscatedAccountId = playAccountId("customer-a"),
             originalJson = "{}",
             signature = "",
         )

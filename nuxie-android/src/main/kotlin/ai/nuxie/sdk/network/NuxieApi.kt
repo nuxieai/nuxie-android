@@ -10,7 +10,9 @@ import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.SdkVersion
 import ai.nuxie.sdk.events.CanonicalJson
 import ai.nuxie.sdk.events.JsonValueConverter
+import ai.nuxie.sdk.billing.PurchaseSyncReason
 import ai.nuxie.sdk.features.FeatureType
+import ai.nuxie.sdk.identity.CustomerKind
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.URL
@@ -23,11 +25,6 @@ import kotlinx.serialization.json.jsonObject
 
 private const val PROFILE_APP_ID_HEADER = "Nuxie-App-Id"
 private const val PROFILE_APP_ENVIRONMENT_HEADER = "Nuxie-App-Environment"
-
-internal fun isInvalidPurchaseTokenRejection(body: JsonObject): Boolean =
-    listOf("code", "reason", "error").any { key ->
-        (body[key] as? JsonPrimitive)?.takeIf { it.isString }?.content == "invalid_purchase_token"
-    }
 
 /**
  * The API client, ported from the iOS `NuxieApi`. Ordinary captured events
@@ -54,8 +51,6 @@ internal class NuxieApi(
 
     class PurchaseRejectedException(
         val statusCode: Int,
-        val permanent: Boolean,
-        val invalidToken: Boolean = false,
     ) : IOException("/purchase rejected with status $statusCode")
 
     data class PlayPurchaseReport(
@@ -67,6 +62,8 @@ internal class NuxieApi(
         val productType: String? = null,
         val obfuscatedAccountId: String?,
         val distinctId: String,
+        val reason: PurchaseSyncReason,
+        val customerKind: CustomerKind,
     )
 
     private companion object {
@@ -516,18 +513,12 @@ internal class NuxieApi(
                 append(",\"obfuscated_account_id\":").append(jsonString(it))
             }
             append(",\"distinct_id\":").append(jsonString(report.distinctId))
+            append(",\"reason\":").append(jsonString(report.reason.wireValue))
+            append(",\"customer_kind\":").append(jsonString(report.customerKind.wireValue))
             append('}')
         }.encodeToByteArray()
         val response = execute(purchaseRequest(body))
-        if (response.statusCode !in 200..299) {
-            val permanent = response.statusCode in 400..499 && response.statusCode !in setOf(408, 429)
-            val invalidToken = runCatching {
-                val text = response.body.decodeToString()
-                StrictJsonValidator.requireNoDuplicateKeys(text)
-                isInvalidPurchaseTokenRejection(Json.parseToJsonElement(text).jsonObject)
-            }.getOrDefault(false)
-            throw PurchaseRejectedException(response.statusCode, permanent, invalidToken)
-        }
+        if (response.statusCode !in 200..299) throw PurchaseRejectedException(response.statusCode)
         val text = response.body.decodeToString().ifBlank { "{}" }
         StrictJsonValidator.requireNoDuplicateKeys(text)
         val parsed = Json.parseToJsonElement(text).jsonObject

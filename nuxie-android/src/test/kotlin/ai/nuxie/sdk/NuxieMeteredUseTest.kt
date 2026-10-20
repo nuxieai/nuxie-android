@@ -6,6 +6,7 @@ import ai.nuxie.sdk.billing.PurchaseEvidence
 import ai.nuxie.sdk.billing.StoredFeatureAllowance
 import ai.nuxie.sdk.billing.StoredProductMapping
 import ai.nuxie.sdk.billing.StoredPurchaseState
+import ai.nuxie.sdk.billing.playAccountId
 import ai.nuxie.sdk.billing.purchaseAuthorityScope
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.events.EventStore
@@ -40,6 +41,9 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
+import ai.nuxie.sdk.billing.PurchaseSend
+import ai.nuxie.sdk.billing.PurchaseSyncReason
+import ai.nuxie.sdk.identity.CustomerKind
 
 @RunWith(RobolectricTestRunner::class)
 class NuxieMeteredUseTest {
@@ -309,8 +313,9 @@ class NuxieMeteredUseTest {
                     storeProductIds = listOf("play-credit-pack"),
                     nuxieProductId = "credit-pack",
                     purchaseState = StoredPurchaseState.PURCHASED,
-                    syncAttributionDistinctId = "customer-a",
-                    ownerDistinctId = "customer-a",
+                    buyerDistinctId = "customer-a",
+                    pendingSend = PurchaseSend(PurchaseSyncReason.PURCHASE, "customer-a", CustomerKind.ANONYMOUS),
+                    obfuscatedAccountId = playAccountId("customer-a"),
                     acknowledged = false,
                     firstSeenMillis = 1_784_462_300_000L,
                     catalogResolved = true,

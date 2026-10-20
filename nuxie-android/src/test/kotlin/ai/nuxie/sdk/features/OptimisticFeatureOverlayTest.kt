@@ -15,6 +15,7 @@ import ai.nuxie.sdk.billing.purchaseAuthorityScope
 import ai.nuxie.sdk.billing.ProjectionFixtureAdapters
 import ai.nuxie.sdk.billing.ProjectionFixtureAdapters.unlessNull
 import ai.nuxie.sdk.billing.optimisticFeatureProjection
+import ai.nuxie.sdk.billing.playAccountId
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.fixtures.FixtureRunner
 import ai.nuxie.sdk.identity.IdentityService
@@ -43,6 +44,9 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import ai.nuxie.sdk.billing.PurchaseSend
+import ai.nuxie.sdk.billing.PurchaseSyncReason
+import ai.nuxie.sdk.identity.CustomerKind
 
 @RunWith(RobolectricTestRunner::class)
 class OptimisticFeatureOverlayTest {
@@ -182,8 +186,9 @@ class OptimisticFeatureOverlayTest {
                     storeProductIds = listOf("play-pro"),
                     nuxieProductId = "pro",
                     purchaseState = StoredPurchaseState.PURCHASED,
-                    syncAttributionDistinctId = owner,
-                    ownerDistinctId = owner,
+                    buyerDistinctId = owner,
+                    pendingSend = PurchaseSend(PurchaseSyncReason.PURCHASE, owner, CustomerKind.ANONYMOUS),
+                    obfuscatedAccountId = playAccountId(owner),
                     acknowledged = false,
                     firstSeenMillis = 1L,
                     catalogResolved = true,
@@ -244,8 +249,9 @@ class OptimisticFeatureOverlayTest {
                     storeProductIds = listOf("play-credit-pack"),
                     nuxieProductId = "credit-pack",
                     purchaseState = StoredPurchaseState.PURCHASED,
-                    syncAttributionDistinctId = "customer-a",
-                    ownerDistinctId = "customer-a",
+                    buyerDistinctId = "customer-a",
+                    pendingSend = PurchaseSend(PurchaseSyncReason.PURCHASE, "customer-a", CustomerKind.ANONYMOUS),
+                    obfuscatedAccountId = playAccountId("customer-a"),
                     acknowledged = false,
                     firstSeenMillis = 1L,
                     catalogResolved = true,
@@ -324,8 +330,9 @@ class OptimisticFeatureOverlayTest {
                     storeProductIds = listOf("play-credit-pack"),
                     nuxieProductId = "credit-pack",
                     purchaseState = StoredPurchaseState.PURCHASED,
-                    syncAttributionDistinctId = owner,
-                    ownerDistinctId = owner,
+                    buyerDistinctId = owner,
+                    pendingSend = PurchaseSend(PurchaseSyncReason.PURCHASE, owner, CustomerKind.ANONYMOUS),
+                    obfuscatedAccountId = playAccountId(owner),
                     acknowledged = false,
                     firstSeenMillis = 1L,
                     catalogResolved = true,
@@ -426,8 +433,9 @@ class OptimisticFeatureOverlayTest {
                     storeProductIds = listOf("play-pro"),
                     nuxieProductId = "pro",
                     purchaseState = StoredPurchaseState.PURCHASED,
-                    syncAttributionDistinctId = owner,
-                    ownerDistinctId = owner,
+                    buyerDistinctId = owner,
+                    pendingSend = PurchaseSend(PurchaseSyncReason.PURCHASE, owner, CustomerKind.ANONYMOUS),
+                    obfuscatedAccountId = playAccountId(owner),
                     acknowledged = false,
                     firstSeenMillis = 1L,
                     catalogResolved = true,

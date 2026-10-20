@@ -16,11 +16,14 @@ import ai.nuxie.sdk.billing.PurchaseService
 import ai.nuxie.sdk.billing.PurchaseSettings
 import ai.nuxie.sdk.billing.PurchaseSynchronizer
 import ai.nuxie.sdk.billing.PurchaseSyncOutcome
+import ai.nuxie.sdk.billing.PurchaseSyncReason
+import ai.nuxie.sdk.billing.PurchaseSyncRequest
 import ai.nuxie.sdk.billing.StoredFeatureAllowance
 import ai.nuxie.sdk.billing.StoredProductMapping
 import ai.nuxie.sdk.billing.StoredPurchaseState
 import ai.nuxie.sdk.core.NuxieCore
 import ai.nuxie.sdk.features.FeatureType
+import ai.nuxie.sdk.identity.CustomerKind
 import ai.nuxie.sdk.fixtures.FixtureRunner
 import android.app.Activity
 import com.android.billingclient.api.BillingClient
@@ -57,6 +60,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import ai.nuxie.sdk.billing.PurchaseSend
 
 @RunWith(RobolectricTestRunner::class)
 class PurchaseWireFixtureTest {
@@ -376,6 +380,8 @@ private object PurchaseWireFixtures {
                     productType = "subscription",
                     obfuscatedAccountId = sha256(SUBSCRIPTION_CUSTOMER_ID),
                     distinctId = SUBSCRIPTION_CUSTOMER_ID,
+                    reason = PurchaseSyncReason.PURCHASE,
+                    customerKind = CustomerKind.IDENTIFIED,
                 ),
             ),
             captureTokenFirstPurchase(),
@@ -390,6 +396,8 @@ private object PurchaseWireFixtures {
                     productType = "one_time",
                     obfuscatedAccountId = sha256(ONE_TIME_CUSTOMER_ID),
                     distinctId = ONE_TIME_CUSTOMER_ID,
+                    reason = PurchaseSyncReason.RESTORE,
+                    customerKind = CustomerKind.ANONYMOUS,
                 ),
             ),
             capturePurchase(
@@ -401,6 +409,9 @@ private object PurchaseWireFixtures {
                     offerId = null,
                     obfuscatedAccountId = null,
                     distinctId = "fixture-customer-invalid-token",
+                    reason = PurchaseSyncReason.SYNC,
+                    // An earlier customer this device no longer knows is declared identified.
+                    customerKind = CustomerKind.IDENTIFIED,
                 ),
             ),
             captureEntitled(
@@ -478,9 +489,13 @@ private object PurchaseWireFixtures {
                     packageName = " ",
                     storeProductIds = listOf(""),
                     purchaseState = StoredPurchaseState.PURCHASED,
-                    syncAttributionDistinctId = "fixture-customer-token-first",
                     acknowledged = false,
                     firstSeenMillis = 1L,
+                ),
+                PurchaseSyncRequest(
+                    PurchaseSyncReason.SYNC,
+                    "fixture-customer-token-first",
+                    CustomerKind.ANONYMOUS,
                 ),
             )
         }
@@ -527,8 +542,8 @@ private object PurchaseWireFixtures {
                     offerId = "introductory",
                     purchaseState = StoredPurchaseState.PURCHASED,
                     obfuscatedAccountId = sha256(FULL_CUSTOMER_ID),
-                    syncAttributionDistinctId = FULL_CUSTOMER_ID,
-                    ownerDistinctId = FULL_CUSTOMER_ID,
+                    buyerDistinctId = FULL_CUSTOMER_ID,
+                    pendingSend = PurchaseSend(PurchaseSyncReason.PURCHASE, FULL_CUSTOMER_ID, CustomerKind.ANONYMOUS),
                     acknowledged = false,
                     firstSeenMillis = 1L,
                     catalogResolved = true,
@@ -559,11 +574,12 @@ private object PurchaseWireFixtures {
             ioDispatcher = kotlinx.coroutines.Dispatchers.Unconfined,
             billing = SuccessfulBilling,
             evidenceStore = store,
-            synchronizer = PurchaseSynchronizer {
-                PurchaseSyncOutcome.Rejected(permanent = false)
+            synchronizer = PurchaseSynchronizer { _, _ ->
+                PurchaseSyncOutcome.Rejected()
             },
             features = core.features,
             distinctId = core.identity::distinctId,
+            customerKind = core.identity::customerKind,
             emit = { _, _ -> },
             settings = PurchaseSettings(null, PurchaseHandlingMode.NUXIE_MANAGED),
             scope = core.scope,
@@ -818,10 +834,6 @@ private object PurchaseWireResponses {
                     runBlocking { api.postPurchase(responsePathPurchaseReport()) }
                 }
                 assertEquals(fixture.statusCode, error.statusCode)
-                assertEquals(
-                    fixture.statusCode in 400..499 && fixture.statusCode !in setOf(408, 429),
-                    error.permanent,
-                )
             }
 
             "/feature/consume" -> {
@@ -852,6 +864,8 @@ private object PurchaseWireResponses {
         offerId = null,
         obfuscatedAccountId = null,
         distinctId = "fixture-response-customer",
+        reason = PurchaseSyncReason.SYNC,
+        customerKind = CustomerKind.ANONYMOUS,
     )
 
     private fun responsePathFeatureUseReport() = NuxieApi.PurchaseBackedFeatureUseReport(

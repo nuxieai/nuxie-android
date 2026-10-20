@@ -518,7 +518,12 @@ object Nuxie {
         }
     }
 
-    /** Restore Play's currently active subscriptions and one-time purchases. */
+    /**
+     * Restore Play's currently active subscriptions and one-time purchases.
+     * Nuxie may move a purchase another customer owns to the current customer:
+     * a customer who never signed in is merged into them, and anyone else's
+     * purchase moves only to a customer signed in through [identify].
+     */
     suspend fun restorePurchases(): RestoreResult {
         val operation = lifecycle.admit() ?: return RestoreResult.Failed(IllegalStateException("Call Nuxie.setup first."))
         return lifecycle.executeOwned(operation, { it.producerScope }) { it.purchases.restorePurchases() }

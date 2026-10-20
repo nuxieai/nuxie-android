@@ -1,5 +1,11 @@
 package ai.nuxie.sdk.identity
 
+/** Whether a customer has signed in, as the SDK declares it to the purchase authority. */
+internal enum class CustomerKind(val wireValue: String) {
+    ANONYMOUS("anonymous"),
+    IDENTIFIED("identified"),
+}
+
 internal data class IdentityScope(
     val distinctId: String,
     val revision: Long,
@@ -17,6 +23,18 @@ internal interface IdentityProvider {
     fun rawDistinctId(): String?
 
     val isIdentified: Boolean
+
+    /**
+     * The kind of the customer named by [distinctId]: the current customer
+     * is identified once identify set it and anonymous otherwise, including
+     * after reset; this device's anonymous id is anonymous.
+     */
+    fun customerKind(distinctId: String): CustomerKind = when (distinctId) {
+        distinctId() -> if (isIdentified) CustomerKind.IDENTIFIED else CustomerKind.ANONYMOUS
+        anonymousId() -> CustomerKind.ANONYMOUS
+        // An earlier customer this device no longer knows: the server merges only owners declared anonymous.
+        else -> CustomerKind.IDENTIFIED
+    }
 
     /** Capture the effective customer and its monotonic identity revision. */
     fun captureScope(): IdentityScope = IdentityScope(distinctId(), 0L)

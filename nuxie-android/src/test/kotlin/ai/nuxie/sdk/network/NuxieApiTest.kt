@@ -1,6 +1,8 @@
 package ai.nuxie.sdk.network
 
 import ai.nuxie.sdk.NuxieEnvironment
+import ai.nuxie.sdk.billing.PurchaseSyncReason
+import ai.nuxie.sdk.identity.CustomerKind
 import java.io.IOException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -264,6 +266,8 @@ class NuxieApiTest {
                 productType = "subscription",
                 obfuscatedAccountId = "account-hash",
                 distinctId = "customer-1",
+                reason = PurchaseSyncReason.RESTORE,
+                customerKind = CustomerKind.IDENTIFIED,
             ),
         )
 
@@ -273,7 +277,7 @@ class NuxieApiTest {
         assertEquals("product-pro", response.catalogProduct?.productId)
         assertEquals("annual", response.catalogProduct?.basePlanId)
         assertEquals(
-            """{"apiKey":"pk_test_key","type":"playstore","purchase_token":"token-1","product_id":"pro","base_plan_id":"annual","offer_id":"launch","product_type":"subscription","obfuscated_account_id":"account-hash","distinct_id":"customer-1"}""",
+            """{"apiKey":"pk_test_key","type":"playstore","purchase_token":"token-1","product_id":"pro","base_plan_id":"annual","offer_id":"launch","product_type":"subscription","obfuscated_account_id":"account-hash","distinct_id":"customer-1","reason":"restore","customer_kind":"identified"}""",
             transport.request.body.decodeToString(),
         )
     }
@@ -336,12 +340,14 @@ class NuxieApiTest {
                 offerId = null,
                 obfuscatedAccountId = null,
                 distinctId = "customer-1",
+                reason = PurchaseSyncReason.SYNC,
+                customerKind = CustomerKind.IDENTIFIED,
             ),
         )
 
         assertFalse(response.success)
         assertEquals(
-            """{"apiKey":"pk_test_key","type":"playstore","purchase_token":"token-1","product_id":"pro","distinct_id":"customer-1"}""",
+            """{"apiKey":"pk_test_key","type":"playstore","purchase_token":"token-1","product_id":"pro","distinct_id":"customer-1","reason":"sync","customer_kind":"identified"}""",
             transport.request.body.decodeToString(),
         )
     }
@@ -367,12 +373,14 @@ class NuxieApiTest {
                 offerId = null,
                 obfuscatedAccountId = null,
                 distinctId = "customer-1",
+                reason = PurchaseSyncReason.PURCHASE,
+                customerKind = CustomerKind.ANONYMOUS,
             ),
         )
 
         assertTrue(response.success)
         assertEquals(
-            """{"apiKey":"pk_test_key","type":"playstore","purchase_token":"token-1","distinct_id":"customer-1"}""",
+            """{"apiKey":"pk_test_key","type":"playstore","purchase_token":"token-1","distinct_id":"customer-1","reason":"purchase","customer_kind":"anonymous"}""",
             transport.request.body.decodeToString(),
         )
     }

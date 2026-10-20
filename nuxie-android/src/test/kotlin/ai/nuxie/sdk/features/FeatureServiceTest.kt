@@ -779,12 +779,14 @@ class FeatureServiceTest {
 
         val refresh = async(Dispatchers.Default) { core.profile.refreshAndWait() }
         assertTrue(fetchStarted.await(5, TimeUnit.SECONDS))
-        core.features.updateFromPurchase(
+        core.features.publishStaged(
+            core.features.stagePurchaseAnswer(
             customer,
             Json.parseToJsonElement(
                 """{"success":true,"features":[{"id":"internal-pro","ext_id":"pro","type":"boolean","allowed":true,"unlimited":false,"balance":null}]}""",
             ).jsonObject,
-            "mid-fetch-token",
+                emptyMap(),
+            ),
         )
         releaseFetch.countDown()
 
@@ -807,12 +809,14 @@ class FeatureServiceTest {
             },
         )
         val customer = core.identity.distinctId()
-        core.features.updateFromPurchase(
+        core.features.publishStaged(
+            core.features.stagePurchaseAnswer(
             customer,
             Json.parseToJsonElement(
                 """{"success":true,"features":[{"id":"internal-pro","ext_id":"pro","type":"boolean","allowed":true,"unlimited":false,"balance":null}]}""",
             ).jsonObject,
-            "before-fetch-token",
+                emptyMap(),
+            ),
         )
         assertTrue(core.features.getCached("pro", null)!!.allowed)
 
@@ -939,12 +943,14 @@ class FeatureServiceTest {
 
         val check = async(Dispatchers.Default) { core.features.check("pro") }
         assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
-        core.features.updateFromPurchase(
+        core.features.publishStaged(
+            core.features.stagePurchaseAnswer(
             core.identity.distinctId(),
             Json.parseToJsonElement(
                 """{"success":true,"features":[{"id":"internal-pro","ext_id":"pro","type":"boolean","allowed":true,"unlimited":false,"balance":null}]}""",
             ).jsonObject,
-            "mid-check-token",
+                emptyMap(),
+            ),
         )
         releaseCheck.countDown()
 
@@ -983,12 +989,14 @@ class FeatureServiceTest {
 
         val check = async(Dispatchers.Default) { core.features.check("pro") }
         assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
-        core.features.updateFromPurchase(
+        core.features.publishStaged(
+            core.features.stagePurchaseAnswer(
             core.identity.distinctId(),
             Json.parseToJsonElement(
                 """{"success":true,"features":[{"id":"internal-pro","ext_id":"pro","type":"boolean","allowed":true,"unlimited":false,"balance":null}]}""",
             ).jsonObject,
-            "mid-check-token",
+                emptyMap(),
+            ),
         )
         core.features.hydrateProfile(
             core.identity.distinctId(),
@@ -1465,12 +1473,14 @@ class FeatureServiceTest {
             }
         }
         core = core(transport)
-        core.features.updateFromPurchase(
+        core.features.publishStaged(
+            core.features.stagePurchaseAnswer(
             core.identity.distinctId(),
             Json.parseToJsonElement(
                 """{"success":true,"features":[{"id":"exports","type":"metered","allowed":true,"unlimited":true,"balance":null}]}""",
             ).jsonObject,
-            "purchase-before-checks",
+                emptyMap(),
+            ),
         )
 
         val older = async(Dispatchers.Default) {
@@ -1557,12 +1567,14 @@ class FeatureServiceTest {
             "token-1",
         )
 
-        core.features.updateFromPurchase(
+        core.features.publishStaged(
+            core.features.stagePurchaseAnswer(
             customer,
             Json.parseToJsonElement(
                 """{"success":true,"features":[{"id":"internal-pro","ext_id":"pro","type":"boolean","allowed":true,"unlimited":false,"balance":null}]}""",
             ).jsonObject,
-            "token-1",
+                emptyMap(),
+            ),
         )
 
         assertTrue(core.featureInfo.isAllowed("existing"))
@@ -2002,12 +2014,14 @@ class FeatureServiceTest {
             core.features.check("exports", requiredBalance = 2.0)
         }
         assertTrue(exportsStarted.await(5, TimeUnit.SECONDS))
-        core.features.updateFromPurchase(
+        core.features.publishStaged(
+            core.features.stagePurchaseAnswer(
             core.identity.distinctId(),
             Json.parseToJsonElement(
                 """{"success":true,"features":[{"id":"internal-wallet","ext_id":"wallet","type":"creditSystem","allowed":true,"unlimited":false,"balance":1}]}""",
             ).jsonObject,
-            "newer-wallet-purchase",
+                emptyMap(),
+            ),
         )
         releaseExports.countDown()
 

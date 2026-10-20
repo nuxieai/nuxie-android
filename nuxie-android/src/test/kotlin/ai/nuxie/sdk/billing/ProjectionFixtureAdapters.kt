@@ -7,6 +7,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import ai.nuxie.sdk.identity.CustomerKind
 
 /**
  * Adapters from the cross-SDK optimistic-entitlement-projection fixture's
@@ -30,15 +31,21 @@ internal object ProjectionFixtureAdapters {
                 storeProductIds = listOf(transactionId),
                 nuxieProductId = transactionId,
                 purchaseState = StoredPurchaseState.PURCHASED,
-                syncAttributionDistinctId = owner,
-                ownerDistinctId = owner,
+                // The fixture names the customer a purchase belongs to; on Play
+                // that is the account id the SDK set at that customer's checkout.
+                // A backend-synced purchase has the server's owner; a revoked one
+                // owes no send, so neither unlocks early.
+                buyerDistinctId = owner,
+                ownerDistinctId = owner.takeIf { backendSynced },
+                pendingSend = PurchaseSend(PurchaseSyncReason.PURCHASE, owner, CustomerKind.ANONYMOUS)
+                    .takeUnless { backendSynced || evidence.getValue("revoked").jsonPrimitive.content.toBoolean() },
+                obfuscatedAccountId = playAccountId(owner),
                 acknowledged = false,
                 firstSeenMillis = 1L,
                 catalogResolved = true,
                 signatureVerificationRequired = true,
                 signatureVerified = true,
                 authorityScope = AUTHORITY_SCOPE,
-                revoked = evidence.getValue("revoked").jsonPrimitive.content.toBoolean(),
                 backendSyncedAtMillis = 1L.takeIf { backendSynced },
             )
         }

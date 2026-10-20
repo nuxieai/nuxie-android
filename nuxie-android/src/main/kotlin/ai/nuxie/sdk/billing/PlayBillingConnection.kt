@@ -72,6 +72,16 @@ internal data class PlayPurchase(
     val signature: String,
 )
 
+/**
+ * The obfuscated account id the SDK sets on a Play checkout for [distinctId].
+ * Play reports it back on the purchase, and the purchase authority checks it
+ * the same way, so it is how a Play purchase names the customer who bought it.
+ */
+internal fun playAccountId(distinctId: String): String =
+    java.security.MessageDigest.getInstance("SHA-256")
+        .digest(distinctId.encodeToByteArray())
+        .joinToString("") { "%02x".format(it) }
+
 internal data class CheckoutRequest(
     val product: StoreProduct,
     val obfuscatedAccountId: String,
