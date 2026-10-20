@@ -99,17 +99,14 @@ internal class JourneyExperimentExposureReporter(
             "experiment_key" to exposure.experimentId,
             "variant_key" to exposure.variantId,
         )
-        val isHoldout = when (exposure.kind) {
-            JourneyRun.ExperimentExposure.Kind.ASSIGNED -> {
-                properties["assignment_source"] = "profile"
-                exposure.isHoldout
-            }
-            JourneyRun.ExperimentExposure.Kind.FALLBACK -> {
-                properties["assignment_source"] = "fallback"
-                false
-            }
+        properties["assignment_source"] = when (exposure.kind) {
+            JourneyRun.ExperimentExposure.Kind.ASSIGNED -> "profile"
+            JourneyRun.ExperimentExposure.Kind.FALLBACK -> "fallback"
         }
-        properties["is_holdout"] = isHoldout
+        // The selected variant's flag from the authenticated release, for a
+        // fallback too: publishing never signs a holdout fallback, but a
+        // release that did would run its holdout path.
+        properties["is_holdout"] = exposure.isHoldout
         return JourneyEventNames.EXPERIMENT_EXPOSURE to properties
     }
 }
