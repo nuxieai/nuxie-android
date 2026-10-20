@@ -157,6 +157,7 @@ class ExperienceInteractiveLayerDeviceTest {
         val lane = NuxieRuntimeLane()
         try { lane.call {
             val runtime = NuxieRuntime.shared
+            assertTrue(runtime.isAvailable)
             val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(100,100))
             try {
                 val file = checkNotNull(runtime.importFile(renderer,bytes("removal-probe-marker.riv")))
