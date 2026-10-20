@@ -13,7 +13,7 @@
     "encodings/text-size-device-properties.json": "d39d96c7164111c854c4c2ce0bbb430018018c97db31baae871a3022a031f02f",
     "events/atomic-purchase-sync.json": "00ad8a8acfcc8b5531de8312a6ad9e13cae2ec6fc386a4b3263fde3d574f0764",
     "events/batch-item-encoding.json": "f0ba212c3428ea8efc5defd7dc67c4d97c310dbcdcfd529e9cd9556c237b6172",
-    "events/catalog.json": "d2e44d89076d4df02401331c9d641c42af78da9ae5dbdb55588fb1d48b9b99c0",
+    "events/catalog.json": "53020ba8d1545fc2a4e081e7d4cd03f808c122f06bbed4db5e3580082dce0a18",
     "events/delivery-disposition.json": "bf2e48165a90e6bf568f00ba804cfa8c2f1efcdc9a5867533a24bbf99a31575d",
     "events/generated-control-routing.json": "f461826c8a2e79d2f08178a1b3a27b03cbcda52ed208f572b995fa7165fef77a",
     "events/link-open-states.json": "eca2b9118eb26f12338c8b76f0ecfdb68a4b506f176c932f600809ea3d0469df",
@@ -554,7 +554,7 @@
   },
   "sourceCommitOverrides": {
     "README.md": "c0faf25cfd6e7c9316dc3182154b62c7d3811793",
-    "events/catalog.json": "6503e6a6bdf3ba9cad88fc598c5fa3783ba39490",
+    "events/catalog.json": "83621e75922c746ecb527bd4e97449b6aff4c109",
     "events/link-open-states.json": "53104f10800c24d9d180a79cab8f5f32908ca059",
     "events/purchase-without-selection.json": "e0225ef82ab37fcee83afde56f02eaf33a521600",
     "events/reserved-event-filtering.json": "c34928bf7bc529faf7ba0b52b8ee8e91497f5558",
