@@ -554,7 +554,7 @@
   },
   "sourceCommitOverrides": {
     "README.md": "c0faf25cfd6e7c9316dc3182154b62c7d3811793",
-    "events/catalog.json": "83621e75922c746ecb527bd4e97449b6aff4c109",
+    "events/catalog.json": "59fa34471d2f667c44bb2daf9f475d1350f22503",
     "events/link-open-states.json": "53104f10800c24d9d180a79cab8f5f32908ca059",
     "events/purchase-without-selection.json": "e0225ef82ab37fcee83afde56f02eaf33a521600",
     "events/reserved-event-filtering.json": "c34928bf7bc529faf7ba0b52b8ee8e91497f5558",
