@@ -2005,6 +2005,120 @@ class JourneyServiceTest {
         )
     }
 
+    // iOS parity (UNIV-5197): on iOS a trigger sent right after identify()
+    // routed through the arriving customer's journal before their profile
+    // arrived and was dropped. Here it waits for that profile.
+    @Test fun `trigger right after identify starts from the arriving customer's profile`() = runBlocking {
+        val harness = identityTransitionHarness("customer-a")
+        try {
+            harness.service.profileDidCommit(harness.snapshot, authority, "customer-a", 1)
+            harness.service.initialize()
+            harness.eventLog.awaitBarrier()
+
+            harness.identity.setDistinctId("customer-b")
+            harness.service.handleUserChange("customer-a", "customer-b")
+            harness.eventLog.capture("signed_in_trigger")
+            harness.eventLog.awaitBarrier()
+            assertEquals(emptyList<String>(), harness.starts)
+            assertEquals(
+                listOf("signed_in_trigger"),
+                store.queryPendingLocalRoutes("customer-b").map { it.name },
+            )
+
+            harness.service.profileDidCommit(harness.snapshot, authority, "customer-b", 2)
+            harness.eventLog.awaitBarrier()
+            assertEquals(listOf("customer-b"), harness.starts)
+            assertTrue(store.queryPendingLocalRoutes("customer-b").isEmpty())
+        } finally {
+            withTimeout(5_000) { harness.eventLog.closeWorkers() }
+        }
+    }
+
+    // iOS parity (UNIV-5203): identify() while the SDK starts, with another
+    // customer's profile cached, must start the identified customer's
+    // Journey from their own profile and never the cached customer's.
+    @Test fun `identify after the cached profile commits starts from the arriving customer's profile`() =
+        identifyDuringStartup(cachedProfileCommitsFirst = true)
+
+    @Test fun `identify before the cached profile commits starts from the arriving customer's profile`() =
+        identifyDuringStartup(cachedProfileCommitsFirst = false)
+
+    private fun identifyDuringStartup(cachedProfileCommitsFirst: Boolean) = runBlocking {
+        val harness = identityTransitionHarness("customer-a")
+        try {
+            if (cachedProfileCommitsFirst) {
+                harness.service.profileDidCommit(harness.snapshot, authority, "customer-a", 1)
+            }
+            harness.identity.setDistinctId("customer-b")
+            if (!cachedProfileCommitsFirst) {
+                harness.service.profileDidCommit(harness.snapshot, authority, "customer-a", 1)
+            }
+            harness.service.initialize()
+            harness.service.handleUserChange("customer-a", "customer-b")
+            harness.eventLog.capture("signed_in_trigger")
+            harness.eventLog.awaitBarrier()
+            assertEquals(emptyList<String>(), harness.starts)
+
+            harness.service.profileDidCommit(harness.snapshot, authority, "customer-b", 2)
+            harness.eventLog.awaitBarrier()
+            assertEquals(listOf("customer-b"), harness.starts)
+            assertTrue(store.queryPendingLocalRoutes("customer-b").isEmpty())
+        } finally {
+            withTimeout(5_000) { harness.eventLog.closeWorkers() }
+        }
+    }
+
+    private class IdentityTransitionHarness(
+        val identity: IdentityService,
+        val eventLog: EventLog,
+        val service: JourneyService,
+        val snapshot: JourneyProfileCatalog.Snapshot,
+        val starts: CopyOnWriteArrayList<String>,
+    )
+
+    /** A real identity, EventLog and JourneyService, subscribed as NuxieCore subscribes them. */
+    private suspend fun identityTransitionHarness(distinctId: String): IdentityTransitionHarness {
+        val identity = IdentityService(context).also { it.setDistinctId(distinctId) }
+        val catalog = catalog()
+        val snapshot = JourneyProfileCatalog.Snapshot(
+            profile = JourneyPlaneProfile.decode(
+                profile(
+                    buildJsonObject {
+                        put("type", "event")
+                        put("eventName", "signed_in_trigger")
+                    },
+                ).toString().encodeToByteArray(),
+            ),
+            releasesByDigest = authenticatedSnapshot(catalog).releasesByDigest,
+        )
+        val eventLog = EventLog(
+            store,
+            NuxieContextBuilder(context, NuxieEnvironment.DEVELOPMENT, LogLevel.DEBUG, identity),
+            identity,
+            beforeSend = null,
+            scope = scope,
+            nowMillis = { 100_000L },
+        )
+        val starts = CopyOnWriteArrayList<String>()
+        val service = JourneyService(
+            identity,
+            store,
+            catalog,
+            directory,
+            scope,
+            capture = { name, properties, eventId, owner ->
+                if (name == JourneyEventNames.LEG_STARTED) starts += owner
+                eventLog.captureIdempotently(name, properties, eventId, owner)
+            },
+            nowMillis = { 100_000L },
+            replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
+        )
+        eventLog.subscribeCommittedWithAdmission(
+            sampleGeneration = service::eventAdmissionGeneration,
+        ) { event, admittedGeneration -> service.handleEvent(event, admittedGeneration) }
+        return IdentityTransitionHarness(identity, eventLog, service, snapshot, starts)
+    }
+
     @Test fun `journal admission is fenced against an identity mutation`() = runBlocking {
         val identity = object : IdentityProvider {
             private var current = "customer"
