@@ -347,10 +347,11 @@ object Nuxie {
         lifecycle.execute(operation) { state ->
             val core = state
             val distinctId = core.identity.distinctId()
-            // The whole change counts as one fetch, so the withdrawal already
-            // holds the customer's events until the new profile settles.
-            core.journeys.profileRefetchWillBegin(distinctId)
             try {
+                // The whole change counts as one fetch, so the withdrawal already
+                // holds the customer's events until the new profile settles. The
+                // begin is queued before it can be cancelled, so it always settles.
+                core.journeys.profileRefetchWillBegin(distinctId)
                 if (core.profile.setLocaleIdentifier(localeIdentifier)) core.profile.refreshAndWait()
             } finally {
                 withContext(NonCancellable) { core.journeys.profileRefetchDidSettle(distinctId) }
