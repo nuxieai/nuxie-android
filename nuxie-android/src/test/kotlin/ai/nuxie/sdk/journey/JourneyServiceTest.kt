@@ -3401,7 +3401,9 @@ class JourneyServiceTest {
             assertEquals(JourneyEmissionBatchResult.ACCEPTED, first.onEmissionBatch(JourneyScreenEmissionBatch(first.journeyId,
                 0, "forward", JourneyScreenEmissionSource("screen_welcome", "forward"),
                 listOf(JourneyScreenEmission("forward-event", 0, 100_001L, "forward", JsonObject(emptyMap())))), null))
-            withTimeout(5_000) { while (contents.lastOrNull()?.screenId != "screen_details") kotlinx.coroutines.delay(10) }
+            withTimeout(5_000) {
+                while (presentations.layerScreenIds() != listOf(listOf("screen_welcome", "screen_details"))) kotlinx.coroutines.delay(10)
+            }
             nativeBackStarted.set(true)
             assertTrue(checkNotNull(contents.last().requestBack).invoke())
             assertTrue("Native Back must finish its lifecycle route without re-entering its held layer mutex",
