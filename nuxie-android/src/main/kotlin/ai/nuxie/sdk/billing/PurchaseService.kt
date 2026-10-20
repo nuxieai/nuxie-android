@@ -560,6 +560,12 @@ internal class PurchaseService(
      */
     private val withdrawnTokens: MutableSet<String> =
         Collections.newSetFromMap(ConcurrentHashMap())
+    /**
+     * Purchases Play stopped reporting, kept in memory so their entries are
+     * not sent even if the durable withdrawal failed, until Play reports them again.
+     */
+    private val unreportedTokens: MutableSet<String> =
+        Collections.newSetFromMap(ConcurrentHashMap())
     private val usageCoordinationLock = Any()
     /** The one send in flight per purchase token; guarded by [usageCoordinationLock]. */
     private val sending = mutableMapOf<String, CompletableDeferred<SendAnswer>>()
@@ -1434,6 +1440,10 @@ internal class PurchaseService(
         effects: ProcessingEffects,
     ): PurchaseEvidence? {
         val identity = PurchaseCommitIdentity.Evidence(observation.purchase.purchaseToken)
+        // Play reports the purchase again: its entry may be sent again.
+        if (unreportedTokens.remove(observation.purchase.purchaseToken)) {
+            withdrawnTokens -= observation.purchase.purchaseToken
+        }
         if (completedPurchaseCommits.containsKey(identity)) return null
         purchaseCommitOperations[identity]?.let { ongoing ->
             effects.purchaseCommitWaits += ongoing
@@ -1892,7 +1902,8 @@ internal class PurchaseService(
             val (answer, owned) = sendInSlot(purchaseToken) { sendOnce(purchaseToken) }
                 ?: return SyncResult.UNAVAILABLE
             if (expected != null && answer.send == expected) return answer.result
-            if (expected == null && owned) return answer.result
+            // This caller had the slot and nothing was sent: there is nothing to wait for.
+            if (owned && (expected == null || answer.send == null)) return answer.result
             // Another send went first. Send ours if it is still owed and that
             // send was not this same entry.
             val owed = evidenceStore.load()[purchaseToken]?.pendingSend ?: return SyncResult.UNAVAILABLE
@@ -1981,6 +1992,9 @@ internal class PurchaseService(
         val evidence = evidenceStore.load()[purchaseToken] ?: return SendAnswer(null, SyncResult.UNAVAILABLE)
         // A purchase whose required Play signature never verified is never sent.
         if (!evidence.hasEligiblePurchaseSignature) return SendAnswer(null, SyncResult.UNAVAILABLE)
+        // Play stopped reporting it and the withdrawal was not written: the
+        // entry still on disk is not sent until Play reports the purchase again.
+        if (claim == null && purchaseToken in unreportedTokens) return SendAnswer(null, SyncResult.UNAVAILABLE)
         val send = claim ?: evidence.pendingSend ?: return SendAnswer(null, SyncResult.UNAVAILABLE)
         val isEntry = claim == null
         val outcome = try {
@@ -2312,6 +2326,7 @@ internal class PurchaseService(
                     val protectedTokens = purchaseUsageClaims + sending.keys
                     revalidated.filter { it.purchaseToken !in protectedTokens }.also {
                         withdrawnTokens += it.map(PurchaseEvidence::purchaseToken)
+                        unreportedTokens += it.map(PurchaseEvidence::purchaseToken)
                     }
                 }
                 val persisted = missing.map { evidenceStore.upsert(it.copy(pendingSend = null)) }.all { it }

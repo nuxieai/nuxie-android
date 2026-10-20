@@ -2598,6 +2598,38 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun aScheduledRetryDoesNotSendAPurchasePlayStoppedReportingWhenItsWithdrawalWasNotWritten() = runTest {
+        val fixture = fixture(this, initialRetryDelayMillis = 1_000, maxRetryDelayMillis = 1_000)
+        val customer = fixture.core.identity.distinctId()
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("gone-token", obfuscatedAccountId = accountHash(customer)),
+        )
+        // The first send gets no answer, so a retry is scheduled.
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
+        fixture.service.recover()
+        assertEquals(1, fixture.requests.size)
+
+        // Play stops reporting the purchase, and writing that withdrawal fails.
+        fixture.billing.active[BillingClient.ProductType.INAPP] = emptyList()
+        fixture.store.rejectEvidenceUpsert = { it.purchaseToken == "gone-token" && it.pendingSend == null }
+        runCatching { fixture.service.recover() }
+        assertNotNull("The durable entry is still owed", fixture.store.load().getValue("gone-token").pendingSend)
+
+        advanceTimeBy(5_000)
+        runCurrent()
+        assertEquals("The withdrawn purchase is not sent", 1, fixture.requests.size)
+
+        // Play reports it again: that fresh observation sends it.
+        fixture.store.rejectEvidenceUpsert = null
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("gone-token", obfuscatedAccountId = accountHash(customer)),
+        )
+        fixture.service.recover()
+        assertEquals(2, fixture.requests.size)
+        fixture.close()
+    }
+
+    @Test
     fun buyersOwnCheckoutUnlocksBeforeTheServerAnswersAndAConflictDropsItAtOnce() = runTest {
         val fixture = fixture(this)
         fixture.service.rememberProduct(
