@@ -375,6 +375,7 @@ internal class NuxieCore(
                 onPresentationRevealed = request.onPresentationRevealed,
                 onOutcome = request.onOutcome,
                 withPresentationCallbacks = request.withPresentationCallbacks,
+                onBackNavigation = request.onBackNavigation,
             )
             JourneyPresentationResult.Shown
         } catch (cancelled: CancellationException) {
