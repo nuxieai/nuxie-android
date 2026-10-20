@@ -73,6 +73,15 @@ internal interface JourneyProfileConsumer {
     suspend fun profileDidWithdraw(distinctId: String, admissionGeneration: Long)
     suspend fun profileDidClear(distinctId: String, admissionGeneration: Long)
     suspend fun profileDidClearAll()
+
+    /**
+     * A fetch of the customer's copy begins. While they have no usable copy
+     * their events wait, then replay against the copy when it lands.
+     */
+    suspend fun profileRefetchWillBegin(distinctId: String) {}
+
+    /** That fetch settled; once the customer's last one has, waiting events go through. */
+    suspend fun profileRefetchDidSettle(distinctId: String) {}
 }
 
 internal data class JourneyDispatchRequest(
@@ -328,6 +337,14 @@ internal class JourneyService(
             val to: String,
             override val done: CompletableDeferred<Unit>,
         ) : Command
+        data class RefetchBegin(
+            val distinctId: String,
+            override val done: CompletableDeferred<Unit>,
+        ) : Command
+        data class RefetchSettle(
+            val distinctId: String,
+            override val done: CompletableDeferred<Unit>,
+        ) : Command
         data class Wake(
             val generation: Long,
             val deadlineMillis: Long,
@@ -357,7 +374,8 @@ internal class JourneyService(
     private var storageScope: JourneyStorageScope? = fixedStorageScope
     private val acceptsAuthorityScope = fixedStorageScope == null
     private var initialized = false
-    private var currentProfilePublished = false
+    /** Fetches of each customer's copy that have not settled. */
+    private val profileRefetchesInFlight = mutableMapOf<String, Int>()
     // Setup can run from a receiver, worker, or service before any Activity is
     // visible. Keep screen-bearing admission closed until the lifecycle
     // coordinator observes the first Activity entering the foreground.
@@ -454,6 +472,8 @@ internal class JourneyService(
                     is Command.Background -> backgroundNow()
                     is Command.Foreground -> foregroundNow()
                     is Command.UserChange -> userDidChangeNow(command.from, command.to)
+                    is Command.RefetchBegin -> refetchWillBeginNow(command.distinctId)
+                    is Command.RefetchSettle -> refetchDidSettleNow(command.distinctId)
                     is Command.Wake -> wakeNow(command.generation, command.deadlineMillis)
                     is Command.PresentationEnded -> presentationEndedNow(command)
                 }
@@ -730,6 +750,12 @@ internal class JourneyService(
     suspend fun handleUserChange(from: String, to: String) =
         submit { done -> Command.UserChange(from, to, done) }
 
+    override suspend fun profileRefetchWillBegin(distinctId: String) =
+        submit { done -> Command.RefetchBegin(distinctId, done) }
+
+    override suspend fun profileRefetchDidSettle(distinctId: String) =
+        submit { done -> Command.RefetchSettle(distinctId, done) }
+
     private suspend fun submit(factory: (CompletableDeferred<Unit>) -> Command) {
         val done = CompletableDeferred<Unit>()
         if (commands.trySend(factory(done)).isSuccess) done.await()
@@ -810,7 +836,6 @@ internal class JourneyService(
             profileState = state
             adoptedArtifacts = true
             previousArtifacts?.close()
-            currentProfilePublished = true
             if (!initialized) return
             if (!ensureJournal(distinctId)) return
             resetForegroundReceiptsIfNeeded()
@@ -839,7 +864,6 @@ internal class JourneyService(
         profileGeneration.incrementAndGet()
         profileState?.artifacts?.close()
         profileState = null
-        currentProfilePublished = distinctId != null && identity.distinctId() == distinctId
         directlyRoutedRunByEventId.clear()
         activePresentedRunIds.clear()
         pendingPresentationPurchasePlacements.clear()
@@ -860,11 +884,16 @@ internal class JourneyService(
         profileGeneration.incrementAndGet()
         profileState?.takeIf { it.distinctId == distinctId }?.artifacts?.close()
         if (profileState?.distinctId == distinctId) profileState = null
-        currentProfilePublished = false
         currentJournal?.takeIf { it.distinctId == distinctId }
             ?.retainStateArmReceipts(emptySet())
     }
 
+    /**
+     * [admittedGeneration] is the generation sampled when the event was
+     * captured. Entry no longer depends on it: an event starts from the copy
+     * installed when it is handled.
+     */
+    @Suppress("UNUSED_PARAMETER")
     private suspend fun handleEventNow(
         event: StoredEvent,
         admittedGeneration: Long,
@@ -877,14 +906,22 @@ internal class JourneyService(
         // The durable route must survive until the visible host has current authority.
         if (foreground.isRevalidating()) return false
         if (journal?.distinctId != event.distinctId) return false
+        // While the customer's copy is fetched and they have none, their
+        // events stay pending, untouched, and replay once a copy lands or the
+        // last fetch settles.
+        if (holdsEvents(event.distinctId)) return false
         if (!recoverConversionOccurrences(throughEventId = event.id)) return false
         val directlyRoutedRunId = directlyRoutedRunByEventId.remove(event.id)
         if (!resumePresentationActionOutcome(event, excludingRunId = directlyRoutedRunId)) return false
-        val state = currentState() ?: return currentProfilePublished
+        // Journeys already waiting run on their pinned releases, with or without a copy.
+        val state = currentState()
         resumeParkedRuns(state, event, excludingRunId = directlyRoutedRunId)
-        if (!isCurrent(state) || admittedGeneration != eventAdmissionGeneration()) {
+        // An event captured before this copy was installed (a first launch, or
+        // before a fresh copy replaced the old one) starts from the copy it is
+        // handled under. One customer's event never starts another's Journey.
+        if (state == null || !isCurrent(state) || state.distinctId != event.distinctId) {
             scheduleNextWake()
-            return false
+            return true
         }
         state.snapshot.profile.armedLegs.asSequence()
             .filter {
@@ -1017,6 +1054,9 @@ internal class JourneyService(
     }
 
     private suspend fun userDidChangeNow(from: String, to: String) {
+        // The transition fetches the arriving customer's copy and settles that
+        // fetch when it ends; their events wait for it from here.
+        profileRefetchesInFlight[to] = (profileRefetchesInFlight[to] ?: 0) + 1
         retireOwnerValues(from)
         cancelWake()
         val departing = journal?.takeIf { it.distinctId == from }
@@ -1030,7 +1070,6 @@ internal class JourneyService(
             profileState?.artifacts?.close()
             profileState = null
         }
-        currentProfilePublished = false
         directlyRoutedRunByEventId.clear()
         activePresentedRunIds.clear()
         pendingPresentationPurchasePlacements.clear()
@@ -1043,6 +1082,31 @@ internal class JourneyService(
         resetForegroundReceiptsIfNeeded()
         scheduleNextWake()
     }
+
+    private fun refetchWillBeginNow(distinctId: String) {
+        profileRefetchesInFlight[distinctId] = (profileRefetchesInFlight[distinctId] ?: 0) + 1
+    }
+
+    private suspend fun refetchDidSettleNow(distinctId: String) {
+        val inFlight = profileRefetchesInFlight[distinctId] ?: return
+        if (inFlight > 1) {
+            profileRefetchesInFlight[distinctId] = inFlight - 1
+            return
+        }
+        profileRefetchesInFlight.remove(distinctId)
+        // No copy landed: the waiting events go through without one, as
+        // they would have, in the order they were captured.
+        if (!initialized || identity.distinctId() != distinctId || currentState() != null) return
+        if (journal?.distinctId != distinctId) return
+        if (!replayPendingLocalRoutes(distinctId)) {
+            Log.w(LOG_TAG, "Pending Journey routes stay queued after the profile fetch settled")
+        }
+        scheduleNextWake()
+    }
+
+    /** A fetch of the customer's copy is running and they have no usable copy. */
+    private fun holdsEvents(distinctId: String): Boolean =
+        (profileRefetchesInFlight[distinctId] ?: 0) > 0 && currentState()?.distinctId != distinctId
 
     private fun currentState(): ProfileState? = profileState?.takeIf {
         it.distinctId == identity.distinctId()
@@ -1468,20 +1532,27 @@ internal class JourneyService(
         }
     }
 
+    /** With no [state] (no usable copy), parked runs continue on their pinned releases. */
     private suspend fun resumeParkedRuns(
-        state: ProfileState,
+        state: ProfileState?,
         event: StoredEvent?,
         excludingRunId: String? = null,
     ) {
         val identityScope = identity.captureScope()
-        if (identityScope.distinctId != state.distinctId || !isCurrent(state) || (event == null && !foreground.get())) return
-        val currentJournal = journal?.takeIf { it.distinctId == state.distinctId } ?: return
-        val executionToken = executionFence.token(state.executionFenceToken) ?: return
+        if (state != null && (identityScope.distinctId != state.distinctId || !isCurrent(state))) return
+        if (event == null && !foreground.get()) return
+        val currentJournal = journal?.takeIf { it.distinctId == identityScope.distinctId } ?: return
+        val executionToken = if (state != null) {
+            executionFence.token(state.executionFenceToken) ?: return
+        } else {
+            executionFence.token()
+        }
+        val profileToken = state?.profileFenceToken ?: profileFence.token()
         for (parked in currentJournal.runs().filter {
             it.id != excludingRunId && it.park != null && it.completion == null &&
                 it.pendingPresentationPublication == null
         }) {
-            if (!isCurrent(state)) return
+            if (if (state != null) !isCurrent(state) else !profileFence.isCurrent(profileToken)) return
             var park = parked.park ?: continue
             if (event == null && park.pendingEvent == null && park.candidateEvents.isEmpty() &&
                 (park.wakeAtMillis == null || park.wakeAtMillis!! > nowMillis())) continue
@@ -1522,9 +1593,14 @@ internal class JourneyService(
                 currentJournal.selectParkedEvent(parked.id, parked.stepId, park, selected)
             } ?: continue
             if (release.hasScreens() && !foreground.get()) continue
-            if (selected == null && park.wakeAtMillis?.let { it > nowMillis() } == true) continue
+            // An event resolves only the timeouts already due when it happened:
+            // one held and replayed later must not time out a wait that a held
+            // event after it satisfies.
+            val now = nowMillis()
+            val timeoutClock = event?.let { minOf(it.timestampMillis, now) } ?: now
+            if (selected == null && park.wakeAtMillis?.let { it > timeoutClock } == true) continue
             beforeParkedResume()
-            val resumed = profileFence.performIfCurrent(state.profileFenceToken) {
+            val resumed = profileFence.performIfCurrent(profileToken) {
                 publishJournalIfCurrent(executionToken, identityScope) {
                     if (release.hasScreens() && !foreground.get()) null else
                         currentJournal.resumeParked(parked.id, parked.stepId, park)

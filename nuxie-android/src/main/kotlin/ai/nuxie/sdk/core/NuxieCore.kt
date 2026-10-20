@@ -68,10 +68,12 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Locale
 
 /** Native provenance proves the runtime is present; compatibility is a separate contract. */
@@ -551,11 +553,16 @@ internal class NuxieCore(
             purchases.recover()
         })
         userTransitions.addObserver(UserTransitionCoordinator.Observer { kind, from, to ->
-            profile.transitionObserver.handleUserChange(kind, from, to)
-            // A reset can remove the returning customer's cache. Revalidate
-            // through the ordinary profile worker instead of leaving Feature
-            // readiness unknown until the next foreground transition.
-            profile.requestRefresh()
+            try {
+                profile.transitionObserver.handleUserChange(kind, from, to)
+                // Fetch the arriving customer's profile through the ordinary
+                // profile worker, so a reset does not leave Feature readiness
+                // unknown until the next foreground transition. Journey holds
+                // their events from the transition until this fetch settles.
+                profile.refreshAndWait()
+            } finally {
+                withContext(NonCancellable) { journeys.profileRefetchDidSettle(to) }
+            }
         })
         // Subscriber registration precedes recovery, while the synchronous
         // enqueue keeps every later capture behind initialization in its FIFO.

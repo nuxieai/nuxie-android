@@ -46,9 +46,10 @@ import kotlinx.serialization.json.jsonObject
  * - Conditional refetch via the scoped ETag validator (locale-keyed).
  * - Atomic admission by identity decision, effective locale, and monotonic
  *   profile generation before every locale-scoped mutation.
- * - Profiles synchronize at launch and foreground only. User changes may
- *   hydrate an existing canonical cache, while locale changes withdraw the
- *   current delivery; neither introduces another sync point.
+ * - Profiles synchronize at launch, at foreground, after a user change, and
+ *   when the locale changes (which first withdraws the current delivery).
+ *   Every fetch tells Journey when it begins and settles, so a customer with
+ *   no usable copy has their events held for it.
  * - Locale-scoped profile cache, release authority, visible Features, and
  *   Journey runtime state share one admission.
  *
@@ -193,11 +194,14 @@ internal class ProfileService(
         return done.await()
     }
 
-    /** Change the effective locale and withdraw the old locale's delivery. */
-    suspend fun setLocaleIdentifier(localeIdentifier: String?) {
+    /**
+     * Change the effective locale and withdraw the old locale's delivery.
+     * Returns whether the locale changed.
+     */
+    suspend fun setLocaleIdentifier(localeIdentifier: String?): Boolean {
         val previousLocale = localeSettings.captureScope()
         val localeScope = localeSettings.setLocaleIdentifier(localeIdentifier)
-        if (localeScope == previousLocale) return
+        if (localeScope == previousLocale) return false
 
         val identityScope = identity.captureScope()
         var obsolete: Job? = null
@@ -210,9 +214,10 @@ internal class ProfileService(
                 journeyProfiles.clear(identityScope.distinctId)
                 identityScope.distinctId to nextProfileGeneration
             }
-        } ?: return
+        } ?: return true
         obsolete?.cancel(CancellationException("Profile locale changed"))
         journeys.profileDidWithdraw(withdrawal.first, withdrawal.second)
+        return true
     }
 
     /** User-transition observer: clear the old owner and hydrate cached authority only. */
@@ -324,13 +329,19 @@ internal class ProfileService(
         return applyProfile(cached, admission, AuthoritySource.NETWORK)
     }
 
-    private suspend fun refreshSafely(): Boolean = try {
-        refreshNow()
-    } catch (cancelled: CancellationException) {
-        throw cancelled
-    } catch (failure: Throwable) {
-        Log.w(LOG_TAG, "Profile refresh processing failed; authority stays as-is", failure)
-        false
+    private suspend fun refreshSafely(): Boolean {
+        val distinctId = identity.captureScope().distinctId
+        journeys.profileRefetchWillBegin(distinctId)
+        return try {
+            refreshNow()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            Log.w(LOG_TAG, "Profile refresh processing failed; authority stays as-is", failure)
+            false
+        } finally {
+            withContext(NonCancellable) { journeys.profileRefetchDidSettle(distinctId) }
+        }
     }
 
     /** A 304 refreshes storage lifetime without replacing runtime authority. */
