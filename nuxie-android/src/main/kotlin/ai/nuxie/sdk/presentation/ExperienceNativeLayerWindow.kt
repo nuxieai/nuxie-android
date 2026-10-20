@@ -37,6 +37,7 @@ internal class ExperienceNativeLayerWindow(
     private var inputEnabled = false
     private var backHandler: (() -> Unit)? = null
     private var backCallback: android.window.OnBackInvokedCallback? = null
+    private var backPressedCallback: androidx.activity.OnBackPressedCallback? = null
     private val layoutListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateBounds() }
 
     /**
@@ -236,6 +237,8 @@ internal class ExperienceNativeLayerWindow(
         dialog.setCancelable(inputEnabled)
         dialog.setCanceledOnTouchOutside(inputEnabled && shell !is PresentationShell.FullScreen)
         (dialog as? BottomSheetDialog)?.behavior?.isDraggable = inputEnabled
+        // Material re-registers its dismissal callback when cancelability changes.
+        registerBackCallback()
     }
 
     fun closeFromUser() { if (inputEnabled) dialog.cancel() }
@@ -250,17 +253,34 @@ internal class ExperienceNativeLayerWindow(
                 true
             }
         }
-        if (android.os.Build.VERSION.SDK_INT >= 33 && backCallback == null) {
-            val callback = android.window.OnBackInvokedCallback { backHandler?.invoke() }
-            backCallback = callback
-            dialog.onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, callback)
+        if (backPressedCallback == null) (dialog as? androidx.activity.ComponentDialog)?.let { component ->
+            val callback = object : androidx.activity.OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() { backHandler?.invoke() }
+            }
+            backPressedCallback = callback
+            component.onBackPressedDispatcher.addCallback(callback)
         }
+        if (android.os.Build.VERSION.SDK_INT >= 33 && backCallback == null) {
+            backCallback = android.window.OnBackInvokedCallback { backHandler?.invoke() }
+        }
+        registerBackCallback()
+    }
+
+    private fun registerBackCallback() {
+        if (android.os.Build.VERSION.SDK_INT < 33) return
+        val callback = backCallback ?: return
+        // Equal-priority callbacks run newest first. Keep Screen history ahead of dismissal
+        // without raising priority above the platform's input-method handling.
+        dialog.onBackInvokedDispatcher.unregisterOnBackInvokedCallback(callback)
+        dialog.onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, callback)
     }
 
     fun retire() {
         retired = true
         if (android.os.Build.VERSION.SDK_INT >= 33) backCallback?.let { dialog.onBackInvokedDispatcher.unregisterOnBackInvokedCallback(it) }
         backCallback = null
+        backPressedCallback?.remove()
+        backPressedCallback = null
         backHandler = null
         activity.window.decorView.removeOnLayoutChangeListener(layoutListener)
         (dialog as? BottomSheetDialog)?.findViewById<View>(com.google.android.material.R.id.coordinator)
