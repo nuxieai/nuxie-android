@@ -14,18 +14,18 @@ import org.robolectric.RuntimeEnvironment
 @RunWith(RobolectricTestRunner::class)
 @OptIn(ExperimentalCoroutinesApi::class)
 class ExperienceLayerSurfaceFailureTest {
-    private suspend fun withSurface(body: suspend (ExperienceSurfaceHost, ExperienceInteractiveLayer,
+    private suspend fun withSurface(globals: Boolean = false, prepareTarget: Boolean = true, body: suspend (ExperienceSurfaceHost, ExperienceInteractiveLayer,
         ExperienceInteractiveLayerTest.RecordingNative, NuxieRuntimeLane) -> Unit) {
-        val native = ExperienceInteractiveLayerTest.RecordingNative()
+        val native = ExperienceInteractiveLayerTest.RecordingNative().apply { this.globals = globals }
         val lane = NuxieRuntimeLane()
         val file = NuxieRuntimeFile(1, native)
         val descriptor = Json.parseToJsonElement("""{"leg":{"screens":[{"id":"a","defaultViewModelName":"A"},
             {"id":"b","defaultViewModelName":"B"}]},"render":{"layerHost":{"artboardName":"LayerList","list":"screens"}}}""").jsonObject
         val layer = ExperienceInteractiveLayer.open(lane, NuxieRuntime(native), file, descriptor, null)
-        val surface = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
+        val surface = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native), usesSystemFrameCallbacks = false)
         try {
             lane.call {
-                layer.prepareOnLane("a"); layer.insertOnLane("a", 0); layer.prepareOnLane("b")
+                layer.prepareOnLane("a"); layer.insertOnLane("a", 0); if (prepareTarget) layer.prepareOnLane("b")
                 set(surface, "interactiveLayer", layer); set(surface, "artboard", layer.artboard)
                 set(surface, "player", layer.player); set(surface, "activeRowId", "a")
                 @Suppress("UNCHECKED_CAST")
@@ -184,6 +184,158 @@ class ExperienceLayerSurfaceFailureTest {
                 activity.pause().stop().destroy(); scene.delete()
             }
         }
+    }
+
+    @Test fun `row preparation retires a stalled submission within its operation budget`() = runTest {
+        withSurface { surface, _, native, lane ->
+            installPendingSubmission(surface, native, lane)
+            val scene = java.io.File.createTempFile("layer-prepare", ".riv")
+            val target = PreparedPresentation(scene, "B", 0, PresentationShell.FullScreen(), "b")
+            val preparation = async { surface.prepareLayerRow(target) }
+            runCurrent(); lane.call {}
+            advanceTimeBy(251); runCurrent(); lane.call {}; runCurrent()
+            try {
+                assertTrue("Preparation must reach the transition even if no submission presents", preparation.isCompleted)
+                preparation.await()
+                assertEquals(1, native.detaches)
+            } finally {
+                retireAndDrain(surface, lane)
+                preparation.cancelAndJoin(); scene.delete()
+            }
+        }
+    }
+
+    @Test fun `cancelled preparation cannot block noncancellable abort restoration or later Back`() = runTest {
+        withSurface(prepareTarget = false) { surface, layer, native, lane ->
+            installPendingSubmission(surface, native, lane)
+            val scene = java.io.File.createTempFile("layer-abort", ".riv")
+            val target = PreparedPresentation(scene, "B", 0, PresentationShell.FullScreen(), "b")
+            var prepared = false
+            var restored = false
+            val navigation = launch(start = CoroutineStart.UNDISPATCHED) {
+                try { surface.prepareLayerRow(target); prepared = true }
+                finally { withContext(NonCancellable) { runCatching { surface.restoreLayerRow("a", "b") }.onSuccess { restored = true } } }
+            }
+            navigation.cancel(); runCurrent(); lane.call {}
+            advanceTimeBy(251); repeat(4) { runCurrent(); lane.call {} }
+            try {
+                assertTrue("Abort must finish while its parent is cancelled", navigation.isCompleted)
+                assertTrue(restored)
+                @Suppress("UNCHECKED_CAST")
+                val retained = field(surface, "layerRetainedValues") as Map<String, *>
+                assertFalse("Cancelled preparation must not mutate retained row ownership", retained.containsKey("b"))
+                assertFalse("Cancelled row preparation must never run late", prepared)
+                assertEquals(1, native.detaches)
+                assertEquals(listOf("a"), layer.mountedScreenIds())
+                surface.prepareLayerRow(target)
+                surface.layerOperation { it.insertOnLane("b", 1) }
+                surface.restoreLayerRow("a", "b")
+            } finally { retireAndDrain(surface, lane); navigation.cancelAndJoin(); scene.delete() }
+        }
+    }
+
+    @Test fun `layer phase preserves queued environment updates for the next frame and their completion`() = runTest {
+        withSurface(globals = true) { surface, layer, native, lane ->
+            installPendingSubmission(surface, native, lane)
+            val update = surface.updateRuntimeValues(mapOf("env/reduceMotion" to NuxieViewModelScalarValue.BooleanValue(true)))
+            lane.call {}
+            assertFalse(update.isCompleted)
+            val phase = async { surface.applyLayerTransition {
+                it.setPhasesOnLane(listOf("a" to ExperienceScreenLifecycle.Phase.EXITING))
+            } }
+            runCurrent(); lane.call {}
+            var reducedAtStep = false
+            native.onStep = { reducedAtStep = native.writes.any { it.first == 500L && it.second.path == "reduceMotion" && it.second.boolValue } }
+            lane.call {
+                val layout = checkNotNull(ExperienceSurfaceLayout.create(100, 100, 1f))
+                set(surface, "surfaceLayout", layout); set(surface, "appliedLayout", layout)
+                set(surface, "pendingPresentation", false); set(surface, "attached", true)
+                native.presentation = 1
+            }
+            surface.doFrame(1_000_000_000L)
+            lane.call {}; runCurrent()
+            try {
+                assertTrue("The queued update must complete with the phase frame", update.isCompleted)
+                assertTrue(update.await())
+                assertTrue("The next native step must see the pending environment update", reducedAtStep)
+                assertEquals(NuxieViewModelScalarValue.BooleanValue(true), layer.lifecycle("a")["env/reduceMotion"])
+                phase.await()
+            } finally { retireAndDrain(surface, lane); phase.cancelAndJoin() }
+        }
+    }
+
+    @Test fun `prepared Screen owns the lifecycle of retained and reinserted rows`() = runTest {
+        withSurface { surface, layer, _, lane ->
+            val scene = java.io.File.createTempFile("layer-lifecycle", ".riv")
+            val source = ExperienceScreenLifecycle().apply {
+                move(ExperienceScreenLifecycle.Phase.ENTERING, exitReason = ExperienceScreenLifecycle.ExitReason.NONE)
+                move(ExperienceScreenLifecycle.Phase.HIDDEN, exitReason = ExperienceScreenLifecycle.ExitReason.NONE)
+            }
+            val next = source.copyForPreparation()
+            val target = PreparedPresentation(scene, "B", 0, PresentationShell.FullScreen(), "b", screenLifecycle = next)
+            try {
+                surface.layerOperation {
+                    it.setPhasesOnLane(listOf("b" to ExperienceScreenLifecycle.Phase.ENTERING))
+                    it.setPhasesOnLane(listOf("b" to ExperienceScreenLifecycle.Phase.HIDDEN))
+                }
+                surface.prepareLayerRow(target)
+                surface.layerOperation {
+                    it.insertOnLane("b", 1)
+                    it.setPhasesOnLane(listOf("b" to ExperienceScreenLifecycle.Phase.ENTERING))
+                    it.setPhasesOnLane(listOf("b" to ExperienceScreenLifecycle.Phase.ACTIVE))
+                }
+                assertEquals("Row visits must update the PreparedPresentation lifecycle owner", 2uL, next.appearances)
+                assertEquals(ExperienceScreenLifecycle.Phase.ACTIVE, next.phase)
+                assertEquals(1uL, source.appearances)
+                assertEquals(NuxieViewModelScalarValue.NumberValue(2.0), layer.lifecycle("b")["screen/appearances"])
+                surface.removeLayerRow("b")
+                val revisit = next.copyForPreparation()
+                surface.prepareLayerRow(target.copy(screenLifecycle = revisit))
+                surface.layerOperation {
+                    it.insertOnLane("b", 1)
+                    it.setPhasesOnLane(listOf("b" to ExperienceScreenLifecycle.Phase.ENTERING))
+                }
+                assertEquals(3uL, revisit.appearances)
+                assertEquals(2uL, next.appearances)
+            } finally { scene.delete() }
+        }
+    }
+
+    @Test fun `stale preparation lifecycle cannot reset a retained row appearance history`() = runTest {
+        withSurface { surface, layer, _, _ ->
+            val scene = java.io.File.createTempFile("layer-retained-lifecycle", ".riv")
+            try {
+                surface.layerOperation { rowLayer ->
+                    repeat(2) {
+                        rowLayer.setPhasesOnLane(listOf("b" to ExperienceScreenLifecycle.Phase.ENTERING))
+                        rowLayer.setPhasesOnLane(listOf("b" to ExperienceScreenLifecycle.Phase.HIDDEN))
+                    }
+                }
+                val incoming = ExperienceScreenLifecycle()
+                surface.prepareLayerRow(PreparedPresentation(scene, "B", 0, PresentationShell.FullScreen(), "b", screenLifecycle = incoming))
+                surface.layerOperation { it.setPhasesOnLane(listOf("b" to ExperienceScreenLifecycle.Phase.ENTERING)) }
+                assertEquals("A retained row must carry its own cumulative lifecycle into the new owner", 3uL, incoming.appearances)
+                assertEquals(NuxieViewModelScalarValue.NumberValue(3.0), layer.lifecycle("b")["screen/appearances"])
+            } finally { scene.delete() }
+        }
+    }
+
+    private suspend fun installPendingSubmission(surface: ExperienceSurfaceHost,
+        native: ExperienceInteractiveLayerTest.RecordingNative, lane: NuxieRuntimeLane) {
+        lane.call {
+            val renderer = NuxieAndroidVulkanRenderer(900, native)
+            val window = NuxieRuntimeWindow(901, native)
+            set(surface, "renderer", renderer); set(surface, "window", window)
+            set(surface, "running", true)
+            val player = field(surface, "player") as NuxieRuntimePlayer
+            assertEquals(4, renderer.renderAndPresent(player, window, 0, 1f))
+            set(surface, "pendingPresentation", true)
+        }
+    }
+
+    private suspend fun retireAndDrain(surface: ExperienceSurfaceHost, lane: NuxieRuntimeLane) = lane.call {
+        surface.javaClass.getDeclaredMethod("retireSubmission").apply { isAccessible = true }.invoke(surface)
+        surface.javaClass.getDeclaredMethod("drainTextWrites").apply { isAccessible = true }.invoke(surface)
     }
 
     private fun field(owner: Any, name: String): Any? = owner.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(owner)
