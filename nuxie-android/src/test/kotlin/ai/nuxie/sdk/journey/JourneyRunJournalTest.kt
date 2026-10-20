@@ -489,6 +489,45 @@ class JourneyRunJournalTest {
         assertNull(advanced.park)
     }
 
+    @Test fun `a fallback exposure reports a selected treatment, as iOS does`() = runBlocking {
+        val journal = JourneyRunJournal(directory, "customer")
+        val run = requireNotNull(
+            journal.admit(arm(), JourneyFrequency.EveryMatch, "experiment", 1_000),
+        )
+        journal.markStartedQueued(run)
+        // Publishing refuses a holdout fallback; a variant marked holdout
+        // that is reached as the fallback still reports a selected treatment.
+        journal.transition(
+            run.id,
+            "present",
+            run.context,
+            experimentExposure = JourneyRun.ExperimentExposure(
+                experimentId = "checkout",
+                variantId = "fallback",
+                isHoldout = true,
+                kind = JourneyRun.ExperimentExposure.Kind.FALLBACK,
+                eventId = "exposure-1",
+                selectedAtMillis = 2_000,
+            ),
+        )
+        journal.preparePresentation(run.id, "screen_checkout")
+        val captured = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
+        val reporter = JourneyExperimentExposureReporter(
+            JourneyRunJournal(directory, "customer"),
+        ) { name, properties, _, _ ->
+            captured += name to properties
+            true
+        }
+        assertTrue(reporter.flushPending())
+        journal.markExperimentExposuresShown(run.id, "screen_checkout", 3_000)
+        assertTrue(reporter.flushPending())
+
+        val properties = captured.single().second
+        assertEquals("fallback", properties["assignment_source"])
+        assertEquals(false, properties["is_holdout"])
+        assertEquals("selected", properties["exposure_basis"])
+    }
+
     @Test fun `experiment exposure stays latent until its bound screen is shown`() = runBlocking {
         val journal = JourneyRunJournal(directory, "customer")
         val run = requireNotNull(
@@ -540,6 +579,7 @@ class JourneyRunJournalTest {
         assertEquals("fallback", properties["variant_key"])
         assertEquals("fallback", properties["assignment_source"])
         assertEquals(false, properties["is_holdout"])
+        assertEquals("selected", properties["exposure_basis"])
         val queued = JourneyRunJournal(directory, "customer").runs().single()
             .experimentExposures.single()
         assertEquals(3_000L, queued.shownAtMillis)
