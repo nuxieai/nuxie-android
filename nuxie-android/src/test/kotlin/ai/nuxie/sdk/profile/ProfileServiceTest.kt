@@ -134,6 +134,8 @@ class ProfileServiceTest {
         data class Publication(val kind: String, val generation: Long?)
 
         val publications = CopyOnWriteArrayList<Publication>()
+        /** Fetch brackets and the commits between them, in order. */
+        val fetchLog = CopyOnWriteArrayList<String>()
 
         override suspend fun profileDidCommit(
             snapshot: JourneyProfileCatalog.Snapshot,
@@ -144,6 +146,15 @@ class ProfileServiceTest {
         ) {
             if (retainArtifacts) artifacts?.let(retained::add) else artifacts?.close()
             publications += Publication("commit", admissionGeneration)
+            fetchLog += "commit $distinctId"
+        }
+
+        override suspend fun profileRefetchWillBegin(distinctId: String) {
+            fetchLog += "begin $distinctId"
+        }
+
+        override suspend fun profileRefetchDidSettle(distinctId: String) {
+            fetchLog += "settle $distinctId"
         }
 
         override suspend fun profileDidWithdraw(
@@ -432,6 +443,45 @@ class ProfileServiceTest {
     }
 
 
+
+    /**
+     * Every fetch tells Journey when it begins and when it settles, after the
+     * commit of what it fetched; one that commits nothing settles too.
+     */
+    @Test
+    fun everyFetchIsBracketedForJourney() = runBlocking {
+        val plane = planeProfileFixture()
+        val transport = profileTransport(body = plane.first, etag = "\"plane-v1\"")
+        val runtime = RuntimePublicationRecorder()
+        val context = RuntimeEnvironment.getApplication()
+        val fixture = ProfileFixture(
+            transport = transport,
+            distinctId = "bracketed-fetch",
+            localeIdentifier = "en_US",
+            apiKey = "pk_bracketed_fetch",
+            journeyProfiles = JourneyProfileCatalog(
+                trustedKeys = JourneyTrustRoots.keys(NuxieEnvironment.DEVELOPMENT),
+                highWater = JourneyReleaseHighWaterStore(context),
+                supportedRuntime = { plane.second },
+            ),
+            journeyRuntime = runtime,
+        )
+
+        try {
+            assertTrue(fixture.service.refreshAndWait())
+            assertTrue(fixture.service.refreshAndWait())
+
+            assertEquals(
+                listOf(
+                    "begin bracketed-fetch", "commit bracketed-fetch", "settle bracketed-fetch",
+                    "begin bracketed-fetch", "settle bracketed-fetch",
+                ),
+                runtime.fetchLog.toList(),
+            )
+        } finally {
+            fixture.close()
+        }
+    }
 
     @Test
     fun duplicateKeyResponsesAreRejected() = runBlocking {

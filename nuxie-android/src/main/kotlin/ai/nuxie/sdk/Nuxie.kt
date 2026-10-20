@@ -21,7 +21,9 @@ import android.os.Handler
 import android.os.Looper
 import ai.nuxie.sdk.logging.NuxieLog as Log
 import java.lang.ref.WeakReference
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -336,14 +338,23 @@ object Nuxie {
     // MARK: Profile
 
     /**
-     * Use this locale at the next launch/foreground profile synchronization; null follows the device.
+     * Change the locale and fetch that locale's profile at once; null follows the device.
+     * Events sent meanwhile wait for the new profile, then reach Journeys against it.
      * @throws IllegalStateException when the SDK is not running.
      */
     suspend fun setLocaleIdentifier(localeIdentifier: String?) {
         val operation = lifecycle.admit() ?: throw IllegalStateException("Call Nuxie.setup first.")
         lifecycle.execute(operation) { state ->
             val core = state
-            core.profile.setLocaleIdentifier(localeIdentifier)
+            val distinctId = core.identity.distinctId()
+            // The whole change counts as one fetch, so the withdrawal already
+            // holds the customer's events until the new profile settles.
+            core.journeys.profileRefetchWillBegin(distinctId)
+            try {
+                if (core.profile.setLocaleIdentifier(localeIdentifier)) core.profile.refreshAndWait()
+            } finally {
+                withContext(NonCancellable) { core.journeys.profileRefetchDidSettle(distinctId) }
+            }
         }
     }
 

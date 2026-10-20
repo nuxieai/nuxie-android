@@ -177,8 +177,9 @@ Runtime updates through `setLocaleIdentifier`, `setPurchaseDelegate`, and
 `setPurchaseHandlingMode` require a running SDK. They throw
 `IllegalStateException` before setup and once shutdown starts; rejected changes
 are not saved for the next setup. Set initial values on `NuxieConfiguration`.
-Locale changes invalidate the old profile request and take effect at the next
-profile synchronization; `null` follows the device locale. Purchase settings
+A locale change invalidates the old profile request and fetches the new
+locale's profile at once; events sent meanwhile wait for it, then reach
+Journeys against it. `null` follows the device locale. Purchase settings
 apply to future purchase/restore work, and a null delegate restores native billing.
 
 Android retains `featureCacheTTL` on configuration, in milliseconds (five minutes
