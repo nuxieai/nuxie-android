@@ -233,6 +233,34 @@ class JourneyRefetchEventHoldTest {
         assertEquals(0, launch.outcomes("customer", "took_go"))
     }
 
+    /**
+     * The fetch settles while the foreground check is still running, so the
+     * held go cannot replay yet. Once the check completes it replays before
+     * the wait that ran out meanwhile is resolved.
+     */
+    @Test fun `held events replay before waits resolve when the foreground check ends`() = runBlocking {
+        val launch = Launch("customer")
+        val saved = launch.copy("customer", 1, "start_waiting")
+        launch.start()
+        launch.commit("customer", saved)
+        launch.track("start_waiting")
+        launch.journeys.profileRefetchWillBegin("customer")
+        launch.withdraw("customer")
+        launch.journeys.onAppVisibilityChanged(false)
+        launch.journeys.onAppVisibilityChanged(true)
+        val token = requireNotNull(launch.journeys.foregroundRevalidationToken())
+        launch.track("go")
+        launch.clock.addAndGet(70_000L)
+        launch.journeys.profileRefetchDidSettle("customer")
+        launch.eventLog.awaitBarrier()
+        assertEquals(0, launch.outcomes("customer", "took_go") + launch.outcomes("customer", "timed_out"))
+
+        launch.journeys.completeForegroundRevalidation(token)
+        launch.eventLog.awaitBarrier()
+        assertEquals(1, launch.outcomes("customer", "took_go"))
+        assertEquals(0, launch.outcomes("customer", "timed_out"))
+    }
+
     /** One launch: Journey subscribed to a real EventLog as NuxieCore subscribes it. */
     private inner class Launch(distinctId: String) {
         val clock = AtomicLong(1_000_000L)
