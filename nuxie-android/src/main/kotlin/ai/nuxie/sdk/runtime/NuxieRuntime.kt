@@ -74,6 +74,49 @@ internal class NuxieRuntime(
         artboard: NuxieRuntimeArtboard,
         projection: NuxieViewModelListProjection,
         instanceBindings: List<NuxieViewModelInstanceBinding> = emptyList(),
+    ): NuxieRuntimeViewModelState = projectViewModelList(file, projection, instanceBindings,
+        createRoot = { requireNativeValue(native.newDefaultViewModel(artboard.requireHandle()), "create default view model") },
+        bindRoot = { root -> requireNativeSuccess(native.bindViewModel(artboard.requireHandle(), root), "bind projected default view model") })
+
+    /** Reuses the Screen binder with a row root, without creating another artboard or player. */
+    fun bindRowViewModel(
+        file: NuxieRuntimeFile,
+        schemaIndex: Int,
+        authoredInstanceIndex: Int?,
+        defaultInstanceId: String?,
+        instanceBindings: List<NuxieViewModelInstanceBinding>,
+        projection: NuxieViewModelListProjection?,
+    ): NuxieRuntimeViewModelState {
+        val catalog = file.viewModelCatalog()
+        fun createRoot() = requireNativeValue(native.newViewModel(file.requireHandle(), schemaIndex,
+            authoredInstanceIndex), "create Screen row")
+        if (projection != null) {
+            require(catalog.schemas.single { it.index == schemaIndex }.name == projection.rootSchemaName) {
+                "Product projection must use the Screen row type"
+            }
+            require(projection.defaultInstanceId == defaultInstanceId) { "Product projection has a different root identity" }
+            return projectViewModelList(file, projection, instanceBindings, ::createRoot) {}
+        }
+        val root = createRoot()
+        try {
+            val ids = NuxieViewModelSnapshot.fromNative(
+                requireNativeValue(native.snapshotViewModel(root), "identify row graph"),
+                schemaNames = catalog.schemas.associate { it.index.toLong() to it.name },
+                defaultInstanceId = defaultInstanceId).captureInstanceIds(instanceBindings)
+            return NuxieRuntimeViewModelState(root, emptyList(), native, catalog, schemaIndex, ids, defaultInstanceId)
+        } catch (error: Throwable) {
+            runCatching { requireNativeSuccess(native.freeViewModel(root), "free row view model") }
+                .exceptionOrNull()?.let(error::addSuppressed)
+            throw error
+        }
+    }
+
+    private fun projectViewModelList(
+        file: NuxieRuntimeFile,
+        projection: NuxieViewModelListProjection,
+        instanceBindings: List<NuxieViewModelInstanceBinding>,
+        createRoot: () -> Long,
+        bindRoot: (Long) -> Unit,
     ): NuxieRuntimeViewModelState {
         require(projection.items.map { it.listIndex } == projection.items.indices.toList()) {
             "Projected view-model list indices must be contiguous and ordered"
@@ -111,10 +154,7 @@ internal class NuxieRuntime(
             }
         }
 
-        val root = requireNativeValue(
-            native.newDefaultViewModel(artboard.requireHandle()),
-            "create default view model",
-        )
+        val root = createRoot()
         val children = mutableListOf<Long>()
         val usedAuthoredInstances = mutableSetOf<Int>()
         val instanceIds = mutableMapOf<String, Long>()
@@ -176,10 +216,7 @@ internal class NuxieRuntime(
                     )
                 }
             }
-            requireNativeSuccess(
-                native.bindViewModel(artboard.requireHandle(), root),
-                "bind projected default view model",
-            )
+            bindRoot(root)
             val capturedIds = if (instanceBindings.isEmpty()) instanceIds else {
                 NuxieViewModelSnapshot.fromNative(
                     requireNativeValue(native.snapshotViewModel(root), "identify projected graph"),
@@ -363,12 +400,12 @@ internal class NuxieRuntimeArtboard internal constructor(
      * This artboard owns the returned view-model handle.
      */
     fun bindDefaultViewModel(
-        expectedSchemaName: String,
+        expectedSchemaName: String? = null,
         defaultInstanceId: String? = null,
         instanceBindings: List<NuxieViewModelInstanceBinding> = emptyList(),
     ) {
         val artboard = owned.require()
-        require(expectedSchemaName.isNotEmpty()) { "Declared default view-model name is empty" }
+        require(expectedSchemaName == null || expectedSchemaName.isNotEmpty()) { "Declared default view-model name is empty" }
         if (defaultViewModel != null) {
             check(boundDefaultSchemaName == expectedSchemaName && boundDefaultInstanceId == defaultInstanceId) {
                 "Artboard already has a different declared default view model"
@@ -401,7 +438,7 @@ internal class NuxieRuntimeArtboard internal constructor(
             val actualName = checkNotNull(catalog.schemas.singleOrNull { it.index == schemaIndex.toInt() }) {
                 "Default view model references an unavailable schema"
             }.name
-            check(actualName == expectedSchemaName) {
+            check(expectedSchemaName == null || actualName == expectedSchemaName) {
                 "Declared default view model $expectedSchemaName does not match artboard default $actualName"
             }
             val instanceIds = if (instanceBindings.isEmpty()) emptyMap() else {
@@ -425,6 +462,22 @@ internal class NuxieRuntimeArtboard internal constructor(
         defaultViewModel = viewModel
         boundDefaultSchemaName = expectedSchemaName
         boundDefaultInstanceId = defaultInstanceId
+    }
+
+    /** Mutate the bound host list while the artboard retains its default root. */
+    fun insertDefaultListItem(path: String, index: Int, value: NuxieRuntimeViewModelState) {
+        mutateDefaultViewModel(NativeViewModelWrite(NuxieViewModelMutationKind.LIST_INSERT,
+            path, index = index.toLong(), relatedViewModel = value.requireHandle()))
+    }
+
+    fun removeDefaultListItem(path: String, index: Int) {
+        mutateDefaultViewModel(NativeViewModelWrite(NuxieViewModelMutationKind.LIST_REMOVE,
+            path, index = index.toLong()))
+    }
+
+    private fun mutateDefaultViewModel(write: NativeViewModelWrite) {
+        requireNativeSuccess(native.mutateViewModel(checkNotNull(defaultViewModel).require(), write),
+            "mutate host list")
     }
 
     fun newPlayer(stateMachineName: String? = null): NuxieRuntimePlayer? {
@@ -641,6 +694,10 @@ internal class NuxieRuntimePlayer internal constructor(
     private var interactionStepPending = true
     private var stepFailed = false
     private val stateMachine by lazy(LazyThreadSafetyMode.NONE) { isStateMachine() }
+
+    fun requireStateMachine() {
+        check(stateMachine) { "Layer host requires a default state machine" }
+    }
 
     fun bindGlobalViewModel(name: String, value: NuxieRuntimeViewModelState) {
         if (stateMachine) requireNativeSuccess(
