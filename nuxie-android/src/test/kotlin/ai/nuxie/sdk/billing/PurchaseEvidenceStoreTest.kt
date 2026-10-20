@@ -279,6 +279,29 @@ class PurchaseEvidenceStoreTest {
     }
 
     @Test
+    fun aPreviousEntryRevokedBeforeTheServerAnsweredOwesNoSend(): Unit = kotlinx.coroutines.runBlocking {
+        val directory = Files.createTempDirectory("nuxie-purchase-evidence").toFile()
+        try {
+            // Written when Play stopped reporting a purchase the server never answered.
+            File(directory, "purchase-evidence.json").writeText(
+                """{"refunded":{"purchaseToken":"refunded","packageName":"com.example.app",""" +
+                    """"storeProductIds":["pro"],"purchaseState":"PURCHASED",""" +
+                    """"syncAttributionDistinctId":"requester","acknowledged":true,"consumed":false,""" +
+                    """"synced":false,"permanentlyRejected":false,"revoked":true,""" +
+                    """"syncAttempts":1,"completionAttempts":0,"firstSeenMillis":1}}""",
+            )
+
+            val refunded = FilePurchaseEvidenceStore(directory).load().getValue("refunded")
+
+            assertEquals("Only a fresh Play observation admits it again", null, refunded.pendingSend)
+            assertEquals(null, refunded.ownerDistinctId)
+            assertFalse(refunded.refused)
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun fileStoreDistinguishesAbsentEmptyAndPopulatedPinnedAllowances(): Unit = kotlinx.coroutines.runBlocking {
         val directory = Files.createTempDirectory("nuxie-pinned-purchase-allowances").toFile()
         try {

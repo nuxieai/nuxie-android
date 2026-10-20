@@ -2557,6 +2557,47 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun aPreviousEntryRevokedBeforeTheServerAnsweredUnlocksNothingUntilPlayReportsItAgain() = runTest {
+        val fixture = fixture(this)
+        val customer = fixture.core.identity.distinctId()
+        // Written before the outbox, when Play stopped reporting the customer's
+        // own purchase before the server answered it (a refund, say).
+        val directory = temporaryFolder.newFolder()
+        File(directory, "purchase-evidence.json").writeText(
+            """{"refunded":{"purchaseToken":"refunded","packageName":"com.example.app",""" +
+                """"storeProductIds":["play-pro"],"nuxieProductId":"nuxie-pro","productType":"inapp",""" +
+                """"purchaseState":"PURCHASED","obfuscatedAccountId":"${accountHash(customer)}",""" +
+                """"syncAttributionDistinctId":"$customer","acknowledged":true,"consumed":false,""" +
+                """"synced":false,"permanentlyRejected":false,"revoked":true,"authorityScope":"test-fixture",""" +
+                """"syncAttempts":1,"completionAttempts":0,"firstSeenMillis":1}}""",
+        )
+        fixture.store.upsert(
+            FilePurchaseEvidenceStore(directory, Dispatchers.Unconfined).load().getValue("refunded"),
+        )
+        fixture.service.rememberProduct(
+            product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+        )
+        runCurrent()
+        assertFalse("A refunded purchase is not unlocked again", fixture.core.featureInfo.isAllowed("pro"))
+
+        // Play cannot be asked: nothing is sent and nothing unlocks.
+        fixture.billing.failQueries = true
+        fixture.service.recover()
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        assertTrue(fixture.requests.isEmpty())
+
+        // Play reports the purchase again: that fresh observation admits it.
+        fixture.billing.failQueries = false
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("refunded", obfuscatedAccountId = accountHash(customer)).copy(acknowledged = true),
+        )
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
+        fixture.service.recover()
+        assertEquals(listOf("refunded"), fixture.requests.map { it.first })
+        fixture.close()
+    }
+
+    @Test
     fun buyersOwnCheckoutUnlocksBeforeTheServerAnswersAndAConflictDropsItAtOnce() = runTest {
         val fixture = fixture(this)
         fixture.service.rememberProduct(
