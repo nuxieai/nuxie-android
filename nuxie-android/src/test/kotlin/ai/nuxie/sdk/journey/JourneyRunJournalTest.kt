@@ -489,14 +489,14 @@ class JourneyRunJournalTest {
         assertNull(advanced.park)
     }
 
-    @Test fun `a fallback exposure reports a selected treatment, as iOS does`() = runBlocking {
+    @Test fun `a fallback exposure is never a holdout, as on iOS`() = runBlocking {
         val journal = JourneyRunJournal(directory, "customer")
         val run = requireNotNull(
             journal.admit(arm(), JourneyFrequency.EveryMatch, "experiment", 1_000),
         )
         journal.markStartedQueued(run)
         // Publishing refuses a holdout fallback; a variant marked holdout
-        // that is reached as the fallback still reports a selected treatment.
+        // that is reached as the fallback still reports is_holdout false.
         journal.transition(
             run.id,
             "present",
@@ -525,7 +525,6 @@ class JourneyRunJournalTest {
         val properties = captured.single().second
         assertEquals("fallback", properties["assignment_source"])
         assertEquals(false, properties["is_holdout"])
-        assertEquals("selected", properties["exposure_basis"])
     }
 
     @Test fun `experiment exposure stays latent until its bound screen is shown`() = runBlocking {
@@ -579,7 +578,6 @@ class JourneyRunJournalTest {
         assertEquals("fallback", properties["variant_key"])
         assertEquals("fallback", properties["assignment_source"])
         assertEquals(false, properties["is_holdout"])
-        assertEquals("selected", properties["exposure_basis"])
         val queued = JourneyRunJournal(directory, "customer").runs().single()
             .experimentExposures.single()
         assertEquals(3_000L, queued.shownAtMillis)

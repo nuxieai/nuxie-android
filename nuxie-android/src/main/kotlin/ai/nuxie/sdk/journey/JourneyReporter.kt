@@ -110,8 +110,6 @@ internal class JourneyExperimentExposureReporter(
             }
         }
         properties["is_holdout"] = isHoldout
-        // A treatment was selected; a holdout's treatment was suppressed.
-        properties["exposure_basis"] = if (isHoldout) "suppressed" else "selected"
         return JourneyEventNames.EXPERIMENT_EXPOSURE to properties
     }
 }

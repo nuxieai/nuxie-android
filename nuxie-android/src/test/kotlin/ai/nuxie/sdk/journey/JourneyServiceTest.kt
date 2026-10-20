@@ -1463,7 +1463,6 @@ class JourneyServiceTest {
             assertEquals("treatment", exposures.single().second["variant_key"])
             assertEquals("profile", exposures.single().second["assignment_source"])
             assertEquals(true, exposures.single().second["is_holdout"])
-            assertEquals("suppressed", exposures.single().second["exposure_basis"])
             val persisted = journal.runs().single().experimentExposures.single()
             assertEquals(100_000L, persisted.shownAtMillis)
             assertTrue(persisted.queued)
