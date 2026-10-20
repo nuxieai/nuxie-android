@@ -42,7 +42,8 @@ internal object JourneyRenderSchema {
     fun validate(input: JsonObject) {
         val renderer = oneOf(input["renderer"], "nux")
         val sceneField = "nux"
-        val render = exact(input, setOf("renderer", sceneField, "screens", "transitions", "textInputs", "assets"), setOf("videoElements"))
+        val render = exact(input, setOf("renderer", sceneField, "screens", "transitions", "textInputs", "assets"), setOf("videoElements", "layerHost"))
+        ExperienceLayerHostContract.host(render)
         videoElements(render)
         val scene = exact(render[sceneField], setOf("key", "sha256", "sizeBytes", "contentType"))
         val sha = hash(scene["sha256"])
@@ -63,7 +64,7 @@ internal object JourneyRenderSchema {
         for (input in array(render["transitions"], 1024)) {
             val transition = exact(input, setOf("id", "kind", "sourceScreenId", "destinationScreenId", "durationMs",
                 "incomingOnTop", "source", "destination"), setOf("reverse"))
-            releaseId(transition["id"]); oneOf(transition["kind"], "choreographed")
+            releaseId(transition["id"]); ExperienceLayerHostContract.transitionKind(transition["kind"])
             for (key in listOf("sourceScreenId", "destinationScreenId")) if (releaseId(transition[key]) !in screens) fail("transition screen")
             integer(transition["durationMs"], maximum = 60_000); boolean(transition["incomingOnTop"])
             endpoints(transition)
