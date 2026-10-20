@@ -42,6 +42,9 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import ai.nuxie.sdk.experiences.ExperienceLayerHostContract
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.doubleOrNull
@@ -101,6 +104,8 @@ internal data class PreparedPresentation(
     val closeLayer: (suspend (PreparedLayerReveal) -> Boolean)? = null,
     val fitsContentHeight: Boolean = shell.fitsContent,
     val layerContentHeight: AtomicReference<Float?> = AtomicReference(null),
+    val isBack: Boolean = false,
+    val requestBack: (() -> Boolean)? = null,
 )
 
 internal sealed interface PresentationShell {
@@ -680,6 +685,8 @@ internal class ExperiencePresentationService(
         val screenDismissed: AtomicBoolean = AtomicBoolean(false),
         var navigationDismissal: NavigationDismissal? = null,
         var layerHistory: ExperienceLayerHistory = ExperienceLayerHistory(listOf(screenId)),
+        var requestBack: (() -> Boolean)? = null,
+        var nativeRevisits: MutableMap<String, suspend () -> ExperienceRef> = mutableMapOf(),
         val onScreenChanged: suspend (String) -> Boolean,
         val onPresentationRevealed: suspend (String) -> Unit,
         var lifecycleByScreen: MutableMap<String, ExperienceScreenLifecycle> = mutableMapOf(),
@@ -756,6 +763,7 @@ internal class ExperiencePresentationService(
     private var current: ActivePresentation? = null
     private val coveredLayers = mutableListOf<ActivePresentation>()
     private var pendingReservation: PendingReservation? = null
+    private val layerNavigation = Mutex()
     private var transitionInProgress = false
     private var pendingBackNavigation: PendingBackNavigation? = null
     private val identityEpochByOwner = mutableMapOf<String, Long>()
@@ -764,6 +772,7 @@ internal class ExperiencePresentationService(
         val owner: JourneyPresentationOwner,
         val target: String,
         val history: ExperienceLayerHistory,
+        val transition: JsonObject? = null,
     )
 
     private data class PresentationRequest(
@@ -828,6 +837,49 @@ internal class ExperiencePresentationService(
         transition: JsonObject? = null,
         runValues: ExperienceRunValues? = null,
     ): ExperienceRef {
+        suspend fun present() = presentJourneyNow(
+            fences, release, screenId, journeyId, ownerDistinctId, reservation, canPresent, acquire,
+            nextBatchSequence, nextEmissionSequence, onScreenChanged, onScreenDismissed, onLinkOpened,
+            onEmissionBatch, onPresentationRevealed, onOutcome, transition, runValues,
+        )
+        if (!ExperienceLayerHostContract.isEnabled(release.descriptor)) return present()
+        return layerNavigation.withLock {
+            val active = synchronized(stateLock) { current?.takeIf { it.isOwnedBy(journeyId, ownerDistinctId) } }
+            if (active?.journey?.screenId == screenId && active.acquired.identity == release.identity &&
+                active.outcomeReason.get() == null && transition?.string("type") != "modal" &&
+                fences.isCurrent() && canPresent() && currentDistinctId() == ownerDistinctId) {
+                reservation?.close()
+                active.ref
+            } else present()
+        }
+    }
+
+    private suspend fun presentJourneyNow(
+        fences: JourneyPresentationFences,
+        release: AuthenticatedJourneyRelease,
+        screenId: String,
+        journeyId: String,
+        ownerDistinctId: String,
+        reservation: JourneyPresentationReservation?,
+        canPresent: () -> Boolean = { true },
+        acquire: suspend () -> AcquiredJourneyRelease,
+        nextBatchSequence: Long = 0,
+        nextEmissionSequence: Long = 0,
+        onScreenChanged: suspend (String) -> Boolean = { true },
+        onScreenDismissed: suspend (
+            String,
+            String?,
+            String,
+        ) -> JourneyScreenDismissalResult = { _, _, _ ->
+            JourneyScreenDismissalResult.HANDLED
+        },
+        onLinkOpened: suspend (JourneyOpenedLink) -> Unit = {},
+        onEmissionBatch: suspend (JourneyScreenEmissionBatch, JourneyRuntimeEmissionSources?) -> JourneyEmissionBatchResult = { _, _ -> JourneyEmissionBatchResult.ACCEPTED },
+        onPresentationRevealed: suspend (String) -> Unit = {},
+        onOutcome: suspend (JourneySurfaceOutcome) -> Unit,
+        transition: JsonObject? = null,
+        runValues: ExperienceRunValues? = null,
+    ): ExperienceRef {
         try { PresentationShell.fromTransition(transition) } catch (error: ExperiencePresentationException) {
             reservation?.close()
             throw error
@@ -863,6 +915,39 @@ internal class ExperiencePresentationService(
                 onOpenLink = { link -> openAndRecord(journey, link, onLinkOpened); Unit },
             ),
         )
+        if (ExperienceLayerHostContract.isEnabled(release.descriptor)) {
+            // Each retained Screen keeps the callbacks whose source id was captured by the Journey.
+            journey.nativeRevisits[screenId] = {
+                presentJourneyNow(fences, release, screenId, journeyId, ownerDistinctId, null,
+                    canPresent, acquire, nextBatchSequence, nextEmissionSequence, onScreenChanged,
+                    onScreenDismissed, onLinkOpened, onEmissionBatch, onPresentationRevealed, onOutcome,
+                    transition = null, runValues = runValues)
+            }
+            journey.requestBack = {
+                val active = synchronized(stateLock) { current }
+                if (active?.journey?.layerHistory?.screens?.size?.let { it > 1 } != true) false
+                else {
+                    scope.launch {
+                        runCatching {
+                            layerNavigation.withLock {
+                                val source = synchronized(stateLock) {
+                                    current?.takeIf { it.isOwnedBy(journeyId, ownerDistinctId) }
+                                } ?: return@withLock
+                                val result = prepareBackNavigation(JourneyPresentationOwner(journeyId, ownerDistinctId), source,
+                                    kotlinx.serialization.json.buildJsonObject { put("type", JsonPrimitive("back")) })
+                                if (result is JourneyPresentationActionResult.Navigate) {
+                                    checkNotNull(source.journey.nativeRevisits[result.screenId]) { "Back has no retained Screen callbacks" }.invoke()
+                                }
+                            }
+                        }.onFailure {
+                            if (it is CancellationException) throw it
+                            synchronized(stateLock) { current }?.let { active -> PresentationRegistry.reportFailure(active.id, it) }
+                        }
+                    }
+                    true
+                }
+            }
+        }
         return presentPrepared(
             selectedScreen = selectedScreen,
             transition = transition,
@@ -1013,10 +1098,11 @@ internal class ExperiencePresentationService(
                         existing.journey.viewModelsByScreen[journey.screenId]?.get() else null
                     val shell = if (opensLayer) PresentationShell.fromTransition(transition)
                         else existing?.let { PresentationRegistry.resolve(it.id)?.shell } ?: source.screen.shell
+                    val back = synchronized(stateLock) { pendingBackNavigation?.takeIf { it.target == journey.screenId } }
                     return PreparedPresentation(source.acquired.sceneFile, source.screen.artboardName, source.screen.clearColor,
                         shell,
                         source.screen.screenId, source.descriptor, source.acquired.artifactsByKey,
-                        source.screen.artboardSize, source.viewModelProjection, text, lifecycle, transition,
+                        source.screen.artboardSize, source.viewModelProjection, text, lifecycle, if (back != null) back.transition else transition,
                         AtomicReference(retained), journey.runValues,
                         existing?.takeIf { !opensLayer && it.acquired.identity == source.identity }?.journey?.commerceValuesByScreen
                             ?.get(journey.screenId) ?: AtomicReference(emptyMap()),
@@ -1025,7 +1111,8 @@ internal class ExperiencePresentationService(
                         closeLayer = { reveal -> closeLayer(id, reveal) },
                         fitsContentHeight = (existing == null || opensLayer) && shell.fitsContent,
                         layerContentHeight = if (opensLayer) AtomicReference(null) else
-                            existing?.let { PresentationRegistry.resolve(it.id)?.layerContentHeight } ?: AtomicReference(null))
+                            existing?.let { PresentationRegistry.resolve(it.id)?.layerContentHeight } ?: AtomicReference(null),
+                        isBack = back != null, requestBack = journey.requestBack)
                 }
                 data class Destination(val source: PreparedSource, val content: PreparedPresentation, val navigation: PreparedScreenNavigation?)
                 suspend fun acquireInitial(): PreparedSource = try {
@@ -1144,6 +1231,11 @@ internal class ExperiencePresentationService(
                     val outgoing = it.journey
                     val incoming = journey
                     incoming.layerEmissions = outgoing.layerEmissions
+                    if (!opensLayer && ExperienceLayerHostContract.isEnabled(source.descriptor)) {
+                        val revisit = incoming.nativeRevisits[incoming.screenId]
+                        incoming.nativeRevisits = outgoing.nativeRevisits
+                        revisit?.let { incoming.nativeRevisits[incoming.screenId] = it }
+                    }
                     val owner = JourneyPresentationOwner(
                         journeyId = checkNotNull(journeyId),
                         distinctId = checkNotNull(request.ownerDistinctId),
@@ -1154,7 +1246,9 @@ internal class ExperiencePresentationService(
                         }
                     }
                     incoming.layerHistory = if (opensLayer) ExperienceLayerHistory(listOf(incoming.screenId))
-                        else back?.history ?: outgoing.layerHistory.navigate(incoming.screenId, transition?.string("type") == "push")
+                        else back?.history ?: if (ExperienceLayerHostContract.isEnabled(source.descriptor))
+                            outgoing.layerHistory.visit(incoming.screenId, transition)
+                        else outgoing.layerHistory.navigate(incoming.screenId, transition?.string("type") == "push")
                     // A covered screen remains active and mounted. Opening a
                     // layer is not a dismissal of its presenting screen.
                     val dismissal = if (opensLayer) JourneyScreenDismissalResult.HANDLED
@@ -1445,6 +1539,14 @@ internal class ExperiencePresentationService(
         action: JsonObject,
         effectId: String,
     ): JourneyPresentationActionResult {
+        if (JourneyActionType.from(action) == JourneyActionType.BACK &&
+            synchronized(stateLock) { current?.let { PresentationRegistry.resolve(it.id)?.descriptor }?.let(ExperienceLayerHostContract::isEnabled) == true }) {
+            return layerNavigation.withLock {
+                val active = synchronized(stateLock) { current?.takeIf { it.isOwnedBy(owner.journeyId, owner.distinctId) } }
+                    ?: return@withLock JourneyPresentationActionResult.NoPresentation
+                prepareBackNavigation(owner, active, action)
+            }
+        }
         val active = synchronized(stateLock) {
             current?.takeIf { it.isOwnedBy(owner.journeyId, owner.distinctId) }
         } ?: return JourneyPresentationActionResult.NoPresentation
@@ -1590,7 +1692,10 @@ internal class ExperiencePresentationService(
             pendingBackNavigation = PendingBackNavigation(
                 owner,
                 target,
-                history.navigate(target, push = false),
+                if (ExperienceLayerHostContract.isEnabled(PresentationRegistry.resolve(active.id)?.descriptor)) history.visit(target, null)
+                else history.navigate(target, push = false),
+                PresentationRegistry.resolve(active.id)?.descriptor?.takeIf(ExperienceLayerHostContract::isEnabled)
+                    ?.let { history.backTransition(steps, target, it) },
             )
         }
         return JourneyPresentationActionResult.Navigate(target)

@@ -9,14 +9,19 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
-/** Owns one screen's native graph and input, independently of the Activity shell. */
+/** One mounted surface and overlays; layer-host releases retain their Screen rows here. */
 internal class ExperienceMountedScreen(
     private val activity: Activity,
-    private val prepared: PreparedPresentation,
+    private var prepared: PreparedPresentation,
     listener: ExperienceSurfaceHost.Listener,
     private val onFailure: (Throwable) -> Unit,
     videoDecoderPool: ai.nuxie.sdk.runtime.ExperienceVideoDecoderPool? = null,
 ) {
+    val isLayer: Boolean = ai.nuxie.sdk.experiences.ExperienceLayerHostContract.isEnabled(prepared.descriptor)
+    private class Row(val prepared: PreparedPresentation, val listener: ExperienceSurfaceHost.Listener)
+    private val rows = java.util.concurrent.ConcurrentHashMap<String, Row>()
+    private var activeListener = listener
+    init { prepared.screenId?.let { rows[it] = Row(prepared, listener) } }
     // Validate synchronous inputs before allocating a native lane or observers.
     private val sceneBytes = prepared.sceneFile.readBytes()
     private val inputs = ExperienceTextInput.forScreen(prepared.descriptor, prepared.screenId)
@@ -37,7 +42,7 @@ internal class ExperienceMountedScreen(
     private var textOverlay: ExperienceTextInputOverlay? = null
     private var captionInsets: ExperienceWindowInsets? = null
     private var windowInsets: ExperienceWindowInsets? = null
-    private val lifecycle = prepared.screenLifecycle
+    private val lifecycle get() = prepared.screenLifecycle
     val transitionEvents = ExperienceScreenExitHandshake()
     private var reduceMotionEnabled = false
     private var content: View? = null
@@ -61,16 +66,29 @@ internal class ExperienceMountedScreen(
         listener = object : ExperienceSurfaceHost.Listener by listener {
             override fun onLayoutBounds(bounds: ExperienceArtboardSize) {
                 textOverlay?.updateLayoutBounds(bounds)
-                listener.onLayoutBounds(bounds)
+                activeListener.onLayoutBounds(bounds)
             }
             override fun onVideoCaptions(captions: Map<Long, ai.nuxie.sdk.runtime.NuxieVideoCaption>) {
                 captionOverlay?.update(captions)
-                listener.onVideoCaptions(captions)
+                activeListener.onVideoCaptions(captions)
             }
             override fun onRuntimeEvent(event: ai.nuxie.sdk.runtime.NuxieRuntimeEvent, viewModelSnapshot: NuxieViewModelSnapshot?) {
                 transitionEvents.receive(event.name)
                 listener.onRuntimeEvent(event, viewModelSnapshot)
             }
+            override fun onLayerRuntimeStep(screenId: String, outcome: ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome,
+                correlationId: ULong, snapshot: NuxieViewModelSnapshot, saves: List<ExperienceResponseSaveRequest>) {
+                rows[screenId]?.listener?.onRuntimeStep(outcome, correlationId, snapshot, saves)
+            }
+            override fun onLayerRuntimeEvent(screenId: String, event: ai.nuxie.sdk.runtime.NuxieRuntimeEvent,
+                snapshot: NuxieViewModelSnapshot) {
+                rows[screenId]?.listener?.onRuntimeEvent(event, snapshot)
+            }
+            override fun onTextCommitted(inputId: String, text: String, snapshot: NuxieViewModelSnapshot?) =
+                activeListener.onTextCommitted(inputId, text, snapshot)
+            override fun onTextInputEvent(inputId: String, event: ExperienceSemanticTextDraft.Event) =
+                activeListener.onTextInputEvent(inputId, event)
+            override fun onFailure(error: ExperiencePresentationException) = activeListener.onFailure(error)
             override fun onNativeTextFields(fields: List<ExperienceNativeTextField>): Map<Long, View> {
                 textOverlay?.updateNativeFields(fields)
                 val ids = fields.map { it.target.nodeId }.toSet()
@@ -90,12 +108,14 @@ internal class ExperienceMountedScreen(
 
     fun mount(entering: Boolean = true): View {
         lifecycle.updateFontScale(activity.resources.configuration.fontScale)
+        if (isLayer) surface.updateRuntimeValues(lifecycle.snapshot().filterKeys { it == "fontScale" })
         surface.updateRuntimeValues(prepared.commerceValues.get())
-        surface.updateRuntimeValues(if (entering && lifecycle.phase == ExperienceScreenLifecycle.Phase.HIDDEN)
+        if (!isLayer) surface.updateRuntimeValues(if (entering && lifecycle.phase == ExperienceScreenLifecycle.Phase.HIDDEN)
             lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING, exitReason = ExperienceScreenLifecycle.ExitReason.NONE) else lifecycle.snapshot())
         reducedMotion = ExperienceReducedMotion(activity) { reduced ->
             reduceMotionEnabled = reduced
-            surface.updateRuntimeValues(lifecycle.updateReduceMotion(reduced))
+            val values = lifecycle.updateReduceMotion(reduced)
+            surface.updateRuntimeValues(if (isLayer) values.filterKeys { it == "env/reduceMotion" } else values)
         }
         surface.loadArtboard(
             sceneBytes = sceneBytes,
@@ -104,7 +124,8 @@ internal class ExperienceMountedScreen(
             artifactsByKey = prepared.artifactsByKey,
             viewModelProjection = prepared.viewModelProjection,
             textInputs = inputs,
-            retainedViewModel = prepared.retainedViewModel,
+            retainedViewModel = if (isLayer) null else prepared.retainedViewModel,
+            layerScreen = if (isLayer) prepared else null,
         )
         return ExperienceInputContainer(activity, surface::dispatchExperienceKeyEvent, surface::semanticKeyboardEntry).apply {
             if (awaitingSemanticPublication) {
@@ -152,7 +173,8 @@ internal class ExperienceMountedScreen(
 
     /** Queued on the same lane as safe-area updates and frame-qualified native input capture. */
     fun refreshFontScale(value: Float) {
-        surface.updateRuntimeValues(lifecycle.updateFontScale(value))
+        val values = lifecycle.updateFontScale(value)
+        surface.updateRuntimeValues(if (isLayer) values.filterKeys { it == "fontScale" } else values)
     }
 
     val reduceMotion: Boolean get() = reduceMotionEnabled
@@ -160,9 +182,19 @@ internal class ExperienceMountedScreen(
     fun setInputEnabled(enabled: Boolean) {
         surface.setInputEnabled(enabled)
         textOverlay?.setInputEnabled(enabled)
+        if (isLayer) textOverlay?.visibility = if (enabled) View.VISIBLE else View.INVISIBLE
+    }
+
+    suspend fun updateRowRuntimeValues(screenId: String, values: Map<String, ai.nuxie.sdk.runtime.NuxieViewModelScalarValue>) {
+        if (isLayer) surface.layerOperation { it.applyRuntimeValuesOnLane(screenId, values) }
+        else surface.updateRuntimeValues(values)
     }
 
     fun activate() {
+        if (isLayer) {
+            surface.queueLayerPhases(listOf(checkNotNull(prepared.screenId) to ExperienceScreenLifecycle.Phase.ACTIVE))
+            return
+        }
         if (lifecycle.phase == ExperienceScreenLifecycle.Phase.ENTERING ||
             lifecycle.phase == ExperienceScreenLifecycle.Phase.EXITING) {
             surface.updateRuntimeValues(lifecycle.move(ExperienceScreenLifecycle.Phase.ACTIVE, exitReason = ExperienceScreenLifecycle.ExitReason.NONE))
@@ -170,6 +202,21 @@ internal class ExperienceMountedScreen(
     }
 
     suspend fun awaitExit(reason: ExperienceScreenLifecycle.ExitReason) {
+        if (isLayer) {
+            val id = checkNotNull(prepared.screenId)
+            val exit = layerExit(prepared)
+            val waiter = if (!reduceMotionEnabled) exit.event?.let { name ->
+                surface.layerOperation { it.registerCompletionOnLane(id, name) }
+            } else null
+            try {
+                val write: (ExperienceInteractiveLayer) -> Unit = {
+                    it.setPhasesOnLane(listOf(id to ExperienceScreenLifecycle.Phase.EXITING), exitReason = reason)
+                }
+                if (reduceMotionEnabled) surface.layerOperation(write) else surface.applyLayerTransition(write)
+                if (waiter != null && exit.watchdogMs != null) kotlinx.coroutines.withTimeoutOrNull(exit.watchdogMs) { waiter.await() }
+            } finally { if (waiter != null) surface.layerOperation { it.removeCompletionOnLane(id, waiter) } }
+            return
+        }
         val render = prepared.descriptor?.get("render") as? JsonObject
         val screens = render?.get("screens") as? JsonArray
         val screen = screens?.filterIsInstance<JsonObject>()?.firstOrNull {
@@ -189,13 +236,107 @@ internal class ExperienceMountedScreen(
     }
 
     fun hide() {
+        if (isLayer) {
+            surface.queueLayerPhases(listOf(checkNotNull(prepared.screenId) to ExperienceScreenLifecycle.Phase.HIDDEN))
+            setVisible(false)
+            setInputEnabled(false)
+            return
+        }
         surface.updateRuntimeValues(lifecycle.move(ExperienceScreenLifecycle.Phase.HIDDEN, exitReason = ExperienceScreenLifecycle.ExitReason.NONE))
         setVisible(false)
         setInputEnabled(false)
     }
 
     fun exit(reason: ExperienceScreenLifecycle.ExitReason) {
+        if (isLayer) {
+            surface.queueLayerPhases(listOf(checkNotNull(prepared.screenId) to ExperienceScreenLifecycle.Phase.EXITING), reason)
+            return
+        }
         surface.updateRuntimeValues(lifecycle.move(ExperienceScreenLifecycle.Phase.EXITING, exitReason = reason))
+    }
+
+    suspend fun prepareRow(target: PreparedPresentation, listener: ExperienceSurfaceHost.Listener) {
+        check(isLayer)
+        rows[checkNotNull(target.screenId)] = Row(target, listener)
+        surface.prepareLayerRow(target)
+    }
+
+    /** The step controls rows; the Activity only transfers the presentation lease afterward. */
+    suspend fun navigateLayer(target: PreparedPresentation, isBack: Boolean) {
+        val sourceId = checkNotNull(prepared.screenId)
+        val targetId = checkNotNull(target.screenId)
+        val intent = target.transition?.let(ai.nuxie.sdk.experiences.ExperienceLayerHostContract::intent)
+        val style = intent?.style ?: ai.nuxie.sdk.experiences.ExperienceLayerHostContract.Style.NONE
+        val plan = ExperienceScreenTransitionPlan.resolveLayer(target.transition, checkNotNull(target.descriptor), sourceId, targetId)
+        val waiters = mutableListOf<Pair<String, kotlinx.coroutines.Deferred<Unit>>>()
+        var insertion: Int? = null
+        try {
+            ExperienceLayerStep.perform(sourceId, targetId, style, isBack, plan, layerExit(prepared), reduceMotionEnabled,
+                object : ExperienceLayerStep.Operations {
+                    override fun input(enabled: Boolean) { setInputEnabled(enabled) }
+                    override suspend fun prepare() = Unit
+                    override suspend fun register(screenId: String, event: String): kotlinx.coroutines.Deferred<Unit> =
+                        surface.layerOperation { it.registerCompletionOnLane(screenId, event) }.also { waiters += screenId to it }
+                    override suspend fun insert(index: Int) { insertion = index }
+                    override suspend fun phases(values: List<Pair<String, ExperienceScreenLifecycle.Phase>>, transition: String) {
+                        val insert = insertion.also { insertion = null }
+                        val work: (ExperienceInteractiveLayer) -> Unit = { layer ->
+                            if (insert != null) layer.insertOnLane(targetId, insert)
+                            layer.setPhasesOnLane(values, transition)
+                        }
+                        if (reduceMotionEnabled) surface.layerOperation(work) else surface.applyLayerTransition(work)
+                    }
+                    override suspend fun present() = Unit
+                    override suspend fun remove() {
+                        surface.removeLayerRow(sourceId, insertion?.let { targetId to it }, waiters)
+                        insertion = null
+                    }
+                    override suspend fun hidden() = Unit
+                    override suspend fun active() {
+                        prepared = target
+                        activeListener = checkNotNull(rows[targetId]).listener
+                        surface.selectLayerRow(targetId)
+                        bindTextOverlay()
+                    }
+                })
+        } finally {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                surface.layerOperation { layer -> waiters.forEach { (id, waiter) -> layer.removeCompletionOnLane(id, waiter) } }
+            }
+        }
+    }
+
+    suspend fun restoreRow(source: PreparedPresentation, targetId: String) {
+        val sourceId = checkNotNull(source.screenId)
+        surface.restoreLayerRow(sourceId, targetId)
+        prepared = source
+        activeListener = checkNotNull(rows[sourceId]).listener
+        surface.selectLayerRow(sourceId)
+        bindTextOverlay()
+    }
+
+    private fun bindTextOverlay() {
+        val root = content as? FrameLayout ?: return
+        textOverlay?.let { it.close(); root.removeView(it) }
+        textOverlay = null
+        val inputs = ExperienceTextInput.forScreen(prepared.descriptor, prepared.screenId)
+        if (inputs.isEmpty()) return
+        val size = checkNotNull(prepared.artboardSize) { "Editable Experience has no authored artboard extent" }
+        textOverlay = ExperienceTextInputOverlay(activity, size, inputs, fonts, prepared.textInputState,
+            surface::writeNativeText, surface::notifyNativeText, surface::nativeTextEvent, surface::beginNativeEditing).also {
+            root.addView(it, FrameLayout.LayoutParams(-1, -1))
+        }
+    }
+
+    private fun layerExit(content: PreparedPresentation): ExperienceLayerStep.Exit {
+        val render = content.descriptor?.get("render") as? JsonObject
+        val screen = (render?.get("screens") as? JsonArray)?.filterIsInstance<JsonObject>()?.firstOrNull {
+            (it["id"] as? JsonPrimitive)?.content == content.screenId
+        }
+        val exit = screen?.get("exit") as? JsonObject
+        val event = (exit?.get("completeEventName") as? JsonPrimitive)?.content
+        val duration = (exit?.get("durationMs") as? JsonPrimitive)?.content?.toLongOrNull()
+        return ExperienceLayerStep.Exit(event, duration?.coerceIn(0, Long.MAX_VALUE - 250)?.plus(250))
     }
 
     /** Completion follows native handle release, so the owner can release its artifact lease. */
@@ -214,7 +355,7 @@ internal class ExperienceMountedScreen(
         val finalState = if (changingConfigurations) lifecycle.snapshot()
             else lifecycle.move(ExperienceScreenLifecycle.Phase.HIDDEN, exitReason = ExperienceScreenLifecycle.ExitReason.NONE)
         val retirement = ExperienceScreenRetirement(completion)
-        surface.release(finalState, retirement::mediaReleased)
+        surface.release(if (isLayer) emptyMap() else finalState, retirement::mediaReleased)
         if (runValues != null) runValues.releaseScreen(retirement::nativeReleased)
         else lane.shutdown(retirement::nativeReleased)
     }

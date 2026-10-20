@@ -69,6 +69,9 @@ internal class NuxieRuntime(
     fun restoreViewModel(file: NuxieRuntimeFile, artboard: NuxieRuntimeArtboard, snapshot: NuxieViewModelSnapshot): NuxieRuntimeViewModelState =
         snapshot.retainedGraph.restore(native, file, artboard)
 
+    internal fun restoreRowViewModel(file: NuxieRuntimeFile, snapshot: NuxieViewModelSnapshot): NuxieRuntimeViewModelState =
+        snapshot.retainedGraph.restore(native, file, null)
+
     fun bindViewModelList(
         file: NuxieRuntimeFile,
         artboard: NuxieRuntimeArtboard,
