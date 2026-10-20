@@ -496,6 +496,8 @@ internal class NuxieExperienceActivity : Activity() {
                 else if (closingLayer == null && !target.prepared.opensLayer) source.mounted?.activate()
             }
             target.closed.await()
+            if (currentScreen === source && source.screenCloseReason() == null && !isFinishing && !isDestroyed) drainQueuedBack()
+            else queuedBack.clear()
         }
     }
 

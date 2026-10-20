@@ -1782,7 +1782,10 @@ internal class ExperienceSurfaceHost(
     private fun captureLayerStep(step: ExperienceInteractiveLayer.Step) {
         for ((id, row) in step.rows) {
             layerRetainedValues[id]?.set(row.snapshot.withoutRootProperty("experience"))
-            val saves = saveDescriptor?.let { descriptor ->
+            val saves = saveDescriptor?.takeIf {
+                row.outcome.events.any { it.name == ExperienceResponseSaveRequest.EVENT } ||
+                    row.outcome.hostCommands.any { it.name == ExperienceResponseSaveRequest.EVENT }
+            }?.let { descriptor ->
                 ExperienceResponseSaveRequest.captureFrame(row.outcome, row.nativeSnapshot,
                     checkNotNull(file).viewModelCatalog(), descriptor) { Log.w(LOG_TAG, "Rejected native response save") }
             }.orEmpty()

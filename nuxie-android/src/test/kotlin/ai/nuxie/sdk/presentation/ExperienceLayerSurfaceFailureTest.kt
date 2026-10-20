@@ -27,7 +27,7 @@ class ExperienceLayerSurfaceFailureTest {
             lane.call {
                 layer.prepareOnLane("a"); layer.insertOnLane("a", 0); if (prepareTarget) layer.prepareOnLane("b")
                 set(surface, "interactiveLayer", layer); set(surface, "artboard", layer.artboard)
-                set(surface, "player", layer.player); set(surface, "activeRowId", "a")
+                set(surface, "player", layer.player); set(surface, "activeRowId", "a"); set(surface, "file", file)
                 @Suppress("UNCHECKED_CAST")
                 val retained = field(surface, "layerRetainedValues") as MutableMap<String, AtomicReference<NuxieViewModelSnapshot?>>
                 retained["a"] = AtomicReference()
@@ -36,6 +36,50 @@ class ExperienceLayerSurfaceFailureTest {
         } finally {
             surface.release(); lane.call {}; layer.close(); lane.call { file.close() }
             lane.shutdown(); assertTrue(lane.awaitQuiescence(5_000))
+        }
+    }
+
+    @Test fun `ordinary layer frames avoid catalog queries and save frames still capture answers`() = runBlocking {
+        withSurface { surface, layer, native, lane ->
+            lane.call {
+                set(surface, "saveDescriptor", Json.parseToJsonElement("""{"responses":{"feedback":{"model":"B",
+                    "fields":[{"key":"keptValue","type":"number"}]}}}""").jsonObject)
+                layer.insertOnLane("b", 1)
+                val ordinary = NuxiePlayerStepOutcome(false, emptyList(), emptyList(), emptyList(), emptyList())
+                val step = layer.captureOnLane(ordinary, 1u)
+                val capture = surface.javaClass.getDeclaredMethod("captureLayerStep", ExperienceInteractiveLayer.Step::class.java)
+                    .apply { isAccessible = true }
+                native.catalogQueries = 0
+                repeat(60) { capture.invoke(surface, step) }
+                val unrelated = NuxieRuntimeEvent(0, 0, "ordinary", "", "", 0f, emptyList(), 200)
+                capture.invoke(surface, step.copy(rows = step.rows + ("a" to step.rows.getValue("a").copy(
+                    outcome = ordinary.copy(events = listOf(unrelated))))))
+                assertEquals("Frames without a response save must not rebuild the file catalog", 0, native.catalogQueries)
+
+                val snapshot = NativeViewModelSnapshot(200, arrayOf(
+                    NativeViewModelSnapshotInstance(200, 1), NativeViewModelSnapshotInstance(300, 2)), arrayOf(
+                    NativeViewModelSnapshotValue(200, 0, "responses:feedback", 9, byteArrayOf(), 300),
+                    NativeViewModelSnapshotValue(300, 2, "keptValue", 2, byteArrayOf(), 0, numberValue = 4f),
+                    NativeViewModelSnapshotValue(300, 3, "isset:keptValue", 3, byteArrayOf(), 0, boolValue = true)))
+                val event = unrelated.copy(name = ExperienceResponseSaveRequest.EVENT, properties = listOf(
+                    NuxieRuntimeEventProperty("form", NuxieRuntimeEventPropertyValue.Bytes("feedback".encodeToByteArray()))))
+                val command = NuxieHostCommand(ExperienceResponseSaveRequest.EVENT, NuxieHostValue.Object(listOf(
+                    NuxieHostValue.Object.Field("form", NuxieHostValue.String("feedback")))))
+                capture.invoke(surface, step.copy(rows = step.rows + ("a" to step.rows.getValue("a").copy(
+                    outcome = ordinary.copy(events = listOf(event), hostCommands = listOf(command)), nativeSnapshot = snapshot))))
+                assertEquals("Only the requesting row needs a catalog", 1, native.catalogQueries)
+                val published = field(surface, "unpublishedSteps") as Iterable<*>
+                @Suppress("UNCHECKED_CAST")
+                val saves = field(checkNotNull(published.last()), "saves") as List<ExperienceResponseSaveRequest>
+                assertEquals(2, saves.size)
+                assertTrue(saves.all { it.answers.getValue("keptValue").jsonPrimitive.double == 4.0 })
+                capture.invoke(surface, step.copy(rows = step.rows + ("a" to step.rows.getValue("a").copy(
+                    outcome = ordinary.copy(hostCommands = listOf(command)), nativeSnapshot = snapshot))))
+                assertEquals("A host-command save also needs its catalog", 2, native.catalogQueries)
+                @Suppress("UNCHECKED_CAST")
+                val commandSaves = field(checkNotNull(published.last()), "saves") as List<ExperienceResponseSaveRequest>
+                assertEquals(listOf(saves.last()), commandSaves)
+            }
         }
     }
 

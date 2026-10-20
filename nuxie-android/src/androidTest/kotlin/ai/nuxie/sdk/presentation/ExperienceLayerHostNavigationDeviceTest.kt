@@ -225,7 +225,14 @@ class ExperienceLayerHostNavigationDeviceTest {
         } finally { directory.deleteRecursively() }
     }
 
-    @Test fun acquisitionSheetBackWalksRowsForDismissibleAndLockedSheets() = runBlocking {
+    @Test fun acquisitionSheetBackDispatcherWalksRowsForDismissibleAndLockedSheets() = acquisitionSheetBack(platform = false)
+
+    @Test fun acquisitionSheetPlatformBackWalksRowsForDismissibleAndLockedSheets() {
+        org.junit.Assume.assumeTrue(android.os.Build.VERSION.SDK_INT >= 33)
+        acquisitionSheetBack(platform = true)
+    }
+
+    private fun acquisitionSheetBack(platform: Boolean) = runBlocking {
         for (dismissible in listOf(true, false)) {
             val directory = directory()
             try {
@@ -246,21 +253,83 @@ class ExperienceLayerHostNavigationDeviceTest {
                     val surface = active.mounted().surface
                     active.navigate(a.copy(screenId = "screen_2", artboardName = "Upsell", transition = pair,
                         retainedViewModel = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle()))
+                    lateinit var dialog: com.google.android.material.bottomsheet.BottomSheetDialog
+                    val backStack = AtomicReference<List<StackTraceElement>>()
                     instrumentation.runOnMainSync {
                         val window = active.activity.javaClass.getDeclaredField("baseWindow").apply { isAccessible = true }.get(active.activity)!!
-                        val dialog = window.javaClass.getDeclaredField("dialog").apply { isAccessible = true }.get(window) as android.app.Dialog
-                        for (action in listOf(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.ACTION_UP)) {
-                            dialog.dispatchKeyEvent(android.view.KeyEvent(action, android.view.KeyEvent.KEYCODE_BACK))
+                        dialog = (window as ExperienceNativeLayerWindow).dialog as com.google.android.material.bottomsheet.BottomSheetDialog
+                        val handler = window.javaClass.getDeclaredField("backHandler").apply { isAccessible = true }
+                        @Suppress("UNCHECKED_CAST")
+                        val original = handler.get(window) as () -> Unit
+                        // Observe the registered handler without re-registering it above Material.
+                        handler.set(window, {
+                            backStack.set(Throwable().stackTrace.toList())
+                            original()
+                        })
+                        assertTrue(dialog.isShowing)
+                        // Disable the SDK's key fallback so only dispatcher routing can pass.
+                        dialog.setOnKeyListener { _, code, _ -> code == android.view.KeyEvent.KEYCODE_BACK }
+                        assertEquals(dismissible, dialog.behavior.isHideable)
+                        if (dismissible && android.os.Build.VERSION.SDK_INT >= 33) {
+                            val orchestrator = dialog.javaClass.getDeclaredField("backOrchestrator").apply { isAccessible = true }.get(dialog)!!
+                            val delegate = orchestrator.javaClass.getDeclaredField("backCallbackDelegate").apply { isAccessible = true }.get(orchestrator)!!
+                            val callbackOwner = if (android.os.Build.VERSION.SDK_INT >= 34) delegate.javaClass.superclass!! else delegate.javaClass
+                            val registered = callbackOwner.getDeclaredField("onBackInvokedCallback").apply { isAccessible = true }.get(delegate)
+                            assertNotNull("Material's competing callback must be registered after restoring input", registered)
                         }
+                        if (!platform) dialog.onBackPressedDispatcher.onBackPressed()
+                    }
+                    if (platform) {
+                        instrumentation.waitForIdleSync()
+                        assertTrue(instrumentation.uiAutomation.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK))
                     }
                     assertTrue("Ready acquisition sheet must route native Back to row history (dismissible=$dismissible)",
                         withTimeoutOrNull(5_000) { returned.await(); true } == true)
+                    val stack = checkNotNull(backStack.get())
+                    if (platform) {
+                        // API 36's ViewRootImpl selects WindowOnBackInvokedDispatcher.getTopCallback()
+                        // before invoking it. Gesture dispatch instead uses the framework wrapper.
+                        assertTrue("System Back must invoke the registered OnBackInvokedCallback (dismissible=$dismissible)",
+                            stack.any { it.methodName == "onBackInvoked" && it.className.startsWith(ExperienceNativeLayerWindow::class.java.name) })
+                        assertTrue("The native callback must come from framework Back dispatch",
+                            stack.any { it.className.startsWith("android.view.ViewRootImpl") ||
+                                it.className.startsWith("android.window.WindowOnBackInvokedDispatcher") })
+                    } else assertTrue("Back must arrive through OnBackPressedDispatcher, with the key fallback blocked",
+                        stack.any { it.className == "androidx.activity.OnBackPressedDispatcher" })
                     assertSame(surface, active.mounted().surface)
                     assertEquals(listOf("screen_1"), surface.layerOperation { it.mountedScreenIdsOnLane() })
                     assertFalse(active.activity.isFinishing)
+                    instrumentation.runOnMainSync { assertTrue("Back must keep the sheet open", dialog.isShowing) }
                 }
             } finally { directory.deleteRecursively() }
         }
+    }
+
+    @Test fun queuedBackRunsWhenNavigationAbortsAndDoesNotLeakIntoTheNextNavigation() = runBlocking {
+        val directory = directory()
+        try {
+            val backs = java.util.concurrent.atomic.AtomicInteger()
+            val a = intermediate(directory).copy(requestBack = { backs.incrementAndGet(); true })
+            Harness(a).use { active ->
+                val b = a.copy(screenId = "screen_2", artboardName = "Upsell", transition = pair,
+                    retainedViewModel = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle())
+                val surface = active.navigate(b)
+                val source = checkNotNull(PresentationRegistry.currentScreen(active.id))
+                val pending = withTimeout(15_000) { checkNotNull(source.prepareNavigation(UUID.randomUUID().toString(), a)) }
+                instrumentation.runOnMainSync {
+                    assertFalse(surface.isEnabled)
+                    @Suppress("DEPRECATION")
+                    active.activity.onBackPressed()
+                }
+                assertEquals("Back is queued while navigation owns the layer", 0, backs.get())
+                withTimeout(15_000) { pending.abort() }
+                assertEquals("Restoring the source must resolve its queued Back", 1, backs.get())
+                assertEquals(listOf("screen_2"), surface.layerOperation { it.mountedScreenIdsOnLane() })
+                instrumentation.runOnMainSync { assertTrue(surface.isEnabled) }
+                active.navigate(a.copy(transition = pair))
+                assertEquals("An aborted navigation must not leave a Back for a later navigation", 1, backs.get())
+            }
+        } finally { directory.deleteRecursively() }
     }
 
     @Test fun revisitedScreenKeepsItsLifecycleAndAuthoredValuesAcrossActivityRecreation() = runBlocking {
