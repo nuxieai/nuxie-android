@@ -890,8 +890,7 @@ internal class JourneyService(
             ?.retainStateArmReceipts(emptySet())
         // Journeys already running keep their pinned releases; their waits
         // still resolve, unless a fetch holds the customer's events.
-        resumeParkedRuns(null, null)
-        scheduleNextWake()
+        reconcileWithoutCopyNow()
     }
 
     /**
@@ -1055,11 +1054,7 @@ internal class JourneyService(
         if (!foreground.get()) return
         foregroundReceiptResetCustomers.remove(identity.distinctId())
         resetForegroundReceiptsIfNeeded()
-        val state = currentState() ?: run {
-            resumeParkedRuns(null, null)
-            scheduleNextWake()
-            return
-        }
+        val state = currentState() ?: return reconcileWithoutCopyNow()
         reconcileNow(state.generation)
     }
 
@@ -1106,12 +1101,23 @@ internal class JourneyService(
         profileRefetchesInFlight.remove(distinctId)
         // No copy landed: the waiting events go through without one, as
         // they would have, in the order they were captured.
-        if (!initialized || identity.distinctId() != distinctId || currentState() != null) return
-        if (journal?.distinctId != distinctId) return
+        if (identity.distinctId() != distinctId || currentState() != null) return
+        reconcileWithoutCopyNow()
+    }
+
+    /**
+     * Without a copy: replay what is pending, then resolve the waits that
+     * ran out, so no wait times out ahead of an event sent in time.
+     */
+    private suspend fun reconcileWithoutCopyNow() {
+        val distinctId = identity.distinctId()
+        if (!initialized || foreground.isRevalidating() || currentState() != null ||
+            journal?.distinctId != distinctId || holdsEvents(distinctId)
+        ) return
         if (!replayPendingLocalRoutes(distinctId)) {
-            Log.w(LOG_TAG, "Pending Journey routes stay queued after the profile fetch settled")
+            Log.w(LOG_TAG, "Pending Journey routes stay queued; waits resolve after they replay")
+            return
         }
-        // Then the waits that ran out meanwhile resolve.
         resumeParkedRuns(null, null)
         scheduleNextWake()
     }
