@@ -8,11 +8,24 @@ import ai.nuxie.sdk.runtime.NuxieRuntimeEvent
 import ai.nuxie.sdk.runtime.NuxieRuntimeEventPropertyValue
 import ai.nuxie.sdk.runtime.NuxieViewModelCatalog
 import ai.nuxie.sdk.runtime.NuxieViewModelPropertyKind
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
-/** Immutable answers from the native frame that requested the save. */
-internal data class ExperienceResponseSaveRequest(val form: String, val awaitTrigger: String?, val answers: JsonObject) {
+/**
+ * Immutable answers from the native frame that requested the save. An awaited
+ * save also keeps the values its `keep:<value>` properties name in the
+ * screen's `state`, as the frame held them (run snapshot fields). They are
+ * written back just before `awaitTrigger` fires, so what follows the `await`
+ * reads its own call's `$event` values though another call came first.
+ */
+internal data class ExperienceResponseSaveRequest(
+    val form: String,
+    val awaitTrigger: String?,
+    val answers: JsonObject,
+    val kept: JsonArray = JsonArray(emptyList()),
+) {
     companion object {
         const val EVENT = "\$nuxie.response.save"
 
@@ -36,7 +49,7 @@ internal data class ExperienceResponseSaveRequest(val form: String, val awaitTri
             require(event.url.isEmpty() && (event.sourceViewModelInstanceId == 0L ||
                 snapshot.instances.any { it.id == event.sourceViewModelInstanceId })) { "Invalid native response save request" }
             val fields = event.properties.map { field ->
-                field.name to if (field.name in setOf("form", "awaitTrigger")) {
+                field.name to if (field.name in setOf("form", "awaitTrigger") || field.name.startsWith("keep:")) {
                     (field.value as? NuxieRuntimeEventPropertyValue.Bytes)?.value?.decodeToString(throwOnInvalidSequence = true)
                 } else null
             }
@@ -66,7 +79,20 @@ internal data class ExperienceResponseSaveRequest(val form: String, val awaitTri
                 it.name == "experience" && it.kind == NuxieViewModelPropertyKind.VIEW_MODEL.nativeValue }?.referencedInstanceId
             val answers = ExperienceResponseSheet.read(form, declaration,
                 if (shared == null) snapshot else snapshot.copy(rootInstanceId = shared), catalog)
-            return ExperienceResponseSaveRequest(form, trigger, answers)
+            val keep = fields.filter { it.first.startsWith("keep:") }.map { (_, path) ->
+                requireNotNull(path?.takeIf { it.startsWith("state/") && it.length > "state/".length &&
+                    '/' !in it.substring("state/".length) }) { "Invalid native response save request" }
+            }
+            require(keep.isEmpty() || trigger != null) { "Invalid native response save request" }
+            val kept = if (keep.isEmpty()) JsonArray(emptyList()) else {
+                val held = ExperienceRunSnapshot.captureFields(snapshot, snapshot.rootInstanceId)
+                JsonArray(keep.map { path ->
+                    requireNotNull(held.firstOrNull { it.jsonObject.getValue("path").jsonPrimitive.content == path }) {
+                        "Invalid native response save request"
+                    }
+                })
+            }
+            return ExperienceResponseSaveRequest(form, trigger, answers, kept)
         }
     }
 }

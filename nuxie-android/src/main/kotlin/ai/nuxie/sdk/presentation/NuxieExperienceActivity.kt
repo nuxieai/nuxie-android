@@ -248,7 +248,7 @@ internal class NuxieExperienceActivity : Activity() {
                         val screen = weakScreen.get()
                         if (screen != null && !screen.rendererEffects.isRetired && screen.closeState.reason == null &&
                             PresentationRegistry.currentScreen(screen.id) === screen) {
-                            request.awaitTrigger?.let { screen.mounted?.surface?.confirmResponseSave(it) }
+                            request.awaitTrigger?.let { screen.mounted?.surface?.confirmResponseSave(it, request.kept) }
                         }
                     }
                 }

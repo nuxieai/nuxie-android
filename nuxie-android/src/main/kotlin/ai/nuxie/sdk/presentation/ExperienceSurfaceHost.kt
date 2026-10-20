@@ -11,6 +11,7 @@ import ai.nuxie.sdk.experiences.ExperienceAssetImportBuilder
 import ai.nuxie.sdk.experiences.ExperienceViewModelBinding
 import ai.nuxie.sdk.experiences.SystemFontCache
 import ai.nuxie.sdk.runtime.NativeSemanticNode
+import ai.nuxie.sdk.runtime.NativeViewModelWrite
 import ai.nuxie.sdk.runtime.NuxieSemanticSnapshot
 import ai.nuxie.sdk.runtime.NuxieSemanticTree
 import android.view.accessibility.AccessibilityNodeProvider
@@ -27,6 +28,7 @@ import ai.nuxie.sdk.runtime.NuxieRuntimePlayer
 import ai.nuxie.sdk.runtime.NuxieRuntimeEvent
 import ai.nuxie.sdk.runtime.NuxieRuntimeWindow
 import ai.nuxie.sdk.runtime.NuxieRuntimeViewModelState
+import ai.nuxie.sdk.runtime.NuxieViewModelMutationKind
 import ai.nuxie.sdk.runtime.NuxieViewModelScalarValue
 import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import ai.nuxie.sdk.runtime.NuxieViewModelListProjection
@@ -344,13 +346,19 @@ internal class ExperienceSurfaceHost(
     private var pendingPresentation = false
     private val pendingTextWrites = ArrayDeque<() -> Unit>()
 
-    fun confirmResponseSave(trigger: String) {
+    /**
+     * Fires a confirmed save's continuation in a step of its own, with the
+     * values the save kept for it written back first.
+     */
+    fun confirmResponseSave(trigger: String, kept: JsonArray) {
         val generation = frameGeneration.get()
         lane.enqueue {
             pendingTextWrites.addLast {
                 if (!released.get() && !failureReported.get() && generation == frameGeneration.get()) {
                     try {
-                        viewModelState?.fireTrigger(trigger) ?: checkNotNull(artboard).fireDefaultTrigger(trigger)
+                        val writes = ExperienceRunSnapshot(kept).writes() +
+                            NativeViewModelWrite(NuxieViewModelMutationKind.FIRE_TRIGGER, trigger)
+                        viewModelState?.restoreWrites(writes) ?: checkNotNull(artboard).confirmDefaultSave(writes)
                         val correlationId = nextCorrelationId
                         nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
                         val outcome = stepAndRefreshFocus {
