@@ -553,15 +553,28 @@ internal class NuxieCore(
             purchases.recover()
         })
         userTransitions.addObserver(UserTransitionCoordinator.Observer { kind, from, to ->
+            var refresh: CompletableDeferred<Boolean>? = null
             try {
                 profile.transitionObserver.handleUserChange(kind, from, to)
-                // Fetch the arriving customer's profile through the ordinary
-                // profile worker, so a reset does not leave Feature readiness
-                // unknown until the next foreground transition. Journey holds
-                // their events from the transition until this fetch settles.
-                profile.refreshAndWait()
+                // A reset can remove the returning customer's cache. Revalidate
+                // through the ordinary profile worker instead of leaving Feature
+                // readiness unknown until the next foreground transition.
+                refresh = profile.requestRefreshUntilSettled()
             } finally {
-                withContext(NonCancellable) { journeys.profileRefetchDidSettle(to) }
+                // Journey holds the arriving customer's events from the
+                // transition until this refresh settles.
+                val pending = refresh
+                if (pending == null) {
+                    withContext(NonCancellable) { journeys.profileRefetchDidSettle(to) }
+                } else {
+                    scope.launch {
+                        try {
+                            pending.await()
+                        } finally {
+                            withContext(NonCancellable) { journeys.profileRefetchDidSettle(to) }
+                        }
+                    }
+                }
             }
         })
         // Subscriber registration precedes recovery, while the synchronous
