@@ -48,7 +48,7 @@ class ExperienceLayerHostNavigationDeviceTest {
         return PreparedPresentation(copy("layer-host-interim-external.riv", directory), "Paywall", 0xff000000.toInt(),
             PresentationShell.FullScreen(), "screen_1", modified, artifacts, ExperienceArtboardSize(390f,844f))
     }
-    private inner class Harness(val initial: PreparedPresentation) : AutoCloseable {
+    private inner class Harness(val initial: PreparedPresentation, acquiring: Boolean = false) : AutoCloseable {
         var id = UUID.randomUUID().toString()
         val failures = AtomicReference<Throwable?>()
         val callbacks = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -60,12 +60,25 @@ class ExperienceLayerHostNavigationDeviceTest {
         init {
             assertTrue(NuxieRuntime.shared.isAvailable)
             instrumentation.addMonitor(monitor)
-            val ready = register(id, initial)
+            val authenticated = if (acquiring) AuthenticatedPresentationScreen::class.java.declaredConstructors.single { it.parameterCount == 5 }.let {
+                it.isAccessible = true
+                it.newInstance(initial.screenId, initial.artboardName, initial.artboardSize, initial.clearColor, initial.shell) as AuthenticatedPresentationScreen
+            } else null
+            if (authenticated != null) PresentationRegistry.registerAcquiring(id, authenticated) { failures.set(IllegalStateException("Acquisition closed: $it")) }
+            val ready = if (!acquiring) register(id, initial) else null
             instrumentation.targetContext.startActivity(Intent(instrumentation.targetContext, NuxieExperienceActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); putExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID, id)
             })
             activity = checkNotNull(monitor.waitForActivityWithTimeout(15_000))
-            assertTrue("Layer first frame", ready.await(30, TimeUnit.SECONDS))
+            if (acquiring) {
+                eventually {
+                    var installed = false
+                    instrumentation.runOnMainSync { installed = activity.javaClass.getDeclaredField("baseWindow").apply { isAccessible = true }.get(activity) != null }
+                    installed
+                }
+            }
+            val mountedReady = ready ?: register(id, initial)
+            assertTrue("Layer first frame", mountedReady.await(30, TimeUnit.SECONDS))
             checkFailure()
         }
         private fun register(id: String, prepared: PreparedPresentation): CountDownLatch {
@@ -196,6 +209,44 @@ class ExperienceLayerHostNavigationDeviceTest {
                 assertTrue(active.events.contains("screen_2" to "nx_exit_done:transition.native-contract.reverse"))
             }
         } finally { directory.deleteRecursively() }
+    }
+
+    @Test fun acquisitionSheetBackWalksRowsForDismissibleAndLockedSheets() = runBlocking {
+        for (dismissible in listOf(true, false)) {
+            val directory = directory()
+            try {
+                lateinit var harness: Harness
+                val returned = CompletableDeferred<Unit>()
+                var destination: PreparedPresentation? = null
+                val a = intermediate(directory).copy(shell = PresentationShell.Sheet(PresentationShell.Sheet.Detent.LARGE, dismissible),
+                    requestBack = {
+                        launch(Dispatchers.Default) {
+                            try { harness.navigate(checkNotNull(destination)); returned.complete(Unit) }
+                            catch (error: Throwable) { returned.completeExceptionally(error) }
+                        }
+                        true
+                    })
+                Harness(a, acquiring = true).use { active ->
+                    harness = active
+                    destination = a.copy(transition = pair, isBack = true)
+                    val surface = active.mounted().surface
+                    active.navigate(a.copy(screenId = "screen_2", artboardName = "Upsell", transition = pair,
+                        retainedViewModel = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle()))
+                    instrumentation.runOnMainSync {
+                        val window = active.activity.javaClass.getDeclaredField("baseWindow").apply { isAccessible = true }.get(active.activity)!!
+                        val dialog = window.javaClass.getDeclaredField("dialog").apply { isAccessible = true }.get(window) as android.app.Dialog
+                        for (action in listOf(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.ACTION_UP)) {
+                            dialog.dispatchKeyEvent(android.view.KeyEvent(action, android.view.KeyEvent.KEYCODE_BACK))
+                        }
+                    }
+                    assertTrue("Ready acquisition sheet must route native Back to row history (dismissible=$dismissible)",
+                        withTimeoutOrNull(5_000) { returned.await(); true } == true)
+                    assertSame(surface, active.mounted().surface)
+                    assertEquals(listOf("screen_1"), surface.layerOperation { it.mountedScreenIdsOnLane() })
+                    assertFalse(active.activity.isFinishing)
+                }
+            } finally { directory.deleteRecursively() }
+        }
     }
 
     @Test fun rowInitiatedCaptureDeliversBothHalvesAndARemovedRowsLateAdvance() = runBlocking {

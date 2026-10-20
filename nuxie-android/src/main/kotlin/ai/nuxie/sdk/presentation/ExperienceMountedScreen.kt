@@ -1,5 +1,7 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.logging.NuxieLog
+
 import ai.nuxie.sdk.runtime.NuxieRuntimeLane
 import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
 import android.app.Activity
@@ -212,8 +214,11 @@ internal class ExperienceMountedScreen(
                 val write: (ExperienceInteractiveLayer) -> Unit = {
                     it.setPhasesOnLane(listOf(id to ExperienceScreenLifecycle.Phase.EXITING), exitReason = reason)
                 }
-                if (reduceMotionEnabled) surface.layerOperation(write) else surface.applyLayerTransition(write)
-                if (waiter != null && exit.watchdogMs != null) kotlinx.coroutines.withTimeoutOrNull(exit.watchdogMs) { waiter.await() }
+                val budget = exit.watchdogMs ?: 250
+                val presented = if (reduceMotionEnabled) { surface.layerOperation(write); true }
+                    else surface.applyLayerTransition(budget, write)
+                if (!presented) logPresentationTimeout(budget)
+                if (presented && waiter != null && exit.watchdogMs != null) kotlinx.coroutines.withTimeoutOrNull(exit.watchdogMs) { waiter.await() }
             } finally { if (waiter != null) surface.layerOperation { it.removeCompletionOnLane(id, waiter) } }
             return
         }
@@ -270,6 +275,8 @@ internal class ExperienceMountedScreen(
         val plan = ExperienceScreenTransitionPlan.resolveLayer(target.transition, checkNotNull(target.descriptor), sourceId, targetId)
         val waiters = mutableListOf<Pair<String, kotlinx.coroutines.Deferred<Unit>>>()
         var insertion: Int? = null
+        var phasePresented = true
+        var loggedPresentationTimeout = false
         try {
             ExperienceLayerStep.perform(sourceId, targetId, style, isBack, plan, layerExit(prepared), reduceMotionEnabled,
                 object : ExperienceLayerStep.Operations {
@@ -284,9 +291,25 @@ internal class ExperienceMountedScreen(
                             if (insert != null) layer.insertOnLane(targetId, insert)
                             layer.setPhasesOnLane(values, transition)
                         }
-                        if (reduceMotionEnabled) surface.layerOperation(work) else surface.applyLayerTransition(work)
+                        val finalPhases = values.all { it.second == ExperienceScreenLifecycle.Phase.HIDDEN ||
+                            it.second == ExperienceScreenLifecycle.Phase.ACTIVE }
+                        val budget = if (values.any { it.second == ExperienceScreenLifecycle.Phase.EXITING })
+                            plan?.watchdogMs ?: layerExit(prepared).watchdogMs ?: 250 else plan?.watchdogMs ?: 250
+                        phasePresented = when {
+                            reduceMotionEnabled -> { surface.layerOperation(work); true }
+                            // Final phases need a settled mutation, not another drawable barrier.
+                            finalPhases -> { surface.applyLayerTransition(0, work); true }
+                            else -> surface.applyLayerTransition(budget, work)
+                        }
+                        if (!phasePresented && !loggedPresentationTimeout) {
+                            loggedPresentationTimeout = true
+                            logPresentationTimeout(budget)
+                        }
                     }
                     override suspend fun present() = Unit
+                    override suspend fun wait(completions: List<kotlinx.coroutines.Deferred<Unit>>, milliseconds: Long) {
+                        if (phasePresented) super<ExperienceLayerStep.Operations>.wait(completions, milliseconds)
+                    }
                     override suspend fun remove() {
                         surface.removeLayerRow(sourceId, insertion?.let { targetId to it }, waiters)
                         insertion = null
@@ -304,6 +327,11 @@ internal class ExperienceMountedScreen(
                 surface.layerOperation { layer -> waiters.forEach { (id, waiter) -> layer.removeCompletionOnLane(id, waiter) } }
             }
         }
+    }
+
+    private fun logPresentationTimeout(milliseconds: Long) {
+        NuxieLog.w("ExperienceLayerStep",
+            "Experience phase presentation watchdog expired", null, NuxieLog.sensitive("watchdogMs", milliseconds))
     }
 
     suspend fun restoreRow(source: PreparedPresentation, targetId: String) {
