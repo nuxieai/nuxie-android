@@ -1447,6 +1447,44 @@ internal class JourneyService(
         )
     }
 
+    private suspend fun offerAlternativeForScreen(screenId: String, release: AuthenticatedJourneyRelease): String? =
+        JourneyOfferAccess.forScreen(release.leg, screenId)?.let { offerAlternative(it, release) }
+
+    /** Native Back holds the layer lock, so an offer alternative must continue on the worker. */
+    private suspend fun allowNativeBackNavigation(
+        runId: String,
+        screenId: String,
+        release: AuthenticatedJourneyRelease,
+        executionToken: JourneyExecutionFenceToken,
+    ): Boolean = presentationCallbackMutex.withLock {
+        val target = journal ?: return@withLock false
+        val identityScope = identity.captureScope()
+        if (identityScope.distinctId != target.distinctId || !isExecutionCurrent(executionToken, target)) return@withLock false
+        val run = target.runs().firstOrNull {
+            it.id == runId && it.completion == null && it.pendingPresentationPublication == null && matches(release, it.reference)
+        } ?: return@withLock false
+        fun current() = isExecutionCurrent(executionToken, target) && identity.isCurrentScope(identityScope) &&
+            target.runs().any { it == run }
+        val alternative = offerAlternativeForScreen(screenId, release)
+        if (!current()) return@withLock false
+        if (alternative == null) return@withLock true
+        presenter?.cancelBackNavigation(JourneyPresentationOwner(run.journeyId, target.distinctId))
+        val transitioned = publishJournalIfCurrent(executionToken, identityScope) {
+            if (!current()) return@publishJournalIfCurrent null
+            target.transition(run.id, alternative, run.context)
+            target.runs().firstOrNull { it.id == run.id }
+        } ?: return@withLock false
+        val key = CommerceExecutionKey(run.id, target.distinctId, executionToken.generation)
+        if (transitioned.pendingCommerce != null) {
+            pendingAuthoredContinuations[key] = (pendingAuthoredContinuations[key] ?: 0) + 1
+        }
+        val queued = commands.trySend(Command.ContinueExecution(run.id, identityScope, release, executionToken,
+            executorSignal(null), null, dismissPresentationOnCompletion = true,
+            retainsCommerce = transitioned.pendingCommerce != null)).isSuccess
+        if (!queued && transitioned.pendingCommerce != null) releaseCommerceContinuation(key)
+        false
+    }
+
     private suspend fun offerAlternative(
         offer: JsonObject,
         release: AuthenticatedJourneyRelease,
@@ -2404,6 +2442,7 @@ internal class JourneyService(
                     nextBatchSequence = run.nextPresentationBatchSequence,
                     nextEmissionSequence = run.nextPresentationEmissionSequence,
                     withPresentationCallbacks = { work -> withNestedPresentationCallbacks(runId, true) { work() } },
+                    onBackNavigation = { destination -> allowNativeBackNavigation(runId, destination, release, executionToken) },
                     onScreenChanged = { changedScreenId ->
                         handlePresentationScreenChanged(
                             runId = runId,
@@ -2627,7 +2666,7 @@ internal class JourneyService(
                                 finishExecution(run, "abandoned")
                                 return
                             }
-                            val alternative = JourneyOfferAccess.forScreen(leg, screenId)?.let { offerAlternative(it, release) }
+                            val alternative = offerAlternativeForScreen(screenId, release)
                             if (!current()) { finishExecution(run, "abandoned"); return }
                             if (alternative != null) {
                                 target.transition(run.id, alternative, run.context)
@@ -2744,7 +2783,7 @@ internal class JourneyService(
                                 presentation.dispatchAction(owner, purchaseAction, effectId)
                             }) {
                                 is JourneyPresentationActionResult.Navigate -> {
-                                    val alternative = JourneyOfferAccess.forScreen(leg, presentationResult.screenId)?.let { offerAlternative(it, release) }
+                                    val alternative = offerAlternativeForScreen(presentationResult.screenId, release)
                                     if (!current()) { finishExecution(run, "abandoned"); return }
                                     if (alternative != null) {
                                         presentation.cancelBackNavigation(owner)

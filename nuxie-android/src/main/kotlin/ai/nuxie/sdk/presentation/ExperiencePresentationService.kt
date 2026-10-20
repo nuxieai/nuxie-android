@@ -834,11 +834,12 @@ internal class ExperiencePresentationService(
         transition: JsonObject? = null,
         runValues: ExperienceRunValues? = null,
         withPresentationCallbacks: suspend (suspend () -> Unit) -> Unit = ::directPresentationCallbacks,
+        onBackNavigation: suspend (String) -> Boolean = { true },
     ): ExperienceRef {
         suspend fun present() = presentJourneyNow(
             fences, release, screenId, journeyId, ownerDistinctId, reservation, canPresent, acquire,
             nextBatchSequence, nextEmissionSequence, onScreenChanged, onScreenDismissed, onLinkOpened,
-            onEmissionBatch, onPresentationRevealed, onOutcome, transition, runValues, withPresentationCallbacks,
+            onEmissionBatch, onPresentationRevealed, onOutcome, transition, runValues, withPresentationCallbacks, onBackNavigation,
         )
         if (!ExperienceLayerHostContract.isEnabled(release.descriptor)) return present()
         return layerNavigation.withLock {
@@ -878,6 +879,7 @@ internal class ExperiencePresentationService(
         transition: JsonObject? = null,
         runValues: ExperienceRunValues? = null,
         withPresentationCallbacks: suspend (suspend () -> Unit) -> Unit = ::directPresentationCallbacks,
+        onBackNavigation: suspend (String) -> Boolean = { true },
     ): ExperienceRef {
         try { PresentationShell.fromTransition(transition) } catch (error: ExperiencePresentationException) {
             reservation?.close()
@@ -920,7 +922,8 @@ internal class ExperiencePresentationService(
                 presentJourneyNow(fences, release, screenId, journeyId, ownerDistinctId, null,
                     canPresent, acquire, nextBatchSequence, nextEmissionSequence, onScreenChanged,
                     onScreenDismissed, onLinkOpened, onEmissionBatch, onPresentationRevealed, onOutcome,
-                    transition = null, runValues = runValues, withPresentationCallbacks = withPresentationCallbacks)
+                    transition = null, runValues = runValues, withPresentationCallbacks = withPresentationCallbacks,
+                    onBackNavigation = onBackNavigation)
             }
             journey.requestBack = {
                 val active = synchronized(stateLock) { current }
@@ -936,7 +939,9 @@ internal class ExperiencePresentationService(
                                     val result = prepareBackNavigation(JourneyPresentationOwner(journeyId, ownerDistinctId), source,
                                         kotlinx.serialization.json.buildJsonObject { put("type", JsonPrimitive("back")) })
                                     if (result is JourneyPresentationActionResult.Navigate) {
-                                        checkNotNull(source.journey.nativeRevisits[result.screenId]) { "Back has no retained Screen callbacks" }.invoke()
+                                        if (onBackNavigation(result.screenId)) {
+                                            checkNotNull(source.journey.nativeRevisits[result.screenId]) { "Back has no retained Screen callbacks" }.invoke()
+                                        } else cancelBackNavigation(JourneyPresentationOwner(journeyId, ownerDistinctId))
                                     }
                                 }
                             }

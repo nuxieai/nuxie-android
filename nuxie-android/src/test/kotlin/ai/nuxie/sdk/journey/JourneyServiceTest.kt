@@ -100,6 +100,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertSame
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -3083,7 +3084,36 @@ class JourneyServiceTest {
         assertNativeBackLifecycleNavigation(SystemEventNames.SCREEN_SHOWN)
     }
 
-    private suspend fun assertNativeBackLifecycleNavigation(eventName: String) {
+    @Test fun `native Back follows the owned offer alternative before revisiting a retained Screen`() = runBlocking {
+        assertNativeBackLifecycleNavigation(null, JourneyOfferAccess.Decision.ALREADY_ENTITLED)
+    }
+
+    @Test fun `native Back follows the unknown offer alternative before revisiting a retained Screen`() = runBlocking {
+        assertNativeBackLifecycleNavigation(null, JourneyOfferAccess.Decision.UNKNOWN)
+    }
+
+    @Test fun `native Back still presents the retained row when its offer remains eligible`() = runBlocking {
+        assertNativeBackLifecycleNavigation(null, JourneyOfferAccess.Decision.ELIGIBLE)
+    }
+
+    @Test fun `authored Back follows the owned offer alternative after access changes`() = runBlocking {
+        assertNativeBackLifecycleNavigation(null, JourneyOfferAccess.Decision.ALREADY_ENTITLED, authoredBack = true)
+    }
+
+    @Test fun `authored Back follows the unknown offer alternative after access changes`() = runBlocking {
+        assertNativeBackLifecycleNavigation(null, JourneyOfferAccess.Decision.UNKNOWN, authoredBack = true)
+    }
+
+    private suspend fun assertNativeBackLifecycleNavigation(eventName: String?, offerDecision: JourneyOfferAccess.Decision? = null,
+        authoredBack: Boolean = false) {
+        val expectedScreen = when (offerDecision) {
+            null -> "screen_after"
+            JourneyOfferAccess.Decision.ELIGIBLE -> "screen_welcome"
+            JourneyOfferAccess.Decision.ALREADY_ENTITLED -> "screen_owned"
+            JourneyOfferAccess.Decision.UNKNOWN -> "screen_unknown"
+        }
+        val access = java.util.concurrent.atomic.AtomicReference<ai.nuxie.sdk.features.FeatureAccess?>(
+            ai.nuxie.sdk.features.FeatureAccess(false, false, null, ai.nuxie.sdk.features.FeatureType.BOOLEAN))
         val identity = identity("customer")
         val entry = fixture.getValue("renderedEntry").jsonObject
         val catalog = catalog(entry)
@@ -3096,20 +3126,32 @@ class JourneyServiceTest {
             "steps" to Json.parseToJsonElement("""[
                 {"kind":"action","id":"present","action":{"type":"navigate","screenId":"screen_welcome"},"outlets":{}},
                 {"kind":"action","id":"forward","action":{"type":"navigate","screenId":"screen_details"},"outlets":{}},
-                {"kind":"action","id":"routed","action":{"type":"navigate","screenId":"screen_after"},"outlets":{}}
+                {"kind":"action","id":"routed","action":{"type":"navigate","screenId":"screen_after"},"outlets":{}},
+                {"kind":"action","id":"back","action":{"type":"back"},"outlets":{}},
+                {"kind":"action","id":"owned","action":{"type":"navigate","screenId":"screen_owned"},"outlets":{}},
+                {"kind":"action","id":"unknown","action":{"type":"navigate","screenId":"screen_unknown"},"outlets":{}}
             ]"""),
             "routes" to Json.parseToJsonElement("""[
                 {"host":{"kind":"screen","screenId":"screen_welcome"},"eventName":"forward","entryStepId":"forward"},
-                {"host":{"kind":"screen","screenId":"${if (eventName == SystemEventNames.SCREEN_SHOWN) "screen_welcome" else "screen_details"}"},"eventName":"$eventName","entryStepId":"routed"}
-            ]"""),
-            "screens" to Json.parseToJsonElement("""[{"id":"screen_welcome"},{"id":"screen_details"},{"id":"screen_after"}]""")))
+                {"host":{"kind":"screen","screenId":"screen_details"},"eventName":"back","entryStepId":"back"}
+            ]""").jsonArray.let { routes -> if (eventName == null) routes else JsonArray(routes + buildJsonObject {
+                put("host", buildJsonObject { put("kind", "screen"); put("screenId", if (eventName == SystemEventNames.SCREEN_SHOWN) "screen_welcome" else "screen_details") })
+                put("eventName", eventName); put("entryStepId", "routed")
+            }) },
+            "offers" to if (offerDecision == null) JsonArray(emptyList()) else Json.parseToJsonElement("""[
+                {"screenId":"screen_welcome","placementIds":["golden:monthly"],"alreadyEntitledStepId":"owned","unknownStepId":"unknown"}]
+            """),
+            "screens" to Json.parseToJsonElement("""[{"id":"screen_welcome"},{"id":"screen_details"},{"id":"screen_after"},{"id":"screen_owned"},{"id":"screen_unknown"}]""")))
         val render = original.descriptor.getValue("render").jsonObject
         val screen = render.getValue("screens").jsonArray.first().jsonObject
         val release = AuthenticatedJourneyRelease(JourneyReleaseEnvelope.authenticate(entry.getValue("envelope").toString().encodeToByteArray(),
             mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(fixture.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP))), original.identity,
-            JsonObject(original.descriptor + mapOf("leg" to leg, "render" to JsonObject(render + mapOf(
+            JsonObject(original.descriptor + mapOf("leg" to leg,
+                "products" to JsonArray(original.descriptor.getValue("products").jsonArray.map {
+                    JsonObject(it.jsonObject + ("entitlements" to Json.parseToJsonElement("""[{"id":"premium-grant","featureId":"premium","featureExternalId":null,"purchaseUsageFeatureIds":[]}]""")))
+                }), "render" to JsonObject(render + mapOf(
                 "layerHost" to Json.parseToJsonElement("""{"artboardName":"LayerList","list":"screens"}"""),
-                "screens" to JsonArray(listOf("screen_welcome", "screen_details", "screen_after").map { JsonObject(screen + ("id" to JsonPrimitive(it))) }))))), null)
+                "screens" to JsonArray(listOf("screen_welcome", "screen_details", "screen_after", "screen_owned", "screen_unknown").map { JsonObject(screen + ("id" to JsonPrimitive(it))) }))))), null)
         val snapshot = baseline.copy(releasesByDigest = mapOf(release.descriptorSha256 to release))
         val launched = CopyOnWriteArrayList<String>()
         val presentations = ExperiencePresentationService(emit = { _, _, _ -> }, scope = scope,
@@ -3130,13 +3172,14 @@ class JourneyServiceTest {
                     override fun activate() {
                         PresentationRegistry.attach(target, host(target)); PresentationRegistry.detach(id, source)
                         PresentationRegistry.reportFirstFrame(target)
-                        if (nativeBackStarted.get() && content.screenId == "screen_after") routed.complete(Unit)
+                        if (nativeBackStarted.get() && content.screenId == expectedScreen) routed.complete(Unit)
                     }
                     override suspend fun abort() = Unit
                 }
             }
         }
         val requests = CopyOnWriteArrayList<JourneyPresentationRequest>()
+        val cancelledBack = java.util.concurrent.atomic.AtomicInteger()
         val presenter = object : JourneyPresenting {
             override fun reserve(ownerDistinctId: String) = presentations.reserveJourney(ownerDistinctId)
             override fun owns(owner: JourneyPresentationOwner) = presentations.ownsJourney(owner)
@@ -3153,7 +3196,7 @@ class JourneyServiceTest {
                             if (!nativeBackStarted.get() && eventName == SystemEventNames.SCREEN_SHOWN) true else request.onScreenChanged(id)
                         }, onScreenDismissed = request.onScreenDismissed, onEmissionBatch = request.onEmissionBatch,
                         onPresentationRevealed = request.onPresentationRevealed, onOutcome = request.onOutcome,
-                        withPresentationCallbacks = request.withPresentationCallbacks)
+                        withPresentationCallbacks = request.withPresentationCallbacks, onBackNavigation = request.onBackNavigation)
                 }
                 if (requests.size == 1) {
                     withTimeout(5_000) { while (launched.isEmpty()) kotlinx.coroutines.delay(10) }
@@ -3164,11 +3207,12 @@ class JourneyServiceTest {
                 showing.await()
                 return JourneyPresentationResult.Shown
             }
+            override fun cancelBackNavigation(owner: JourneyPresentationOwner) { cancelledBack.incrementAndGet(); presentations.cancelBackNavigation(owner) }
             override suspend fun dispatchAction(owner: JourneyPresentationOwner, action: JsonObject, effectId: String) = presentations.dispatchJourneyAction(owner, action, effectId)
             override suspend fun shutdownOwnedBy(ownerDistinctId: String) = presentations.shutdownOwnedBy(ownerDistinctId)
         }
         val journeys = JourneyService(identity = identity, events = store, catalog = catalog, journalDirectory = directory, scope = scope,
-            capture = { _, _, _, _ -> true },
+            offerFeatureAccess = { access.get() }, capture = { _, _, _, _ -> true },
             captureScreenEvent = { name, properties, id, distinctId, occurredAt, admission, origin ->
                 val accepted = admission?.commitIfCurrent { true } == true
                 StableEventCaptureResult(accepted, StoredEvent(id, name, JsonValueConverter.fromMap(properties), occurredAt, distinctId,
@@ -3180,16 +3224,38 @@ class JourneyServiceTest {
         try {
             journeys.initialize(); journeys.onAppWillEnterForeground(); journeys.profileDidCommit(snapshot, authority, "customer", 1)
             val first = requests.first()
+            val retained = ai.nuxie.sdk.runtime.NuxieViewModelSnapshot.fromNative(ai.nuxie.sdk.runtime.NativeViewModelSnapshot(7,
+                arrayOf(ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(7, 0)),
+                arrayOf(ai.nuxie.sdk.runtime.NativeViewModelSnapshotValue(7, 0, "keptValue", 2, byteArrayOf(), 0, numberValue = 42f))))
+            checkNotNull(PresentationRegistry.resolve(launched.single())).retainedViewModel.set(retained)
             assertEquals(JourneyEmissionBatchResult.ACCEPTED, first.onEmissionBatch(JourneyScreenEmissionBatch(first.journeyId,
                 0, "forward", JourneyScreenEmissionSource("screen_welcome", "forward"),
                 listOf(JourneyScreenEmission("forward-event", 0, 100_001L, "forward", JsonObject(emptyMap())))), null))
             withTimeout(5_000) {
                 while (presentations.layerScreenIds() != listOf(listOf("screen_welcome", "screen_details"))) kotlinx.coroutines.delay(10)
             }
+            if (offerDecision != null) access.set(when (offerDecision) {
+                JourneyOfferAccess.Decision.UNKNOWN -> null
+                JourneyOfferAccess.Decision.ALREADY_ENTITLED -> ai.nuxie.sdk.features.FeatureAccess(true, true, null, ai.nuxie.sdk.features.FeatureType.BOOLEAN)
+                JourneyOfferAccess.Decision.ELIGIBLE -> access.get()
+            })
             nativeBackStarted.set(true)
-            assertTrue(checkNotNull(contents.last().requestBack).invoke())
-            assertTrue("Native Back must finish its lifecycle route without re-entering its held layer mutex",
+            if (authoredBack) {
+                val active = requests.last()
+                assertEquals(JourneyEmissionBatchResult.ACCEPTED, active.onEmissionBatch(JourneyScreenEmissionBatch(active.journeyId,
+                    1, "authored-back", JourneyScreenEmissionSource("screen_details", "back"),
+                    listOf(JourneyScreenEmission("back-event", 1, 100_002L, "back", JsonObject(emptyMap())))), null))
+            } else assertTrue(checkNotNull(contents.last().requestBack).invoke())
+            assertTrue("Back must reach $expectedScreen through Journey eligibility and its lifecycle callback boundary",
                 kotlinx.coroutines.withTimeoutOrNull(2_000) { routed.await(); true } == true)
+            if (offerDecision != null) {
+                assertEquals(listOf("screen_details", expectedScreen), contents.map { it.screenId })
+                assertEquals(offerDecision == JourneyOfferAccess.Decision.ELIGIBLE, contents.last().isBack)
+                if (offerDecision == JourneyOfferAccess.Decision.ELIGIBLE) assertSame(retained, contents.last().retainedViewModel.get())
+                assertEquals(if (offerDecision == JourneyOfferAccess.Decision.ELIGIBLE) 0 else 1, cancelledBack.get())
+                assertEquals(if (offerDecision == JourneyOfferAccess.Decision.ELIGIBLE) listOf("screen_welcome")
+                    else listOf("screen_welcome", "screen_details", expectedScreen), presentations.layerScreenIds().single())
+            }
         } finally {
             scope.cancel()
             scope.coroutineContext[kotlinx.coroutines.Job]?.join()
