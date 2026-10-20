@@ -50,6 +50,160 @@ class SharedValuesJourneyDeviceTest {
         }
     }
 
+    /**
+     * The SDKs' emit-values fixture, the parent's `tools/sdk-fixtures/emit-values`,
+     * played through the real Journey on the device (the data plan's phone events
+     * step, D2.54, UNIV-5180): each emit reaches the Journey with its values under
+     * their own names, read from state, a repeated row's item, a copy's output and
+     * an action's value, never as `$` paths; and a field named screenId stays
+     * the author's. The fixture's Walk row, which removes its own item, waits on
+     * UNIV-5205: the player step after the removal fails on phones. The points
+     * come from the fixture's CSS (`EMIT_VALUES_POINTS` in the parent's bridge),
+     * and the expected values from its source.
+     */
+    @Test fun publishedEmitsReachTheJourneyWithTheirValues() = runBlocking {
+        assertTrue(NuxieRuntime.shared.isAvailable)
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val owner = "emit-values-${UUID.randomUUID()}"
+        val directory = File(context.cacheDir, owner).apply { mkdirs() }
+        val fixture = fixture(emits = true)
+        val scene = File(directory, "screen.riv").apply { writeBytes(fixture.scene) }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val store = SQLiteEventStore(context, databaseFile = File(directory, "events.db"))
+        val presentations = ExperiencePresentationService(context, { _, _, _ -> }, scope,
+            { NuxieRuntime.shared.isAvailable }, currentDistinctId = { owner })
+        val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
+        instrumentation.addMonitor(monitor)
+        val revealed = LinkedBlockingQueue<String>()
+        val captured = java.util.concurrent.CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
+        val catalog = JourneyProfileCatalog(fixture.keys, JourneyReleaseHighWaterStore(context)) { fixture.supported }
+        val presenter = object : JourneyPresenting {
+            override fun reserve(ownerDistinctId: String) = presentations.reserveJourney(ownerDistinctId)
+            override fun owns(owner: JourneyPresentationOwner) = presentations.ownsJourney(owner)
+            override fun screenId(owner: JourneyPresentationOwner) = presentations.journeyScreenId(owner)
+            override suspend fun openLink(owner: JourneyPresentationOwner, link: JourneyLinkRequest) = presentations.openJourneyLink(owner, link)
+            override suspend fun shutdownOwnedBy(ownerDistinctId: String) = presentations.shutdownOwnedBy(ownerDistinctId)
+            override suspend fun shutdownPresentation(ownerDistinctId: String, journeyId: String) = presentations.shutdownJourney(ownerDistinctId, journeyId)
+            override suspend fun present(value: JourneyPresentationRequest): JourneyPresentationResult {
+                presentations.presentJourney(value.fences, value.release, value.screenId, value.journeyId,
+                    value.ownerDistinctId, value.reservation, value.canPresent,
+                    acquire = { AcquiredJourneyRelease(value.release.identity, emptyMap(), scene, protection = Closeable {}) },
+                    nextBatchSequence = value.nextBatchSequence, nextEmissionSequence = value.nextEmissionSequence,
+                    onScreenChanged = value.onScreenChanged, onScreenDismissed = value.onScreenDismissed,
+                    onLinkOpened = value.onLinkOpened, onEmissionBatch = value.onEmissionBatch,
+                    onPresentationRevealed = { value.onPresentationRevealed(it); revealed.add(it) },
+                    onOutcome = value.onOutcome, runValues = value.runValues)
+                return JourneyPresentationResult.Shown
+            }
+        }
+        val identity = object : IdentityProvider {
+            override fun distinctId() = owner
+            override fun anonymousId() = owner
+            override fun rawDistinctId(): String? = null
+            override val isIdentified = false
+        }
+        val service = JourneyService(identity, store, catalog, directory, scope,
+            capture = { name, properties, eventId, distinctId ->
+                captured.add(name to properties)
+                store.insertPendingIfAbsent(ai.nuxie.sdk.events.StoredEvent(eventId, name,
+                    ai.nuxie.sdk.events.JsonValueConverter.fromMap(properties), System.currentTimeMillis(), distinctId))
+            }, presenter = presenter)
+        try {
+            withTimeout(30_000) {
+                catalog.commit(owner, catalog.prepare(fixture.profile, fixture.authority))
+                service.initialize()
+                service.onAppWillEnterForeground()
+                service.profileDidCommit(checkNotNull(catalog.snapshot(owner)), fixture.authority, owner, 1)
+            }
+            val activity = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
+            assertEquals("emits", revealed.poll(20, TimeUnit.SECONDS))
+            var host: ExperienceSurfaceHost? = null
+            instrumentation.runOnMainSync {
+                fun find(view: View): ExperienceSurfaceHost? = when (view) {
+                    is ExperienceSurfaceHost -> view.takeIf { it.isShown }
+                    is ViewGroup -> (0 until view.childCount).firstNotNullOfOrNull { find(view.getChildAt(it)) }
+                    else -> null
+                }
+                host = find((monitor.lastActivity ?: activity).window.decorView)
+            }
+            val surface = checkNotNull(host)
+            // Tap only once the screen's buttons take the pointer: a press and an
+            // exit find the hit without firing anything.
+            val lane = ExperienceSurfaceHost::class.java.getDeclaredField("lane").apply { isAccessible = true }.get(surface) as NuxieRuntimeLane
+            var ready = false
+            withTimeout(10_000) {
+                while (!ready) {
+                    ready = lane.call {
+                        val player = ExperienceSurfaceHost::class.java.getDeclaredField("player")
+                            .apply { isAccessible = true }.get(surface) as NuxieRuntimePlayer
+                        val bounds = ExperienceSurfaceHost::class.java.getDeclaredField("layoutBounds")
+                            .apply { isAccessible = true }.get(surface) as ExperienceArtboardSize
+                        fun probe(kind: NuxiePlayerPointerKind) = player.stepTyped(elapsedSeconds = 0.0,
+                            pointers = listOf(NuxiePlayerPointerEvent(kind, bounds.originX + 195f, bounds.originY + 104f, 0, 0f)))
+                        val down = probe(NuxiePlayerPointerKind.DOWN)
+                        val exit = probe(NuxiePlayerPointerKind.EXIT)
+                        assertTrue("A probe fires no emit", (down.events + exit.events).all { it.name.isEmpty() || it.name.startsWith('$') })
+                        down.pointerHits.any { it != NuxiePlayerPointerHit.NONE }
+                    }
+                    if (!ready) delay(20)
+                }
+            }
+            val authored = setOf("picked", "counted", "rated", "noted", "goal_removed")
+            fun sent() = captured.filter { it.first in authored }
+            suspend fun tap(label: String, y: Float, emits: Boolean) {
+                val before = sent().size
+                instrumentation.runOnMainSync {
+                    val density = surface.resources.displayMetrics.density
+                    val now = SystemClock.uptimeMillis()
+                    for (action in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP)) {
+                        val event = MotionEvent.obtain(now, now, action, 195f * density, y * density, 0)
+                        try { assertTrue(label, surface.dispatchTouchEvent(event)) } finally { event.recycle() }
+                    }
+                }
+                if (emits) withTimeout(5_000) { while (sent().size == before) delay(20) } else delay(300)
+                assertEquals(label, before + if (emits) 1 else 0, sent().size)
+            }
+            tap("Send plan", 104f, true)
+            tap("Choose annual", 48f, false)
+            tap("Send plan", 104f, true)
+            tap("Yearly plan", 216f, true)
+            tap("Add one", 272f, true)
+            tap("Rate four", 328f, true)
+            tap("Set, then send", 384f, true)
+            tap("Send, then clear", 440f, true)
+            val expected = listOf(
+                "picked" to mapOf("plan" to "monthly", "screenId" to "author-screen"),
+                "picked" to mapOf("plan" to "annual", "screenId" to "author-screen"),
+                "picked" to mapOf("plan" to "yearly"),
+                "counted" to mapOf("count" to 1.0),
+                "rated" to mapOf("stars" to 4.0),
+                "noted" to mapOf("note" to "before"),
+                "noted" to mapOf("note" to "after"),
+            )
+            val delivered = sent()
+            assertEquals(expected.map { it.first }, delivered.map { it.first })
+            for ((event, wanted) in delivered.zip(expected)) {
+                val (name, properties) = event
+                for ((key, value) in wanted.second) {
+                    val actual = properties[key]
+                    if (value is Double) assertEquals("$name.$key", value, (actual as Number).toDouble(), 0.0)
+                    else assertEquals("$name.$key", value, actual)
+                }
+                for (key in wanted.second.keys) assertNull("$name carries no \$$key path", properties["\$$key"])
+                assertNull("$name carries no instance the author did not write", properties["instanceId"])
+                assertEquals("$name comes from its screen", "emits", properties["screen_id"])
+            }
+        } finally {
+            service.profileDidClearAll()
+            presentations.shutdownOwnedBy(owner)
+            store.close()
+            scope.cancel()
+            instrumentation.removeMonitor(monitor)
+            directory.deleteRecursively()
+        }
+    }
+
     private fun saveJourney(background: Boolean, days: Double = 30.0, branchEvent: String? = null, pendingCommerce: Boolean = false) = runBlocking {
         assertTrue(NuxieRuntime.shared.isAvailable)
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -717,17 +871,17 @@ class SharedValuesJourneyDeviceTest {
     private data class Fixture(val scene: ByteArray, val profile: JsonObject, val keys: Map<String, ByteArray>,
         val supported: JourneyReleaseSupportedRuntime, val authority: ProfileDeliveryAuthority, val descriptor: JsonObject)
 
-    private fun fixture(branch: Boolean = false, wait: Boolean = false, published: Boolean = false, goals: Boolean = false, form: String? = null, publishedFormRoutes: Boolean = false, nested: Boolean = false): Fixture {
+    private fun fixture(branch: Boolean = false, wait: Boolean = false, published: Boolean = false, goals: Boolean = false, form: String? = null, publishedFormRoutes: Boolean = false, nested: Boolean = false, emits: Boolean = false): Fixture {
         val assets = InstrumentationRegistry.getInstrumentation().context.assets
         fun read(path: String) = assets.open(path).use { it.readBytes() }
         val entry = Json.parseToJsonElement(read("journeys/rendered-text-input/release-entry.json").decodeToString()).jsonObject
         val envelope = entry.getValue("envelope").jsonObject
         val original = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64").jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
-        val folder = if (nested) "nested-values" else if (form != null) "forms-saves" else if (goals) "forms-saves/goals" else if (published) "run-values" else "shared-values"
+        val folder = if (emits) "emit-values" else if (nested) "nested-values" else if (form != null) "forms-saves" else if (goals) "forms-saves/goals" else if (published) "run-values" else "shared-values"
         val scene = read("runtime/$folder/screen.riv")
         val provenance = Json.parseToJsonElement(read("runtime/$folder/provenance.json").decodeToString()).jsonObject
         fun hash(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
-        val names = if (nested) listOf("first") else if (goals) listOf("goals", "quiet") else if (published) PublishedRunValuesFixture.expectations.getValue("screens").jsonArray
+        val names = if (emits) listOf("emits") else if (nested) listOf("first") else if (goals) listOf("goals", "quiet") else if (published) PublishedRunValuesFixture.expectations.getValue("screens").jsonArray
             .map { it.jsonPrimitive.content } else listOf("first", "long", "short")
         val supported = checkNotNull(supportedRuntimeForEmbeddedRuntime(nuxieRuntimeSourceRevision()))
         val requirements = JsonObject(original.getValue("requirements").jsonObject + mapOf(
@@ -765,6 +919,7 @@ class SharedValuesJourneyDeviceTest {
                 buildJsonObject { put("kind", "complete"); put("id", "long"); put("outcome", "long") },
                 buildJsonObject { put("kind", "complete"); put("id", "lost"); put("outcome", "lost") })
         }
+        if (emits) steps = listOf(navigate("show", "emits"))
         if (published) {
             val condition = Json.parseToJsonElement("""{"kind":"action","id":"next","action":{"type":"condition","branches":[{"id":"changed","condition":{"type":"Compare","op":"==","left":{"type":"Response.Field","key":"trip_days"},"right":{"type":"Number","value":${PublishedRunValuesFixture.expectations.getValue("tap").jsonObject.getValue("after")}}}}]},"outlets":{"changed":"level","default":"stale"}}""").jsonObject
             steps = listOf(navigate("show", "tap"), condition, navigate("level", "level"),
@@ -778,9 +933,11 @@ class SharedValuesJourneyDeviceTest {
             },
             "steps" to JsonArray(steps),
             "screens" to JsonArray(names.map { buildJsonObject {
-                put("id", it); put("defaultViewModelName", "Runtime $it scr_screens_s$it"); put("defaultInstanceId", "$it-root"); putJsonArray("responseCaptures") {}
+                // The publish_folder publisher names the root model by its artboard.
+                put("id", it); put("defaultViewModelName", if (emits) "vm_runtime_root_scr_screens_s$it" else "Runtime $it scr_screens_s$it")
+                put("defaultInstanceId", if (emits) "vmi_runtime_scr_screens_s$it" else "$it-root"); putJsonArray("responseCaptures") {}
             } }),
-            "routes" to buildJsonArray { addJsonObject { put("entryStepId", "next"); put("eventName", "continue"); putJsonObject("host") { put("kind", "screen"); put("screenId", names.first()) } } }))
+            "routes" to if (emits) JsonArray(emptyList()) else buildJsonArray { addJsonObject { put("entryStepId", "next"); put("eventName", "continue"); putJsonObject("host") { put("kind", "screen"); put("screenId", names.first()) } } }))
         var descriptor = JsonObject(original + mapOf("leg" to leg, "requirements" to requirements,
             "viewModelValues" to JsonArray(emptyList()),
             "screenBehaviors" to JsonArray(names.sorted().map { buildJsonObject {
@@ -801,6 +958,8 @@ class SharedValuesJourneyDeviceTest {
                 putJsonArray("transitions") {}; putJsonArray("textInputs") {}
             }))
         if (nested) descriptor = JsonObject(descriptor + ("state" to Json.parseToJsonElement(read("runtime/nested-values/state.json").decodeToString())))
+        if (emits) descriptor = JsonObject(descriptor + ("state" to Json.parseToJsonElement(
+            """{"goals":{"type":"list","items":{"title":{"type":"string"}}}}""")))
         if (form != null) {
             val publishedForm = Json.parseToJsonElement(read("runtime/forms-saves/release.json").decodeToString()).jsonObject
             val screen = "scr_screens_s$form"
