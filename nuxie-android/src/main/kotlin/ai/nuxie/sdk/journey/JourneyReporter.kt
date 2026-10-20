@@ -99,15 +99,19 @@ internal class JourneyExperimentExposureReporter(
             "experiment_key" to exposure.experimentId,
             "variant_key" to exposure.variantId,
         )
-        when (exposure.kind) {
+        val isHoldout = when (exposure.kind) {
             JourneyRun.ExperimentExposure.Kind.ASSIGNED -> {
                 properties["assignment_source"] = "profile"
+                exposure.isHoldout
             }
             JourneyRun.ExperimentExposure.Kind.FALLBACK -> {
                 properties["assignment_source"] = "fallback"
+                false
             }
         }
-        properties["is_holdout"] = exposure.isHoldout
+        properties["is_holdout"] = isHoldout
+        // A treatment was selected; a holdout's treatment was suppressed.
+        properties["exposure_basis"] = if (isHoldout) "suppressed" else "selected"
         return JourneyEventNames.EXPERIMENT_EXPOSURE to properties
     }
 }
