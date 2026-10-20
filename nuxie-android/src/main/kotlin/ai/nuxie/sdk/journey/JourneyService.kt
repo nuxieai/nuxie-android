@@ -888,6 +888,10 @@ internal class JourneyService(
         if (profileState?.distinctId == distinctId) profileState = null
         currentJournal?.takeIf { it.distinctId == distinctId }
             ?.retainStateArmReceipts(emptySet())
+        // Journeys already running keep their pinned releases; their waits
+        // still resolve, unless a fetch holds the customer's events.
+        resumeParkedRuns(null, null)
+        scheduleNextWake()
     }
 
     /**
@@ -1051,7 +1055,11 @@ internal class JourneyService(
         if (!foreground.get()) return
         foregroundReceiptResetCustomers.remove(identity.distinctId())
         resetForegroundReceiptsIfNeeded()
-        val state = currentState() ?: return
+        val state = currentState() ?: run {
+            resumeParkedRuns(null, null)
+            scheduleNextWake()
+            return
+        }
         reconcileNow(state.generation)
     }
 
@@ -1103,6 +1111,8 @@ internal class JourneyService(
         if (!replayPendingLocalRoutes(distinctId)) {
             Log.w(LOG_TAG, "Pending Journey routes stay queued after the profile fetch settled")
         }
+        // Then the waits that ran out meanwhile resolve.
+        resumeParkedRuns(null, null)
         scheduleNextWake()
     }
 
@@ -1543,6 +1553,9 @@ internal class JourneyService(
         val identityScope = identity.captureScope()
         if (state != null && (identityScope.distinctId != state.distinctId || !isCurrent(state))) return
         if (event == null && !foreground.get()) return
+        // While the customer's events are held for a fetch, waits resolve only
+        // once those events have replayed.
+        if (event == null && holdsEvents(identityScope.distinctId)) return
         val currentJournal = journal?.takeIf { it.distinctId == identityScope.distinctId } ?: return
         // This pass resolves every timeout due now.
         if (event == null) timeoutPassDue = false
@@ -3155,7 +3168,7 @@ internal class JourneyService(
 
     private suspend fun scheduleNextWake() {
         cancelWake()
-        if (!foreground.get() || currentState() == null) return
+        if (!foreground.get() || journal?.distinctId != identity.distinctId()) return
         val upcoming = journal?.runs()?.asSequence()
             ?.filter { it.completion == null }
             ?.mapNotNull { run -> run.park?.let { park ->
@@ -3177,8 +3190,7 @@ internal class JourneyService(
             nowMillis() < deadlineMillis
         ) return
         wakeJob = null
-        val state = currentState() ?: return
-        resumeParkedRuns(state, null)
+        resumeParkedRuns(currentState(), null)
         scheduleNextWake()
     }
 
