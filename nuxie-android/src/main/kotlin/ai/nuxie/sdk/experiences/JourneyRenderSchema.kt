@@ -63,8 +63,9 @@ internal object JourneyRenderSchema {
         if (screens.isEmpty() || screens.size != array(render["screens"]).size) fail("render screens")
         for (input in array(render["transitions"], 1024)) {
             val transition = exact(input, setOf("id", "kind", "sourceScreenId", "destinationScreenId", "durationMs",
-                "incomingOnTop", "source", "destination"), setOf("reverse"))
+                "incomingOnTop", "source", "destination"), setOf("reverse", "defaultPair"))
             releaseId(transition["id"]); ExperienceLayerHostContract.transitionKind(transition["kind"])
+            transition["defaultPair"]?.let { boolean(it) }
             for (key in listOf("sourceScreenId", "destinationScreenId")) if (releaseId(transition[key]) !in screens) fail("transition screen")
             integer(transition["durationMs"], maximum = 60_000); boolean(transition["incomingOnTop"])
             endpoints(transition)
