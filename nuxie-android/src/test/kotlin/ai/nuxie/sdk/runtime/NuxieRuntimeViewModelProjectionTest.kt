@@ -6,6 +6,25 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class NuxieRuntimeViewModelProjectionTest {
+    @Test fun `row root reuses product projection without binding another artboard`() {
+        val native = ProjectionNative()
+        val state = NuxieRuntime(native).bindRowViewModel(
+            NuxieRuntimeFile(10, native), 0, null, "row-root", emptyList(),
+            NuxieViewModelListProjection("Runtime", "paywall/products", "paywall/selectedProduct",
+                "PaywallProduct", listOf(NuxieViewModelListProjection.Item(
+                    "Pro", 0, true, mapOf("price" to NuxieViewModelScalarValue.StringValue("12.99")), "product:pro")),
+                "row-root"))
+        try {
+            val snapshot = state.snapshot()
+            assertEquals(setOf("row-root"), snapshot.instanceAliases(1000))
+            assertEquals("9.99", snapshot.resolveScopedString("price", "PaywallProduct", "product:pro"))
+            assertEquals(1, native.calls.count { it == "new-authored:0:null" })
+            assertEquals(1, native.calls.count { it == "new-authored:2:0" })
+            assertEquals(0, native.calls.count { it.startsWith("bind:") || it.startsWith("new-default:") })
+        } finally { state.close() }
+        assertEquals(listOf("free:40", "free:41"), native.calls.takeLast(2))
+    }
+
     @Test fun `frame consumers share one native capture`() {
         val native = SnapshotNative()
         val state = NuxieRuntimeViewModelState(40, emptyList(), native,
@@ -311,7 +330,7 @@ class NuxieRuntimeViewModelProjectionTest {
             authoredInstanceIndex: Int?,
         ): NativeCallResult<Long> {
             calls += "new-authored:$schemaIndex:$authoredInstanceIndex"
-            return NativeCallResult(0, 41)
+            return NativeCallResult(0, if (schemaIndex == 0) 40 else 41)
         }
 
         override fun mutateViewModel(handle: Long, write: NativeViewModelWrite): Int {
