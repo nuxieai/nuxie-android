@@ -232,6 +232,7 @@ class ExperienceInteractiveLayerTest {
         var globals = false
         val globalBindings = mutableListOf<Pair<String, Long>>()
         var allocated = 0
+        var catalogQueries = 0
         private val schemas = mutableMapOf(100L to 0)
         private val catalog get() = NativeViewModelCatalog(arrayOf(
             NativeViewModelSchema(0,"Host",0,1,0,0,-1,false),
@@ -245,7 +246,10 @@ class ExperienceInteractiveLayerTest {
             prop(3,0,"phase",5,labels=arrayOf("hidden","entering","active","exiting")), prop(3,1,"appearances",2),
             prop(3,2,"transition",1), prop(3,3,"exitReason",5,labels=arrayOf("none","dismissed","navigation")),
             prop(4,0,"reduceMotion",3)), emptyArray())
-        override fun viewModelCatalog(fileHandle: Long) = NativeCallResult(0, catalog)
+        override fun viewModelCatalog(fileHandle: Long): NativeCallResult<NativeViewModelCatalog> {
+            catalogQueries++
+            return NativeCallResult(0, catalog)
+        }
         override fun newNamedArtboard(fileHandle: Long, name: String) = 2L
         override fun newDefaultViewModel(artboardHandle: Long) = NativeCallResult(0,100L)
         override fun viewModelRootSchemaIndex(viewModelHandle: Long) = NativeCallResult(0,schemas.getValue(viewModelHandle).toLong())
