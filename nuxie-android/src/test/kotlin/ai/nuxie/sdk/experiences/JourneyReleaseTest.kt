@@ -109,6 +109,13 @@ class JourneyReleaseTest {
         assertThrows(JourneyReleaseAuthenticationException::class.java) {
             JourneySchemaValidator.validate(JsonObject(root + ("state" to Json.parseToJsonElement("""{"days":{"type":"number","rules":[]}}"""))))
         }
+        // Rules on values in state travel beside it, in their own optional list.
+        JourneySchemaValidator.validate(JsonObject(root + ("stateRules" to Json.parseToJsonElement("""[{"model":"Experience",
+            "property":"days","kind":2,"mode":1,"number_bound":30,"text":"","values":[],"value_count":0,
+            "picked_property":"","bound_flags":0,"minimum":0,"maximum":0,"code":"max","message":"Enter a smaller number."}]"""))))
+        assertThrows(JourneyReleaseAuthenticationException::class.java) {
+            JourneySchemaValidator.validate(JsonObject(root + ("stateRules" to JsonPrimitive("not a list"))))
+        }
     }
 
     @Test fun `version three requires native input names and rejects retired identities`() {

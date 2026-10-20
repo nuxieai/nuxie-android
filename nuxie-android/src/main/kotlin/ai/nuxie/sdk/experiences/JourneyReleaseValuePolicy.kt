@@ -68,6 +68,8 @@ internal object JourneyReleaseValuePolicy {
             NuxieRuleGroup(model, "valid", members)
         }
         if (groups.size != forms.size || groups.map { it.model }.toSet().size != groups.size) fail("form groups")
+        // Rules on values in state travel beside it; a release with none leaves the key out.
+        root["stateRules"]?.let { for (raw in array(it, 4096)) rules += stateRule(raw) }
         val ruleBytes = rules.sumOf { r -> 152L + listOf(r.model, r.property, r.text, r.pickedProperty, r.code, r.message)
             .sumOf { bytes(it) } + r.values.sumOf { 16L + bytes(it) } }
         val groupBytes = groups.sumOf { g -> 48L + bytes(g.model) + bytes(g.valid) + g.members.sumOf { m ->
@@ -99,6 +101,37 @@ internal object JourneyReleaseValuePolicy {
         if (kind == 9 && (mode != 0 || code !in listOf("format", "pattern")) ||
             kind !in listOf(1, 2) && bound != 0.0 || kind !in listOf(3, 4, 9) && operand.isNotEmpty() ||
             kind != 5 && values.isNotEmpty() || picked != (if (kind == 7) "picked" else "")) fail("unused rule operands")
+        return NuxieValueRule(model, property, kind, mode, bound, operand, values, picked, flags, minimum, maximum, code, message)
+    }
+
+    /**
+     * A state value's rule refuses whatever its kind, and names a value the way the file holds it:
+     * a property of the Experience, a screen's state or a group, a component's own `state:<name>`,
+     * or a choice that allows several by its `options`. Allowed values and required belong to forms.
+     */
+    private fun stateRule(raw: JsonElement): NuxieValueRule {
+        val r = exact(raw, setOf("model", "property", "kind", "mode", "number_bound", "text", "values",
+            "value_count", "picked_property", "bound_flags", "minimum", "maximum", "code", "message"))
+        val model = nonempty(r["model"]); val property = text(r["property"])
+        if (!property.matches(Regex("(state:)?[A-Za-z_][A-Za-z0-9_]*"))) fail("state rule property")
+        val kind = uint(r["kind"]).toInt(); val mode = uint(r["mode"]).toInt()
+        val flags = uint(r["bound_flags"]).toInt(); val minimum = uint(r["minimum"]); val maximum = uint(r["maximum"])
+        val bound = number(r["number_bound"]); val operand = text(r["text"]); val values = choices(r["values"])
+        val picked = text(r["picked_property"]); val code = nonempty(r["code"]); val message = nonempty(r["message"])
+        if (mode != 1 || kind !in listOf(1, 2, 3, 4, 7, 8, 9, 11, 12) || flags !in 0..2 ||
+            values.isNotEmpty() || uint(r["value_count"]) != 0L) fail("state rule operands")
+        val codes = mapOf(1 to listOf("min"), 2 to listOf("max"), 3 to listOf("min"), 4 to listOf("max"),
+            9 to listOf("format", "pattern"), 11 to listOf("format"), 12 to listOf("date"))[kind]
+        if (codes != null) {
+            if (code !in codes || flags != 0 || minimum != 0L || maximum != 0L) fail("state rule code")
+        } else {
+            val isMinimum = flags == 1
+            val expectedCode = if (kind == 7) (if (isMinimum) "minItems" else "maxItems") else (if (isMinimum) "minLength" else "maxLength")
+            if (flags == 0 || code != expectedCode || (if (isMinimum) maximum != 0L else minimum != 0L)) fail("state bound rule")
+        }
+        if (kind !in listOf(1, 2) && bound != 0.0 || kind !in listOf(3, 4, 9) && operand.isNotEmpty() ||
+            kind == 9 && operand.isEmpty() ||
+            (if (kind == 7) property != "options" || picked != "picked" else picked.isNotEmpty())) fail("unused state rule operands")
         return NuxieValueRule(model, property, kind, mode, bound, operand, values, picked, flags, minimum, maximum, code, message)
     }
 

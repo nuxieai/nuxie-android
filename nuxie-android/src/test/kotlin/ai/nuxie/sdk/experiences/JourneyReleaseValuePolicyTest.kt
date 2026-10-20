@@ -61,4 +61,39 @@ class JourneyReleaseValuePolicyTest {
             assertThrows(key, JourneyReleaseAuthenticationException::class.java) { JourneyReleaseValuePolicy.parse(invalid) }
         }
     }
+
+    private val stateRules = Json.parseToJsonElement(
+        java.io.File("../fixtures/runtime/state-rules/policy.json").readText()).jsonObject
+    private fun withStateRules(rules: JsonElement) =
+        JsonObject(Json.parseToJsonElement("""{"state":{},"responses":{},"ruleGroups":[]}""").jsonObject + ("stateRules" to rules))
+
+    @Test fun `state rules install beside form rules and every one refuses`() {
+        val records = stateRules.getValue("stateRules").jsonArray
+        val parsed = JourneyReleaseValuePolicy.parse(withStateRules(records))
+        assertEquals(records.size, parsed.rules.size)
+        for ((rule, record) in parsed.rules.zip(records.map { it.jsonObject })) {
+            assertEquals(record.getValue("model").jsonPrimitive.content, rule.model)
+            assertEquals(record.getValue("property").jsonPrimitive.content, rule.property)
+            assertEquals(record.getValue("kind").jsonPrimitive.int, rule.kind)
+            assertEquals("${rule.code} refuses on a value in state", 1, rule.mode)
+            assertEquals(record.getValue("picked_property").jsonPrimitive.content, rule.pickedProperty)
+        }
+        val combined = JourneyReleaseValuePolicy.parse(JsonObject(policy + ("stateRules" to records)))
+        assertEquals(records.size + 1, combined.rules.size)
+        assertEquals("Responses:feedback", combined.rules.first().model)
+        assertTrue(JourneyReleaseValuePolicy.parse(Json.parseToJsonElement("""{"state":{},"responses":{},"ruleGroups":[]}""").jsonObject).rules.isEmpty())
+    }
+
+    @Test fun `each refused state rule fails validation`() {
+        val cases = stateRules.getValue("refused").jsonArray.map { it.jsonObject }
+        assertTrue(cases.isNotEmpty())
+        for (case in cases) {
+            assertThrows(case.getValue("case").jsonPrimitive.content, JourneyReleaseAuthenticationException::class.java) {
+                JourneyReleaseValuePolicy.parse(withStateRules(JsonArray(listOf(case.getValue("rule")))))
+            }
+        }
+        assertThrows(JourneyReleaseAuthenticationException::class.java) {
+            JourneyReleaseValuePolicy.parse(withStateRules(JsonPrimitive("not a list")))
+        }
+    }
 }
