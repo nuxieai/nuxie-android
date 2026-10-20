@@ -35,6 +35,8 @@ internal class ExperienceNativeLayerWindow(
     private var showRequested = false
     private var retired = false
     private var inputEnabled = false
+    private var backHandler: (() -> Unit)? = null
+    private var backCallback: android.window.OnBackInvokedCallback? = null
     private val layoutListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateBounds() }
 
     /**
@@ -238,8 +240,28 @@ internal class ExperienceNativeLayerWindow(
 
     fun closeFromUser() { if (inputEnabled) dialog.cancel() }
 
+    /** Layer history handles Back even while authored motion has disabled window dismissal. */
+    fun setBackHandler(handler: () -> Unit) {
+        backHandler = handler
+        dialog.setOnKeyListener { _, code, event ->
+            if (code != android.view.KeyEvent.KEYCODE_BACK) false
+            else {
+                if (event.action == android.view.KeyEvent.ACTION_UP && !event.isCanceled) backHandler?.invoke()
+                true
+            }
+        }
+        if (android.os.Build.VERSION.SDK_INT >= 33 && backCallback == null) {
+            val callback = android.window.OnBackInvokedCallback { backHandler?.invoke() }
+            backCallback = callback
+            dialog.onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, callback)
+        }
+    }
+
     fun retire() {
         retired = true
+        if (android.os.Build.VERSION.SDK_INT >= 33) backCallback?.let { dialog.onBackInvokedDispatcher.unregisterOnBackInvokedCallback(it) }
+        backCallback = null
+        backHandler = null
         activity.window.decorView.removeOnLayoutChangeListener(layoutListener)
         (dialog as? BottomSheetDialog)?.findViewById<View>(com.google.android.material.R.id.coordinator)
             ?.removeOnLayoutChangeListener(layoutListener)
