@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.billing
 
 import ai.nuxie.sdk.NuxieEnvironment
+import ai.nuxie.sdk.identity.CustomerKind
 import ai.nuxie.sdk.logging.NuxieLog as Log
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -147,6 +148,18 @@ private data class StoredPurchaseBindingKey(
     val productIdentity: StoredProductIdentity,
 )
 
+/**
+ * One owed `/purchase` send: the outbox entry for a purchase token. Its reason,
+ * requester and customer kind are recorded when the send is admitted and are
+ * never recomputed, so every retry, including after a restart, sends exactly
+ * what was admitted.
+ */
+internal data class PurchaseSend(
+    val reason: PurchaseSyncReason,
+    val distinctId: String,
+    val customerKind: CustomerKind,
+)
+
 /** Minimal Play evidence retained until /purchase and managed completion succeed. */
 internal data class PurchaseEvidence(
     val purchaseToken: String,
@@ -159,15 +172,19 @@ internal data class PurchaseEvidence(
     val productType: String? = null,
     val purchaseState: StoredPurchaseState,
     val obfuscatedAccountId: String? = null,
-    val syncAttributionDistinctId: String,
+    /** The customer whose checkout made this purchase; checkout correlation for events only. */
+    val buyerDistinctId: String? = null,
+    /** The customer the server last attached this purchase to. Only the server's 200 sets it. */
     val ownerDistinctId: String? = null,
+    /** The server last refused this purchase: it is never sent again on its own, only by a Restore. */
+    val refused: Boolean = false,
+    /** The outbox entry: the send still owed for this purchase, or null when none is. */
+    val pendingSend: PurchaseSend? = null,
     val context: StoredPurchaseContext? = null,
     /** Purchase-token-scoped allowance snapshot; null is unresolved and empty carries no Feature allowances. */
     val pinnedFeatureAllowances: List<StoredFeatureAllowance>? = null,
     val acknowledged: Boolean,
     val consumed: Boolean = false,
-    val synced: Boolean = false,
-    val permanentlyRejected: Boolean = false,
     val syncAttempts: Int = 0,
     val completionAttempts: Int = 0,
     val firstSeenMillis: Long,
@@ -176,15 +193,16 @@ internal data class PurchaseEvidence(
     val completionEmitted: Boolean = false,
     val syncedEventEmitted: Boolean = false,
     val syncedCustomerId: String? = null,
-    val acceptedResponseBody: JsonObject? = null,
     val nuxieManaged: Boolean = false,
     val signatureVerificationRequired: Boolean = false,
     val signatureVerified: Boolean = false,
     val authorityScope: String? = null,
-    val revoked: Boolean = false,
     val backendSyncedAtMillis: Long? = null,
     val checkoutCompletionEventId: String? = null,
-)
+) {
+    /** The server accepted this purchase for its owner. */
+    val synced: Boolean get() = ownerDistinctId != null
+}
 
 internal interface PurchaseEvidenceStore {
     suspend fun load(): Map<String, PurchaseEvidence>
@@ -325,16 +343,22 @@ internal class FilePurchaseEvidenceStore(
             evidence.productType?.let { put("productType", JsonPrimitive(it)) }
             put("purchaseState", JsonPrimitive(evidence.purchaseState.name))
             evidence.obfuscatedAccountId?.let { put("obfuscatedAccountId", JsonPrimitive(it)) }
-            put("syncAttributionDistinctId", JsonPrimitive(evidence.syncAttributionDistinctId))
+            evidence.buyerDistinctId?.let { put("buyerDistinctId", JsonPrimitive(it)) }
             evidence.ownerDistinctId?.let { put("ownerDistinctId", JsonPrimitive(it)) }
+            put("refused", JsonPrimitive(evidence.refused))
+            evidence.pendingSend?.let { send ->
+                put("pendingSend", JsonObject(mapOf(
+                    "reason" to JsonPrimitive(send.reason.wireValue),
+                    "distinctId" to JsonPrimitive(send.distinctId),
+                    "customerKind" to JsonPrimitive(send.customerKind.wireValue),
+                )))
+            }
             evidence.context?.let { put("context", encodeContext(it)) }
             evidence.pinnedFeatureAllowances?.let { allowances ->
                 put("pinnedFeatureAllowances", JsonArray(allowances.map(::encodeAllowance)))
             }
             put("acknowledged", JsonPrimitive(evidence.acknowledged))
             put("consumed", JsonPrimitive(evidence.consumed))
-            put("synced", JsonPrimitive(evidence.synced))
-            put("permanentlyRejected", JsonPrimitive(evidence.permanentlyRejected))
             put("syncAttempts", JsonPrimitive(evidence.syncAttempts))
             put("completionAttempts", JsonPrimitive(evidence.completionAttempts))
             put("firstSeenMillis", JsonPrimitive(evidence.firstSeenMillis))
@@ -343,12 +367,10 @@ internal class FilePurchaseEvidenceStore(
             put("completionEmitted", JsonPrimitive(evidence.completionEmitted))
             put("syncedEventEmitted", JsonPrimitive(evidence.syncedEventEmitted))
             evidence.syncedCustomerId?.let { put("syncedCustomerId", JsonPrimitive(it)) }
-            evidence.acceptedResponseBody?.let { put("acceptedResponseBody", it) }
             put("nuxieManaged", JsonPrimitive(evidence.nuxieManaged))
             put("signatureVerificationRequired", JsonPrimitive(evidence.signatureVerificationRequired))
             put("signatureVerified", JsonPrimitive(evidence.signatureVerified))
             evidence.authorityScope?.let { put("authorityScope", JsonPrimitive(it)) }
-            put("revoked", JsonPrimitive(evidence.revoked))
             evidence.backendSyncedAtMillis?.let { put("backendSyncedAtMillis", JsonPrimitive(it)) }
             evidence.checkoutCompletionEventId?.let {
                 put("checkoutCompletionEventId", JsonPrimitive(it))
@@ -357,6 +379,7 @@ internal class FilePurchaseEvidenceStore(
     )
 
     private fun decodeEvidence(raw: JsonObject): PurchaseEvidence? = runCatching {
+        val legacy = decodeLegacyAnswer(raw)
         PurchaseEvidence(
             purchaseToken = raw.string("purchaseToken") ?: return null,
             packageName = raw.string("packageName") ?: return null,
@@ -369,16 +392,21 @@ internal class FilePurchaseEvidenceStore(
             productType = raw.string("productType"),
             purchaseState = StoredPurchaseState.valueOf(raw.string("purchaseState") ?: return null),
             obfuscatedAccountId = raw.string("obfuscatedAccountId"),
-            syncAttributionDistinctId = raw.string("syncAttributionDistinctId") ?: return null,
-            ownerDistinctId = raw.string("ownerDistinctId"),
+            buyerDistinctId = if (legacy != null) legacy.requester else raw.string("buyerDistinctId"),
+            ownerDistinctId = if (legacy != null) legacy.owner else raw.string("ownerDistinctId"),
+            refused = legacy?.refused ?: raw.boolean("refused"),
+            pendingSend = if (legacy != null) legacy.pendingSend else (raw["pendingSend"] as? JsonObject)?.let(::decodeSend),
             context = (raw["context"] as? JsonObject)?.let(::decodeContext),
             pinnedFeatureAllowances = (raw["pinnedFeatureAllowances"] as? JsonArray)
                 ?.mapNotNull(::decodeAllowance),
             acknowledged = raw.boolean("acknowledged"),
             consumed = raw.boolean("consumed"),
-            synced = raw.boolean("synced"),
-            permanentlyRejected = raw.boolean("permanentlyRejected"),
-            syncAttempts = (raw["syncAttempts"] as? JsonPrimitive)?.intOrNull ?: 0,
+            // An answered entry has no failed sends left to count.
+            syncAttempts = if (legacy != null && legacy.pendingSend == null) {
+                0
+            } else {
+                (raw["syncAttempts"] as? JsonPrimitive)?.intOrNull ?: 0
+            },
             completionAttempts = (raw["completionAttempts"] as? JsonPrimitive)?.intOrNull ?: 0,
             firstSeenMillis = (raw["firstSeenMillis"] as? JsonPrimitive)?.longOrNull ?: return null,
             consumable = raw.boolean("consumable"),
@@ -386,16 +414,62 @@ internal class FilePurchaseEvidenceStore(
             completionEmitted = raw.boolean("completionEmitted"),
             syncedEventEmitted = raw.boolean("syncedEventEmitted"),
             syncedCustomerId = raw.string("syncedCustomerId"),
-            acceptedResponseBody = raw["acceptedResponseBody"] as? JsonObject,
             nuxieManaged = raw.boolean("nuxieManaged"),
             signatureVerificationRequired = raw.boolean("signatureVerificationRequired"),
             signatureVerified = raw.boolean("signatureVerified"),
             authorityScope = raw.string("authorityScope"),
-            revoked = raw.boolean("revoked"),
             backendSyncedAtMillis = (raw["backendSyncedAtMillis"] as? JsonPrimitive)?.longOrNull,
             checkoutCompletionEventId = raw.string("checkoutCompletionEventId"),
         )
     }.getOrNull()
+
+    private class LegacyAnswer(
+        val requester: String?,
+        val owner: String?,
+        val refused: Boolean,
+        val pendingSend: PurchaseSend?,
+    )
+
+    /**
+     * An entry written before the outbox kept the server's answer in `synced`
+     * (accepted) and `permanentlyRejected` (refused, or a signature that never
+     * verified: either way never sent again on its own), and the customer it was
+     * sent for in `syncAttributionDistinctId`. Its `ownerDistinctId` was the
+     * SDK's own guess, never the server's word, so it is not read. An entry
+     * the server never answered becomes an outbox entry that reads as a sync
+     * for a signed-in customer. Null for an entry written by the outbox.
+     */
+    private fun decodeLegacyAnswer(raw: JsonObject): LegacyAnswer? {
+        if ("refused" in raw || "synced" !in raw) return null
+        val requester = raw.string("syncAttributionDistinctId")
+        val accepted = raw.boolean("synced")
+        val refused = !accepted && raw.boolean("permanentlyRejected")
+        val unanswered = !accepted && !refused &&
+            raw.string("purchaseState") == StoredPurchaseState.PURCHASED.name
+        return LegacyAnswer(
+            requester = requester,
+            owner = requester.takeIf { accepted },
+            refused = refused,
+            pendingSend = requester?.takeIf { unanswered }?.let {
+                PurchaseSend(PurchaseSyncReason.SYNC, it, CustomerKind.IDENTIFIED)
+            },
+        )
+    }
+
+    /**
+     * An entry stored before its reason and kind were recorded reads as a sync
+     * for a signed-in customer: the server merges only owners declared
+     * anonymous, so such a customer can be moved but never merged away.
+     */
+    private fun decodeSend(raw: JsonObject): PurchaseSend? {
+        val reason = raw.string("reason")?.let { value ->
+            PurchaseSyncReason.entries.firstOrNull { it.wireValue == value }
+        } ?: PurchaseSyncReason.SYNC
+        val kind = raw.string("customerKind")?.let { value ->
+            CustomerKind.entries.firstOrNull { it.wireValue == value }
+        } ?: CustomerKind.IDENTIFIED
+        return PurchaseSend(reason, raw.string("distinctId") ?: return null, kind)
+    }
 
     private fun encodeBinding(binding: StoredPurchaseBinding): JsonObject = JsonObject(
         buildMap {

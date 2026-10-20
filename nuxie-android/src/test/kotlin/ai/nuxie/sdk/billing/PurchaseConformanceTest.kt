@@ -116,6 +116,7 @@ class PurchaseConformanceTest {
             )),
             features = core.features,
             distinctId = core.identity::distinctId,
+            customerKind = core.identity::customerKind,
             emit = { name, properties ->
                 if (name == expectedEventName) {
                     evidenceAtCapture = kotlinx.coroutines.runBlocking { store.load()[token] }
@@ -127,6 +128,8 @@ class PurchaseConformanceTest {
             scope = backgroundScope,
             initialRetryDelayMillis = 10,
             maxRetryDelayMillis = 10,
+            outboxRetryInitialDelayMillis = 10,
+            outboxRetryMaxDelayMillis = 10,
         )
         service.rememberProduct(
             StoreProduct(

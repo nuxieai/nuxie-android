@@ -268,6 +268,7 @@ internal class NuxieCore(
         synchronizer = NuxieApiPurchaseSynchronizer(api),
         features = features,
         distinctId = identity::distinctId,
+        customerKind = identity::customerKind,
         emit = eventLog::capture,
         settings = purchaseSettings,
         scope = producerScope,
@@ -277,6 +278,7 @@ internal class NuxieCore(
         capturePurchaseSynced = eventLog::captureIdempotently,
         capturePurchaseEvent = ::capturePurchaseEvent,
         testStore = testStore,
+        refreshFeatureAuthority = { profile.requestRefresh() },
     ).also { purchaseService = it }
 
     private val journeyCommerce = JourneyCommercePreparer(

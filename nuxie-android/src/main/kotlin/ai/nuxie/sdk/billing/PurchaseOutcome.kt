@@ -9,6 +9,29 @@ internal enum class PurchaseOutcomeSource(val wireValue: String) {
     EXTERNAL_DELEGATE("external_delegate"),
 }
 
+/**
+ * Why the SDK sends a purchase to `/purchase`. Only [PURCHASE] and [RESTORE]
+ * may move a purchase another customer owns to the requester; [SYNC] never
+ * moves ownership, so app start, sign-in and renewals cannot bounce a
+ * purchase between customers.
+ */
+internal enum class PurchaseSyncReason(val wireValue: String) {
+    /** The customer's own checkout. */
+    PURCHASE("purchase"),
+    /** The customer asked to restore their purchases. */
+    RESTORE("restore"),
+    /** Startup recovery, purchase updates, and identity-triggered scans. */
+    SYNC("sync"),
+    ;
+
+    /** A purchase or a Restore asks the server to attach the purchase to the requester. */
+    val claimsOwnership: Boolean get() = this != SYNC
+
+    /** The reason an unsent entry keeps when another send meets it: a claim beats a sync. */
+    fun strongest(other: PurchaseSyncReason): PurchaseSyncReason =
+        if (other.claimsOwnership && !claimsOwnership) other else this
+}
+
 /** Stable identity used by the serialized purchase committer. */
 internal sealed interface PurchaseCommitIdentity {
     data class Evidence(val purchaseToken: String) : PurchaseCommitIdentity

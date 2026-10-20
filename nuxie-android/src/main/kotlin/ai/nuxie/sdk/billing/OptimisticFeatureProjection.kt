@@ -21,7 +21,9 @@ internal fun optimisticFeatureProjection(
     bindings: Collection<StoredPurchaseBinding> = emptyList(),
 ): Map<String, OptimisticFeatureOverlay>? {
     val projected = linkedMapOf<String, OptimisticFeatureOverlay>()
-    for (purchase in evidence.filter { it.isEligibleProjectionEvidence(distinctId, authorityScope) }) {
+    val accountId = playAccountId(distinctId)
+    val eligible = evidence.filter { it.isEligibleProjectionEvidence(distinctId, accountId, authorityScope) }
+    for (purchase in eligible) {
         // A purchase whose descriptor is missing or grants nothing (an empty
         // Feature allowance list is schema-valid) contributes no overlay, but must
         // not suppress another purchase's derivable overlay. When nothing
@@ -84,18 +86,30 @@ private fun <T> PurchaseEvidence.selectAllowanceSource(
     }
 }
 
+/**
+ * The early unlock: only the buyer's own purchase still waiting for the server
+ * projects. Play must name the account the SDK derives for this customer, and
+ * the owed send must be theirs. Everything else, including a purchase the
+ * server has answered, waits for the server profile.
+ */
+internal fun PurchaseEvidence.isBuyersOwnUnsyncedPurchase(
+    distinctId: String,
+    accountId: String = playAccountId(distinctId),
+): Boolean {
+    val send = pendingSend ?: return false
+    return !synced &&
+        send.distinctId == distinctId &&
+        obfuscatedAccountId == accountId &&
+        purchaseState == StoredPurchaseState.PURCHASED &&
+        hasEligiblePurchaseSignature
+}
+
 private fun PurchaseEvidence.isEligibleProjectionEvidence(
     distinctId: String,
+    accountId: String,
     expectedAuthorityScope: String,
 ): Boolean =
-    authorityScope == expectedAuthorityScope &&
-        ownerDistinctId == distinctId &&
-        purchaseState == StoredPurchaseState.PURCHASED &&
-        !revoked &&
-        !permanentlyRejected &&
-        !synced &&
-        backendSyncedAtMillis == null &&
-        hasEligiblePurchaseSignature
+    authorityScope == expectedAuthorityScope && isBuyersOwnUnsyncedPurchase(distinctId, accountId)
 
 internal val PurchaseEvidence.hasEligiblePurchaseSignature: Boolean
     get() = !signatureVerificationRequired || signatureVerified

@@ -61,6 +61,16 @@ internal class IdentityService(
     override val isIdentified: Boolean
         get() = synchronized(lock) { identifiedId != null }
 
+    override fun customerKind(distinctId: String): CustomerKind = synchronized(lock) {
+        when (distinctId) {
+            effectiveIdLocked() ->
+                if (identifiedId != null) CustomerKind.IDENTIFIED else CustomerKind.ANONYMOUS
+            anonymousIdLocked() -> CustomerKind.ANONYMOUS
+            // An earlier customer this device no longer knows: the server merges only owners declared anonymous.
+            else -> CustomerKind.IDENTIFIED
+        }
+    }
+
     /** Identify. Migrates anonymous properties on the anon -> identified edge. */
     fun setDistinctId(distinctId: String) = withDecision {
         synchronized(lock) {

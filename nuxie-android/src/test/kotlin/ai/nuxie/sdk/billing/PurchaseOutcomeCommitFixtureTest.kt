@@ -382,7 +382,7 @@ class PurchaseOutcomeCommitFixtureTest {
             name,
             expected.requiredInt("pendingRecords"),
             kotlinx.coroutines.runBlocking { harness.store.load() }.values.count {
-                it.purchaseState == StoredPurchaseState.PENDING && !it.revoked
+                it.purchaseState == StoredPurchaseState.PENDING
             },
         )
         assertEquals(
@@ -905,13 +905,14 @@ class PurchaseOutcomeCommitFixtureTest {
             ioDispatcher = kotlinx.coroutines.Dispatchers.Unconfined,
             billing = billing,
             evidenceStore = store,
-            synchronizer = PurchaseSynchronizer { evidence ->
+            synchronizer = PurchaseSynchronizer { evidence, request ->
                 syncStarts += evidence
                 observeOverlay()
-                apiSynchronizer.sync(evidence)
+                apiSynchronizer.sync(evidence, request)
             },
             features = core.features,
             distinctId = core.identity::distinctId,
+            customerKind = core.identity::customerKind,
             emit = { name, properties ->
                 emittedEvents += CapturedEvent(
                     name = name,

@@ -2,6 +2,7 @@ package ai.nuxie.sdk.billing
 
 import ai.nuxie.sdk.testsupport.InertBillingClientAdapter
 import ai.nuxie.sdk.LogLevel
+import ai.nuxie.sdk.fixtures.FixtureRunner
 import ai.nuxie.sdk.NuxieActivity
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.core.NuxieCore
@@ -11,6 +12,7 @@ import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.features.FeatureAllowance
+import ai.nuxie.sdk.identity.CustomerKind
 import ai.nuxie.sdk.network.HttpTransport
 import ai.nuxie.sdk.network.NuxieApi
 import ai.nuxie.sdk.testsupport.FakeTransport
@@ -43,10 +45,19 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -325,7 +336,7 @@ class PurchaseServiceTest {
     @Test
     fun billingClientJourneyReleaseDeliveryIsTheTrustBoundaryWhenNoLicensingKeyIsConfigured() = runTest {
         val fixture = fixture(this)
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
         val checkout = async {
             fixture.service.purchase(
                 activity(),
@@ -375,8 +386,7 @@ class PurchaseServiceTest {
         val evidence = fixture.store.load().getValue("invalid-signature")
         assertTrue(evidence.signatureVerificationRequired)
         assertFalse(evidence.signatureVerified)
-        assertTrue(evidence.permanentlyRejected)
-        assertTrue(evidence.revoked)
+        assertNull("An unverified purchase owes no send", evidence.pendingSend)
         assertTrue(fixture.purchaseEventCaptureAttempts.isEmpty())
         assertFalse("sync" in actions)
         assertFalse(fixture.core.featureInfo.isAllowed("pro"))
@@ -401,7 +411,7 @@ class PurchaseServiceTest {
             assertTrue(fixture.core.featureInfo.isAllowed("unlimited"))
             assertFalse(fixture.core.featureInfo.isAllowed("exports"))
             assertFalse(fixture.core.featureInfo.isAllowed("credits"))
-            accepted(evidence.syncAttributionDistinctId, evidence)
+            accepted(evidence.requester, evidence)
         }
         val purchase = async { fixture.service.purchase(activity(), product, null) }
         runCurrent()
@@ -574,7 +584,7 @@ class PurchaseServiceTest {
         val fixture = fixture(this, actions = actions, emissions = emissions)
         fixture.synchronizer = {
             actions += "sync"
-            accepted(it.syncAttributionDistinctId, it)
+            accepted(it.requester, it)
         }
         val checkout = async {
             fixture.service.purchase(
@@ -644,7 +654,7 @@ class PurchaseServiceTest {
         val fixture = fixture(this, store = sharedStore)
         fixture.synchronizer = {
             assertTrue(fixture.core.featureInfo.isAllowed("pro"))
-            PurchaseSyncOutcome.Rejected(permanent = true)
+            PurchaseSyncOutcome.Rejected(refused = true)
         }
         val purchase = async {
             fixture.service.purchase(
@@ -659,7 +669,7 @@ class PurchaseServiceTest {
 
         assertEquals(PurchaseResult.Purchased, purchase.await())
         assertFalse(fixture.core.featureInfo.isAllowed("pro"))
-        assertTrue(fixture.store.load().getValue("rejected-token").permanentlyRejected)
+        assertNull(fixture.store.load().getValue("rejected-token").pendingSend)
 
         fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
             playPurchase(
@@ -687,7 +697,7 @@ class PurchaseServiceTest {
     @Test
     fun recoveredAbsenceFromPlayRevokesAnUnsyncedManagedOptimisticOverlay() = runTest {
         val fixture = fixture(this)
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
         val checkout = async {
             fixture.service.purchase(
                 activity(),
@@ -709,7 +719,7 @@ class PurchaseServiceTest {
     @Test
     fun mixedPendingAndVerifiedUpdatePublishesInReservationOrder() = runTest {
         val fixture = fixture(this)
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
         val checkout = async {
             fixture.service.purchase(
                 activity(),
@@ -744,7 +754,7 @@ class PurchaseServiceTest {
     fun failedDurableRevocationStillNarrowsTheProjectionAndReportsFailure() = runTest {
         val fixture = fixture(this)
         val owner = fixture.core.identity.distinctId()
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
         val checkout = async {
             fixture.service.purchase(
                 activity(),
@@ -763,7 +773,7 @@ class PurchaseServiceTest {
         val result = fixture.service.restorePurchases()
 
         assertTrue(result is RestoreResult.Failed)
-        assertFalse(fixture.store.load().getValue("failed-revocation").revoked)
+        assertNotNull("The withdrawal could not be written", fixture.store.load().getValue("failed-revocation").pendingSend)
         assertFalse(fixture.core.featureInfo.isAllowed("pro"))
         fixture.service.rememberProduct(
             product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
@@ -786,7 +796,7 @@ class PurchaseServiceTest {
     @Test
     fun cancelledRevocationCannotLeaveAnOlderRefreshVisible() = runTest {
         val fixture = fixture(this)
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
         val checkout = async {
             fixture.service.purchase(
                 activity(),
@@ -831,7 +841,7 @@ class PurchaseServiceTest {
         runCurrent()
 
         assertFalse(fixture.core.featureInfo.isAllowed("pro"))
-        assertTrue(fixture.store.load().getValue("revoked-token").revoked)
+        assertNull(fixture.store.load().getValue("revoked-token").pendingSend)
         fixture.close()
     }
 
@@ -843,7 +853,7 @@ class PurchaseServiceTest {
         fixture.synchronizer = { evidence ->
             syncStarted.complete(Unit)
             finishSync.await()
-            accepted(evidence.syncAttributionDistinctId, evidence)
+            accepted(evidence.requester, evidence)
         }
         val checkout = async {
             fixture.service.purchase(
@@ -868,11 +878,14 @@ class PurchaseServiceTest {
 
         assertEquals(queryCountBeforeRestore + 2, fixture.billing.queries.size)
         assertEquals(RestoreResult.NoPurchases, restore.await())
-        assertFalse(fixture.store.load().getValue("revoked-during-sync").revoked)
+        assertNotNull(
+            "A send in flight is not withdrawn",
+            fixture.store.load().getValue("revoked-during-sync").pendingSend,
+        )
         finishSync.complete(Unit)
         purchaseUpdate.await()
 
-        assertFalse(fixture.store.load().getValue("revoked-during-sync").revoked)
+        assertFalse(fixture.store.load().getValue("revoked-during-sync").refused)
         assertTrue(fixture.store.load().getValue("revoked-during-sync").synced)
         assertTrue(fixture.core.featureInfo.isAllowed("pro"))
         fixture.close()
@@ -910,7 +923,7 @@ class PurchaseServiceTest {
         releaseQueries.complete(Unit)
         purchaseUpdate.await()
         assertEquals(RestoreResult.NoPurchases, restore.await())
-        assertFalse(fixture.store.load().getValue("purchase-during-restore-query").revoked)
+        assertTrue(fixture.store.load().getValue("purchase-during-restore-query").synced)
         fixture.close()
     }
 
@@ -945,7 +958,7 @@ class PurchaseServiceTest {
     @Test
     fun inlineDestinationSnapshotDuringProjectionPublicationDoesNotDeadlock() = runTest {
         val fixture = fixture(this)
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
         val callbackCompleted = CompletableDeferred<Unit>()
         fixture.core.featureInfo.onFeatureChange = { featureId, _, _, _ ->
             if (featureId == "pro") {
@@ -978,7 +991,7 @@ class PurchaseServiceTest {
     fun duplicateCallbacksReturnWhileCheckoutWaitsForItsStagedProjection() = runTest {
         val actions = mutableListOf<String>()
         val fixture = fixture(this, actions = actions)
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
         val blockerStarted = CompletableDeferred<Unit>()
         val releaseBlocker = CompletableDeferred<Unit>()
         fixture.core.featureInfo.onFeatureChange = { featureId, _, _, _ ->
@@ -1046,7 +1059,7 @@ class PurchaseServiceTest {
     @Test
     fun equivalentProjectionStagedByAnotherRefreshStillBlocksCheckoutCompletion() = runTest {
         val fixture = fixture(this)
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
         val owner = fixture.core.identity.distinctId()
         val blockerStarted = CompletableDeferred<Unit>()
         val releaseBlocker = CompletableDeferred<Unit>()
@@ -1115,7 +1128,7 @@ class PurchaseServiceTest {
     @Test
     fun featurePublicationRunsAfterThePurchaseDecisionMutexIsReleased() = runTest {
         val fixture = fixture(this)
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
         val processingWasAvailable = CompletableDeferred<Boolean>()
         fixture.core.featureInfo.onFeatureChange = { featureId, _, _, _ ->
             if (featureId == "pro" && !processingWasAvailable.isCompleted) {
@@ -1147,7 +1160,7 @@ class PurchaseServiceTest {
     @Test
     fun featurePublicationCanReenterTheSameTokenWithoutJoiningItsOwnCommit() = runTest {
         val fixture = fixture(this)
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
         lateinit var purchase: PlayPurchase
         var reentered = false
         fixture.core.featureInfo.onFeatureChange = { featureId, _, _, _ ->
@@ -1222,7 +1235,7 @@ class PurchaseServiceTest {
         val fixture = fixture(this, actions = actions, emissions = emissions)
         fixture.synchronizer = {
             actions += "sync"
-            accepted(it.syncAttributionDistinctId, it)
+            accepted(it.requester, it)
         }
         val owner = fixture.core.identity.distinctId()
         val mappedProduct = product()
@@ -1263,7 +1276,7 @@ class PurchaseServiceTest {
         val fixture = fixture(this, actions = actions, emissions = emissions)
         fixture.synchronizer = {
             actions += "sync"
-            accepted(it.syncAttributionDistinctId, it)
+            accepted(it.requester, it)
         }
         val checkout = async {
             fixture.service.purchase(
@@ -1318,7 +1331,7 @@ class PurchaseServiceTest {
         )
         fixture.synchronizer = {
             actions += "sync"
-            accepted(it.syncAttributionDistinctId, it)
+            accepted(it.requester, it)
         }
         val checkout = async {
             fixture.service.purchase(
@@ -1437,7 +1450,7 @@ class PurchaseServiceTest {
         )
         fixture.synchronizer = {
             actions += "sync"
-            accepted(it.syncAttributionDistinctId, it)
+            accepted(it.requester, it)
         }
         val checkout = async { fixture.service.purchase(activity(), product(), null) }
         runCurrent()
@@ -1549,16 +1562,17 @@ class PurchaseServiceTest {
         )
         unmatched.synchronizer = {
             assertFalse(unmatched.core.featureInfo.isAllowed("pro"))
-            accepted(it.syncAttributionDistinctId, it)
+            accepted(it.requester, it)
         }
         unmatched.service.onPurchasesUpdated(
             okUpdate(playPurchase("unmatched", obfuscatedAccountId = accountHash("someone-else"))),
         )
 
         val unmatchedEvidence = unmatched.store.load().getValue("unmatched")
-        assertEquals(unmatched.core.identity.distinctId(), unmatchedEvidence.syncAttributionDistinctId)
+        assertEquals(unmatched.core.identity.distinctId(), unmatched.requests.single().second.distinctId)
         assertTrue(unmatchedEvidence.synced)
-        assertEquals(null, unmatchedEvidence.ownerDistinctId)
+        assertNull("No checkout here made it", unmatchedEvidence.buyerDistinctId)
+        assertEquals("The server's answer names its owner", unmatched.core.identity.distinctId(), unmatchedEvidence.ownerDistinctId)
 
         val matching = fixture(this)
         matching.service.rememberProduct(
@@ -1566,7 +1580,7 @@ class PurchaseServiceTest {
         )
         matching.synchronizer = {
             assertTrue(matching.core.featureInfo.isAllowed("pro"))
-            accepted(it.syncAttributionDistinctId, it)
+            accepted(it.requester, it)
         }
         matching.service.onPurchasesUpdated(
             okUpdate(
@@ -1615,7 +1629,7 @@ class PurchaseServiceTest {
             )
             replacementInstalled = true
         }
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
 
         fixture.service.onPurchasesUpdated(
             okUpdate(
@@ -1654,7 +1668,7 @@ class PurchaseServiceTest {
                 allowances = listOf(FeatureAllowance("annual-feature", FeatureType.BOOLEAN)),
             ),
         )
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
 
         fixture.service.onPurchasesUpdated(
             okUpdate(
@@ -1687,8 +1701,8 @@ class PurchaseServiceTest {
                 nuxieProductId = "nuxie-pro",
                 purchaseState = StoredPurchaseState.PURCHASED,
                 obfuscatedAccountId = accountHash(owner),
-                syncAttributionDistinctId = owner,
-                ownerDistinctId = owner,
+                buyerDistinctId = owner,
+                pendingSend = PurchaseSend(PurchaseSyncReason.PURCHASE, owner, CustomerKind.ANONYMOUS),
                 acknowledged = false,
                 firstSeenMillis = 1L,
                 catalogResolved = true,
@@ -1698,7 +1712,8 @@ class PurchaseServiceTest {
         fixture.store.afterNextLoad = { snapshot ->
             fixture.store.replaceWithoutRecording(
                 snapshot.getValue("stale-purchase-snapshot").copy(
-                    synced = true,
+                    ownerDistinctId = owner,
+                    pendingSend = null,
                     syncedCustomerId = owner,
                     backendSyncedAtMillis = 42L,
                 ),
@@ -1740,8 +1755,8 @@ class PurchaseServiceTest {
                 nuxieProductId = "nuxie-pro",
                 purchaseState = StoredPurchaseState.PURCHASED,
                 obfuscatedAccountId = accountHash(owner),
-                syncAttributionDistinctId = owner,
-                ownerDistinctId = owner,
+                buyerDistinctId = owner,
+                pendingSend = PurchaseSend(PurchaseSyncReason.PURCHASE, owner, CustomerKind.ANONYMOUS),
                 pinnedFeatureAllowances = listOf(
                     StoredFeatureAllowance("pro", FeatureType.BOOLEAN.name, false, null),
                 ),
@@ -1797,10 +1812,9 @@ class PurchaseServiceTest {
                 nuxieProductId = "nuxie-pro",
                 purchaseState = StoredPurchaseState.PURCHASED,
                 obfuscatedAccountId = accountHash(owner),
-                syncAttributionDistinctId = owner,
-                ownerDistinctId = owner,
+                buyerDistinctId = owner,
                 acknowledged = false,
-                permanentlyRejected = true,
+                refused = true,
                 firstSeenMillis = 1L,
                 catalogResolved = true,
                 signatureVerified = true,
@@ -1825,7 +1839,7 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun acceptedProjectionIsRevokedFromProvisionalOwnerWhenExactBindingAdoptsPurchase() = runTest {
+    fun aCheckoutBindingNamesTheBuyerButNeverReassignsTheServersOwner() = runTest {
         val fixture = fixture(this)
         val provisionalOwner = fixture.core.identity.distinctId()
         val provenOwner = "customer-b"
@@ -1838,16 +1852,14 @@ class PurchaseServiceTest {
         )
 
         fixture.service.onPurchasesUpdated(okUpdate(purchase))
-        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        assertTrue("The server accepted it for the provisional customer", fixture.core.featureInfo.isAllowed("pro"))
 
         fixture.store.upsertBinding(product().bindingFor(provenOwner))
         fixture.service.onPurchasesUpdated(okUpdate(purchase))
 
         val adoptedEvidence = fixture.store.load().getValue("adopted-token")
-        assertEquals(provisionalOwner, adoptedEvidence.syncAttributionDistinctId)
-        assertEquals(provenOwner, adoptedEvidence.ownerDistinctId)
-        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
-        assertFalse(fixture.core.featureInfo.isAllowed("unlimited"))
+        assertEquals(provenOwner, adoptedEvidence.buyerDistinctId)
+        assertEquals("Only the server reassigns an owner", provisionalOwner, adoptedEvidence.ownerDistinctId)
 
         fixture.core.identity.setDistinctId(provenOwner)
         fixture.core.featureInfo.publish(
@@ -1855,13 +1867,13 @@ class PurchaseServiceTest {
         )
         fixture.service.onPurchasesUpdated(okUpdate(purchase))
 
-        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
-        assertTrue(fixture.core.featureInfo.isAllowed("unlimited"))
+        assertFalse("The buyer waits for the server, never a replayed grant", fixture.core.featureInfo.isAllowed("pro"))
+        assertFalse(fixture.core.featureInfo.isAllowed("unlimited"))
         fixture.close()
     }
 
     @Test
-    fun acceptanceLandingAfterExactBindingAdoptionPublishesOnlyToProvenOwner() = runTest {
+    fun acceptanceForAnEarlierRequesterGrantsOnlyThatRequester() = runTest {
         val fixture = fixture(this)
         val provisionalOwner = fixture.core.identity.distinctId()
         val provenOwner = "customer-b"
@@ -1893,10 +1905,10 @@ class PurchaseServiceTest {
         update.await()
 
         val adoptedEvidence = fixture.store.load().getValue("adopted-during-sync-token")
-        assertEquals(provisionalOwner, adoptedEvidence.syncAttributionDistinctId)
-        assertEquals(provenOwner, adoptedEvidence.ownerDistinctId)
-        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
-        assertTrue(fixture.core.featureInfo.isAllowed("unlimited"))
+        assertEquals(provisionalOwner, fixture.requests.single().second.distinctId)
+        assertEquals("The server attached it to the customer that asked", provisionalOwner, adoptedEvidence.ownerDistinctId)
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        assertFalse(fixture.core.featureInfo.isAllowed("unlimited"))
         fixture.close()
     }
 
@@ -1909,23 +1921,24 @@ class PurchaseServiceTest {
                 packageName = "com.example.app",
                 storeProductIds = listOf("play-pro"),
                 purchaseState = StoredPurchaseState.PURCHASED,
-                syncAttributionDistinctId = fixture.core.identity.distinctId(),
                 acknowledged = false,
                 firstSeenMillis = 1L,
             ),
         )
+        // Play still owns it, so this observation owes it a send.
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(playPurchase("legacy-blank-owner"))
         fixture.synchronizer = {
-            assertEquals(fixture.core.identity.distinctId(), it.syncAttributionDistinctId)
+            assertEquals(fixture.core.identity.distinctId(), it.requester)
             assertFalse(fixture.core.featureInfo.isAllowed("pro"))
-            accepted(it.syncAttributionDistinctId, it)
+            accepted(it.requester, it)
         }
 
         fixture.service.recover()
 
         val recovered = fixture.store.load().getValue("legacy-blank-owner")
         assertTrue(recovered.synced)
-        assertEquals(fixture.core.identity.distinctId(), recovered.syncAttributionDistinctId)
-        assertEquals(null, recovered.ownerDistinctId)
+        assertEquals(PurchaseSyncReason.SYNC, fixture.requests.single().second.reason)
+        assertNull(recovered.buyerDistinctId)
         fixture.close()
     }
 
@@ -1939,8 +1952,8 @@ class PurchaseServiceTest {
                 packageName = "com.example.app",
                 storeProductIds = listOf("play-pro"),
                 purchaseState = StoredPurchaseState.PURCHASED,
-                syncAttributionDistinctId = owner,
-                ownerDistinctId = owner,
+                buyerDistinctId = owner,
+                pendingSend = PurchaseSend(PurchaseSyncReason.PURCHASE, owner, CustomerKind.ANONYMOUS),
                 acknowledged = false,
                 firstSeenMillis = 1L,
                 catalogResolved = true,
@@ -1968,8 +1981,8 @@ class PurchaseServiceTest {
                 packageName = "com.example.app",
                 storeProductIds = listOf("play-pro"),
                 purchaseState = StoredPurchaseState.PURCHASED,
-                syncAttributionDistinctId = fixture.core.identity.distinctId(),
-                ownerDistinctId = fixture.core.identity.distinctId(),
+                buyerDistinctId = fixture.core.identity.distinctId(),
+                pendingSend = PurchaseSend(PurchaseSyncReason.PURCHASE, fixture.core.identity.distinctId(), CustomerKind.ANONYMOUS),
                 acknowledged = false,
                 firstSeenMillis = 1L,
                 catalogResolved = true,
@@ -1978,7 +1991,7 @@ class PurchaseServiceTest {
         fixture.billing.failQueries = true
         fixture.synchronizer = {
             assertFalse(fixture.core.featureInfo.isAllowed("pro"))
-            accepted(it.syncAttributionDistinctId, it)
+            accepted(it.requester, it)
         }
 
         fixture.service.recover()
@@ -1999,8 +2012,9 @@ class PurchaseServiceTest {
                 nuxieProductId = "nuxie-pro",
                 authorityScope = "test-fixture",
                 purchaseState = StoredPurchaseState.PURCHASED,
-                syncAttributionDistinctId = owner,
-                ownerDistinctId = owner,
+                buyerDistinctId = owner,
+                pendingSend = PurchaseSend(PurchaseSyncReason.PURCHASE, owner, CustomerKind.ANONYMOUS),
+                obfuscatedAccountId = accountHash(owner),
                 acknowledged = false,
                 firstSeenMillis = 1L,
                 catalogResolved = true,
@@ -2021,7 +2035,7 @@ class PurchaseServiceTest {
         // nor revoke the token as missing; only the normalization republish
         // can retract the projected legacy grant.
         fixture.billing.failQueries = true
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
 
         fixture.service.recover()
 
@@ -2142,10 +2156,9 @@ class PurchaseServiceTest {
             productType = BillingClient.ProductType.SUBS,
             purchaseState = StoredPurchaseState.PURCHASED,
             obfuscatedAccountId = accountHash(owner),
-            syncAttributionDistinctId = owner,
+            buyerDistinctId = owner,
             ownerDistinctId = owner,
             acknowledged = true,
-            synced = true,
             syncedCustomerId = owner,
             backendSyncedAtMillis = 1L,
             firstSeenMillis = 1L,
@@ -2179,7 +2192,7 @@ class PurchaseServiceTest {
         assertEquals(0, emissions.count { it.first == SystemEventNames.PURCHASE_COMPLETED })
         assertEquals(1, emissions.count { it.first == SystemEventNames.RESTORE_COMPLETED })
         assertTrue(fixture.store.load().getValue("retained-subscription").completionEmitted)
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
         val failedRefresh = fixture.service.restorePurchases(expectedOwnerDistinctId = owner)
         assertTrue("A signed Restore must not accept an old sync after refresh fails", failedRefresh is RestoreResult.Failed)
         fixture.synchronizer = { accepted(owner, it) }
@@ -2212,7 +2225,8 @@ class PurchaseServiceTest {
         serverAccepted.complete(Unit)
         runCurrent()
         assertTrue("The SDK applies the accepted refresh after the host stops waiting", fixture.core.featureInfo.isAllowed("pro"))
-        assertEquals(1, fixture.store.load().getValue("refresh-token").syncAttempts)
+        // Only a send without an answer counts as an attempt.
+        assertEquals(0, fixture.store.load().getValue("refresh-token").syncAttempts)
         fixture.close()
     }
 
@@ -2224,13 +2238,14 @@ class PurchaseServiceTest {
         fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
             playPurchase("refresh-token", obfuscatedAccountId = accountHash(owner)).copy(acknowledged = true),
         )
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = true) }
+        // A 401, 403 or 5xx is no answer.
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
 
-        // Host Restore reports Play ownership even when backend refresh fails.
-        assertEquals(RestoreResult.Restored, fixture.service.restorePurchases())
+        // Play ownership alone is not a restore: the server did not grant this one.
+        assertTrue(fixture.service.restorePurchases() is RestoreResult.Failed)
         val retained = fixture.store.load().getValue("refresh-token")
-        assertFalse("A rejected refresh must not revoke verified evidence", retained.revoked)
-        assertFalse("A rejected refresh must allow a later refresh", retained.permanentlyRejected)
+        assertFalse("A rejection that is not a refusal keeps the owner", retained.refused)
+        assertNull("A Restore of an answered purchase is a direct claim, never an entry", retained.pendingSend)
         assertTrue(retained.synced)
         assertFalse(fixture.core.featureInfo.isAllowed("pro"))
         assertTrue(fixture.service.restorePurchases(expectedOwnerDistinctId = owner) is RestoreResult.Failed)
@@ -2243,7 +2258,7 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun failedSyncedRefreshCompletesPlayWithoutBackgroundRefreshRetries() = runTest {
+    fun failedSyncedRefreshCompletesPlayAndLeavesNoEntry() = runTest {
         val actions = mutableListOf<String>()
         val fixture = fixture(this, actions = actions)
         val owner = fixture.core.identity.distinctId()
@@ -2252,35 +2267,54 @@ class PurchaseServiceTest {
             playPurchase("refresh-token", obfuscatedAccountId = accountHash(owner)),
         )
         var calls = 0
-        fixture.synchronizer = { calls += 1; PurchaseSyncOutcome.Rejected(permanent = false) }
+        fixture.synchronizer = { calls += 1; PurchaseSyncOutcome.Rejected() }
         assertTrue(fixture.service.restorePurchases(expectedOwnerDistinctId = owner) is RestoreResult.Failed)
         assertEquals("Verified evidence still needs Play completion", 1, actions.count { it == "ack" })
         assertTrue(fixture.store.load().getValue("refresh-token").acknowledged)
+        // An answered purchase is claimed again only by a direct send, never by a kept entry.
+        assertNull(fixture.store.load().getValue("refresh-token").pendingSend)
         advanceTimeBy(600_000)
         runCurrent()
-        assertEquals("A synced refresh waits for the next explicit Restore", 1, calls)
+        assertEquals("A direct claim is not retried in the background", 1, calls)
         fixture.close()
     }
 
     @Test
-    fun syncedRefreshDoesNotScheduleBackgroundRetries() = runTest {
+    fun unansweredRestoreRetriesWithBackoffUntilTheServerAnswers() = runTest {
         val fixture = fixture(this)
         val owner = fixture.core.identity.distinctId()
-        fixture.store.upsert(retainedRestoreEvidence(owner))
+        // The restorer's own unsent entry takes the Restore's reason and stays in the outbox.
+        fixture.store.upsert(owedRestoreEvidence(owner, reason = PurchaseSyncReason.SYNC))
         fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
             playPurchase("refresh-token", obfuscatedAccountId = accountHash(owner)).copy(acknowledged = true),
         )
         var calls = 0
-        fixture.synchronizer = { calls += 1; PurchaseSyncOutcome.Rejected(permanent = false) }
-        assertEquals(RestoreResult.Restored, fixture.service.restorePurchases())
+        fixture.synchronizer = { calls += 1; PurchaseSyncOutcome.Rejected() }
+        assertTrue(
+            "An unanswered refresh is not a restore",
+            fixture.service.restorePurchases() is RestoreResult.Failed,
+        )
+        advanceTimeBy(150_000)
+        runCurrent()
+        assertTrue("A transient failure keeps the send owed and retries it", calls >= 2)
+        assertEquals(
+            setOf(PurchaseSyncRequest(PurchaseSyncReason.RESTORE, owner, CustomerKind.ANONYMOUS)),
+            fixture.requests.map { it.second }.toSet(),
+        )
+
+        fixture.synchronizer = { calls += 1; accepted(owner, it) }
         advanceTimeBy(600_000)
         runCurrent()
-        assertEquals("An explicit refresh does not create a background sync loop", 1, calls)
+        assertNull("An answered send leaves the outbox", fixture.store.load().getValue("refresh-token").pendingSend)
+        val answeredAfter = calls
+        advanceTimeBy(600_000)
+        runCurrent()
+        assertEquals("Nothing is resent once answered", answeredAfter, calls)
         fixture.close()
     }
 
     @Test
-    fun restoreDoesNotRefreshAnotherCustomersSyncedToken() = runTest {
+    fun refusedRestoreOfAnotherCustomersPurchaseLeavesItWithItsHolder() = runTest {
         val fixture = fixture(this)
         val owner = fixture.core.identity.distinctId()
         val original = retainedRestoreEvidence(owner)
@@ -2289,31 +2323,41 @@ class PurchaseServiceTest {
             playPurchase("refresh-token", obfuscatedAccountId = accountHash(owner)).copy(acknowledged = true),
         )
         fixture.core.identity.setDistinctId("other-customer")
-        var calls = 0
-        fixture.synchronizer = { calls += 1; PurchaseSyncOutcome.Rejected(permanent = true) }
-        assertEquals(RestoreResult.NoPurchases,
-            fixture.service.restorePurchases(expectedOwnerDistinctId = "other-customer"))
-        assertEquals("Restore must not submit another customer's token", 0, calls)
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(refused = true) }
+
+        val result = fixture.service.restorePurchases(expectedOwnerDistinctId = "other-customer")
+
+        assertTrue("A refused Restore is not a restore", result is RestoreResult.Failed)
+        assertEquals(
+            "Restore asks the server to move the purchase to the restoring customer",
+            listOf("refresh-token" to PurchaseSyncRequest(
+                PurchaseSyncReason.RESTORE,
+                "other-customer",
+                CustomerKind.IDENTIFIED,
+            )),
+            fixture.requests.toList(),
+        )
         val retained = fixture.store.load().getValue("refresh-token")
-        assertEquals(owner, retained.ownerDistinctId)
-        assertEquals(original.syncAttempts, retained.syncAttempts)
-        assertFalse(retained.revoked)
-        assertFalse(retained.permanentlyRejected)
+        assertEquals("A refusal of someone else does not change the owner", owner, retained.ownerDistinctId)
+        assertEquals(owner, retained.buyerDistinctId)
+        assertFalse(retained.refused)
+        assertNull(retained.pendingSend)
         assertFalse(fixture.core.featureInfo.isAllowed("pro"))
         fixture.close()
     }
 
     @Test
-    fun syncedRefreshRevokesOnlyAnExplicitInvalidTokenResponse() = runTest {
+    fun syncedRefreshDropsTheOwnerOnlyWhenTheServerRefusesThePurchase() = runTest {
         val responses = listOf(
-            Triple(409, """{"code":"google_play_purchase_conflict"}""", false),
-            Triple(400, """{"code":"google_play_purchase_invalid"}""", false),
-            Triple(400, """{"code":"google_play_purchase_unsupported"}""", false),
+            Triple(409, """{"code":"google_play_purchase_conflict"}""", true),
+            Triple(400, """{"code":"google_play_purchase_invalid"}""", true),
+            Triple(400, """{"code":"google_play_purchase_unsupported"}""", true),
             Triple(401, "Invalid API key", false),
             Triple(400, """{"code":"invalid_purchase_token"}""", true),
-            Triple(200, """{"success":false,"code":"invalid_purchase_token"}""", true),
+            // A 2xx that is not a success is not an answer, whatever its body says.
+            Triple(200, """{"success":false,"code":"invalid_purchase_token"}""", false),
         )
-        for ((status, body, invalidToken) in responses) {
+        for ((status, body, refusesThePurchase) in responses) {
             val fixture = fixture(this)
             val owner = fixture.core.identity.distinctId()
             fixture.store.upsert(retainedRestoreEvidence(owner))
@@ -2325,25 +2369,1197 @@ class PurchaseServiceTest {
                     HttpTransport.Response(status, body.encodeToByteArray())
             })
             val synchronizer = NuxieApiPurchaseSynchronizer(api)
-            fixture.synchronizer = { synchronizer.sync(it) }
+            fixture.synchronizer = { synchronizer.sync(it, fixture.requests.last().second) }
             assertTrue(fixture.service.restorePurchases(expectedOwnerDistinctId = owner) is RestoreResult.Failed)
             val retained = fixture.store.load().getValue("refresh-token")
-            assertEquals("Only an explicit invalid token may revoke: $status $body", invalidToken, retained.revoked)
-            assertEquals(invalidToken, retained.permanentlyRejected)
+            assertEquals("Owner after $status $body", owner.takeUnless { refusesThePurchase }, retained.ownerDistinctId)
+            assertEquals(refusesThePurchase, retained.refused)
+            assertNull("A Restore of an answered purchase is a direct claim, never an entry", retained.pendingSend)
             fixture.close()
         }
     }
 
+    @Test
+    fun checkoutSubmitsAsAPurchaseWhileUpdatesAndRecoveryOnlySync() = runTest {
+        val fixture = fixture(this)
+        val anonymous = fixture.core.identity.distinctId()
+        val checkout = async { fixture.service.purchase(activity(), product(), null) }
+        runCurrent()
+        fixture.service.onPurchasesUpdated(okUpdate(playPurchase("checkout-token").forCheckout(fixture)))
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+
+        fixture.core.identity.setDistinctId("signed-in")
+        fixture.service.onPurchasesUpdated(
+            okUpdate(playPurchase("update-token", obfuscatedAccountId = accountHash("signed-in"))),
+        )
+        fixture.store.upsert(
+            owedRestoreEvidence("signed-in", PurchaseSyncReason.SYNC, CustomerKind.IDENTIFIED)
+                .copy(purchaseToken = "recovered-token"),
+        )
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("recovered-token", obfuscatedAccountId = accountHash("signed-in")),
+        )
+        fixture.service.recover()
+
+        assertEquals(
+            listOf(
+                "checkout-token" to PurchaseSyncRequest(PurchaseSyncReason.PURCHASE, anonymous, CustomerKind.ANONYMOUS),
+                "update-token" to PurchaseSyncRequest(PurchaseSyncReason.SYNC, "signed-in", CustomerKind.IDENTIFIED),
+                "recovered-token" to PurchaseSyncRequest(PurchaseSyncReason.SYNC, "signed-in", CustomerKind.IDENTIFIED),
+            ),
+            fixture.requests.toList(),
+        )
+        fixture.close()
+    }
+
+    @Test
+    fun restoreSubmitsAsARestoreForTheRestoringCustomerAndWhetherTheySignedIn() = runTest {
+        val fixture = fixture(this)
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("restore-token", obfuscatedAccountId = accountHash("someone-else")),
+        )
+        fixture.core.identity.setDistinctId("signed-in")
+        assertEquals(RestoreResult.Restored, fixture.service.restorePurchases())
+
+        fixture.core.identity.reset(keepAnonymousId = false)
+        val anonymous = fixture.core.identity.distinctId()
+        assertEquals(RestoreResult.Restored, fixture.service.restorePurchases())
+
+        assertEquals(
+            listOf(
+                "restore-token" to PurchaseSyncRequest(PurchaseSyncReason.RESTORE, "signed-in", CustomerKind.IDENTIFIED),
+                "restore-token" to PurchaseSyncRequest(PurchaseSyncReason.RESTORE, anonymous, CustomerKind.ANONYMOUS),
+            ),
+            fixture.requests.toList(),
+        )
+        fixture.close()
+    }
+
+    @Test
+    fun syncOfAnEarlierCustomersPurchaseDeclaresThemIdentified() = runTest {
+        val fixture = fixture(this)
+        fixture.core.identity.setDistinctId("earlier-customer")
+        fixture.store.upsertBinding(product().bindingFor("earlier-customer"))
+        fixture.core.identity.reset(keepAnonymousId = false)
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("earlier-token", obfuscatedAccountId = accountHash("earlier-customer")),
+        )
+
+        fixture.service.recover()
+
+        assertEquals(
+            // Never anonymous: the server merges only an owner declared anonymous.
+            listOf("earlier-token" to PurchaseSyncRequest(
+                PurchaseSyncReason.SYNC,
+                "earlier-customer",
+                CustomerKind.IDENTIFIED,
+            )),
+            fixture.requests.toList(),
+        )
+        fixture.close()
+    }
+
+    @Test
+    fun kindRecordedAtAdmissionSurvivesAReset() = runTest {
+        val fixture = fixture(this, initialRetryDelayMillis = 10, maxRetryDelayMillis = 10)
+        val anonymous = fixture.core.identity.distinctId()
+        val outcomes = mutableListOf<PurchaseSyncOutcome?>(PurchaseSyncOutcome.Rejected(), null)
+        fixture.synchronizer = { outcomes.removeAt(0) ?: accepted(anonymous, it) }
+        val checkout = async { fixture.service.purchase(activity(), product(), null) }
+        runCurrent()
+        fixture.service.onPurchasesUpdated(okUpdate(playPurchase("kind-token").forCheckout(fixture)))
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+
+        // After the reset this device no longer knows the anonymous buyer.
+        fixture.core.identity.reset(keepAnonymousId = false)
+        advanceTimeBy(100)
+        runCurrent()
+
+        val admitted = PurchaseSyncRequest(PurchaseSyncReason.PURCHASE, anonymous, CustomerKind.ANONYMOUS)
+        assertEquals(listOf(admitted, admitted), fixture.requests.map { it.second })
+        fixture.close()
+    }
+
+    @Test
+    fun checkoutReasonSurvivesACrashBeforeTheFirstSend() = runTest {
+        val captureStarted = CompletableDeferred<Unit>()
+        val crash = CompletableDeferred<Unit>()
+        val fixture = fixture(
+            this,
+            capturePurchaseEventOverride = { name, _, _, _ ->
+                if (name == SystemEventNames.PURCHASE_COMPLETED) {
+                    captureStarted.complete(Unit)
+                    crash.await()
+                }
+                true
+            },
+        )
+        val buyer = fixture.core.identity.distinctId()
+        val checkout = async { fixture.service.purchase(activity(), product(), null) }
+        runCurrent()
+        val bought = playPurchase("crashed-checkout").forCheckout(fixture)
+        val update = async { fixture.service.onPurchasesUpdated(okUpdate(bought)) }
+        runCurrent()
+        captureStarted.await()
+        assertTrue("The process stops before anything is sent", fixture.requests.isEmpty())
+
+        val restarted = fixture(this, store = fixture.store)
+        restarted.billing.active[BillingClient.ProductType.INAPP] = listOf(bought)
+        restarted.service.recover()
+
+        assertEquals(
+            "crashed-checkout" to PurchaseSyncRequest(PurchaseSyncReason.PURCHASE, buyer, CustomerKind.ANONYMOUS),
+            restarted.requests.first(),
+        )
+        restarted.close()
+        // Let the first process's blocked capture finish so its work can wind down.
+        crash.complete(Unit)
+        runCurrent()
+        checkout.cancel()
+        update.cancel()
+        fixture.close()
+    }
+
+    @Test
+    fun passiveScanDoesNotProjectAPurchaseWithoutTheCustomersPlayAccount() = runTest {
+        for (playAccount in listOf(null, accountHash("someone-else"))) {
+            val fixture = fixture(this)
+            val customer = fixture.core.identity.distinctId()
+            fixture.service.rememberProduct(
+                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+            )
+            // Retained as this customer's, but Play names no account or another one.
+            fixture.store.upsert(owedRestoreEvidence(customer).copy(
+                purchaseToken = "not-this-customers",
+                productType = BillingClient.ProductType.INAPP,
+                obfuscatedAccountId = playAccount,
+            ))
+            fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+                playPurchase("not-this-customers", obfuscatedAccountId = playAccount),
+            )
+            val serverAnswered = CompletableDeferred<Unit>()
+            var projectedBeforeTheServerAnswered: Boolean? = null
+            fixture.synchronizer = {
+                projectedBeforeTheServerAnswered = fixture.core.featureInfo.isAllowed("pro")
+                serverAnswered.await()
+                PurchaseSyncOutcome.Rejected()
+            }
+
+            val recovery = async { fixture.service.recover() }
+            runCurrent()
+
+            assertEquals("Play account $playAccount", false, projectedBeforeTheServerAnswered)
+            assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+            serverAnswered.complete(Unit)
+            recovery.await()
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun buyersOwnCheckoutUnlocksBeforeTheServerAnswersAndAConflictDropsItAtOnce() = runTest {
+        val fixture = fixture(this)
+        fixture.service.rememberProduct(
+            product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+        )
+        val bodies = mutableListOf<String>()
+        val conflict = NuxieApiPurchaseSynchronizer(conflictApi(bodies))
+        var unlockedBeforeTheServerAnswered = false
+        fixture.synchronizer = {
+            unlockedBeforeTheServerAnswered = fixture.core.featureInfo.isAllowed("pro")
+            conflict.sync(it, fixture.requests.last().second)
+        }
+        val checkout = async {
+            fixture.service.purchase(
+                activity(),
+                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+                null,
+            )
+        }
+        runCurrent()
+
+        fixture.service.onPurchasesUpdated(okUpdate(playPurchase("conflicted-checkout").forCheckout(fixture)))
+
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        assertTrue(unlockedBeforeTheServerAnswered)
+        assertFalse("A refused purchase stops granting at once", fixture.core.featureInfo.isAllowed("pro"))
+        assertTrue(fixture.store.load().getValue("conflicted-checkout").refused)
+        assertTrue(bodies.single().contains(""""reason":"purchase","customer_kind":"anonymous"}"""))
+        fixture.close()
+    }
+
+    @Test
+    fun conflictOnRestoreLeavesAccessToTheProfileItRequests() = runTest {
+        val fixture = fixture(this)
+        val owner = fixture.core.identity.distinctId()
+        fixture.store.upsert(retainedRestoreEvidence(owner))
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("refresh-token", obfuscatedAccountId = accountHash(owner)).copy(acknowledged = true),
+        )
+        assertEquals(RestoreResult.Restored, fixture.service.restorePurchases())
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+
+        // The purchase has since moved to a signed-in customer on another phone.
+        val bodies = mutableListOf<String>()
+        val conflict = NuxieApiPurchaseSynchronizer(conflictApi(bodies))
+        fixture.synchronizer = { conflict.sync(it, fixture.requests.last().second) }
+        val result = fixture.service.restorePurchases()
+
+        assertTrue(result is RestoreResult.Failed)
+        val retained = fixture.store.load().getValue("refresh-token")
+        assertNull("The server says it is no longer theirs", retained.ownerDistinctId)
+        assertTrue(retained.refused)
+        assertTrue("Every answer asks for a fresh profile", fixture.authorityRefreshes >= 2)
+        assertTrue(bodies.single().contains(""""reason":"restore","customer_kind":"anonymous"}"""))
+        // The earlier 200's Features hold only until the profile requested after the answers lands.
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.core.features.hydrateProfile(owner, Json.parseToJsonElement("""{"features":[]}""").jsonObject)
+        assertFalse("The fresh profile decides", fixture.core.featureInfo.isAllowed("pro"))
+
+        // After a restart, seeing the purchase in Play again replays nothing.
+        val restarted = fixture(this, store = fixture.store)
+        restarted.billing.active[BillingClient.ProductType.SUBS] = fixture.billing.active.getValue(
+            BillingClient.ProductType.SUBS,
+        )
+        restarted.service.recover()
+        assertFalse(restarted.core.featureInfo.isAllowed("pro"))
+        restarted.close()
+        fixture.close()
+    }
+
+    @Test
+    fun restoreTransferToACustomerNoLongerCurrentWithdrawsTheCurrentOwnersOverlay() = runTest {
+        val fixture = fixture(this)
+        val proProduct = product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)))
+        fixture.service.rememberProduct(proProduct)
+        fixture.core.identity.setDistinctId("customer-a")
+        // A's checkout is not verified yet, so A keeps an optimistic overlay.
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
+        val checkout = async { fixture.service.purchase(activity(), proProduct, null) }
+        runCurrent()
+        val bought = playPurchase("transferred-token").forCheckout(fixture)
+        fixture.service.onPurchasesUpdated(okUpdate(bought))
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(bought.copy(acknowledged = true))
+
+        fixture.core.identity.setDistinctId("customer-b")
+        fixture.core.featureInfo.publish(fixture.core.features.handleUserChange("customer-a", "customer-b"))
+        val verificationStarted = CompletableDeferred<Unit>()
+        val serverAnswers = CompletableDeferred<Unit>()
+        fixture.synchronizer = {
+            verificationStarted.complete(Unit)
+            serverAnswers.await()
+            accepted("customer-b", it)
+        }
+        val restore = async { fixture.service.restorePurchases() }
+        runCurrent()
+        verificationStarted.await()
+
+        // The app returns to A before the server moves the purchase to B.
+        fixture.core.identity.setDistinctId("customer-a")
+        fixture.core.featureInfo.publish(
+            fixture.core.features.handleUserChange(
+                "customer-b",
+                "customer-a",
+                fixture.service.withOptimisticProjectionSnapshot("customer-a") { it },
+            ),
+        )
+        // B's Restore took the purchase's outbox entry before it was sent, so
+        // the unsent purchase is no longer A's own: A's early unlock has ended.
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        serverAnswers.complete(Unit)
+        restore.await()
+
+        assertEquals("customer-b", fixture.store.load().getValue("transferred-token").ownerDistinctId)
+        assertFalse("A purchase moved to B grants A nothing", fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
+    fun observationFinishingAfterARestoreConflictDoesNotReplayTheRefusedGrant() = runTest {
+        val captureStarted = CompletableDeferred<Unit>()
+        val releaseCapture = CompletableDeferred<Unit>()
+        val fixture = fixture(
+            this,
+            capturePurchaseEventOverride = { name, _, _, _ ->
+                if (name == SystemEventNames.PURCHASE_COMPLETED) {
+                    captureStarted.complete(Unit)
+                    releaseCapture.await()
+                }
+                true
+            },
+        )
+        val owner = fixture.core.identity.distinctId()
+        fixture.store.upsert(retainedRestoreEvidence(owner).copy(completionEmitted = false))
+        val purchase = playPurchase("refresh-token", obfuscatedAccountId = accountHash(owner)).copy(acknowledged = true)
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(purchase)
+
+        // A Play update reads the retained grant, then waits on its completion capture.
+        val update = async { fixture.service.onPurchasesUpdated(okUpdate(purchase)) }
+        runCurrent()
+        captureStarted.await()
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(refused = true) }
+        assertTrue(fixture.service.restorePurchases() is RestoreResult.Failed)
+        assertTrue(fixture.store.load().getValue("refresh-token").refused)
+
+        releaseCapture.complete(Unit)
+        update.await()
+
+        assertFalse("The refused grant must not come back", fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
+    fun staleObservationKeepsTheOwnerARestoreTransferredTo() = runTest {
+        val fixture = fixture(this)
+        // A's synced purchase, seen on this phone while A was not the current customer.
+        fixture.store.upsert(retainedRestoreEvidence("customer-a").copy(completionEmitted = false))
+        val purchase = playPurchase("refresh-token", obfuscatedAccountId = accountHash("customer-a"))
+            .copy(acknowledged = true)
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(purchase)
+        fixture.core.identity.setDistinctId("customer-b")
+        val verificationStarted = CompletableDeferred<Unit>()
+        val serverAnswers = CompletableDeferred<Unit>()
+        fixture.synchronizer = {
+            verificationStarted.complete(Unit)
+            serverAnswers.await()
+            accepted("customer-b", it)
+        }
+        val restore = async { fixture.service.restorePurchases() }
+        runCurrent()
+        verificationStarted.await()
+
+        // A Play update reads owner A, then the server moves the purchase to B
+        // before the update writes its evidence back.
+        fixture.store.afterNextMappingsLoad = {
+            serverAnswers.complete(Unit)
+            assertEquals(RestoreResult.Restored, restore.await())
+        }
+        fixture.service.onPurchasesUpdated(okUpdate(purchase))
+
+        val retained = fixture.store.load().getValue("refresh-token")
+        assertEquals("customer-b", retained.ownerDistinctId)
+        assertEquals("The binding still names the buyer", "customer-a", retained.buyerDistinctId)
+        fixture.core.identity.setDistinctId("customer-a")
+        val restarted = fixture(this, store = fixture.store)
+        restarted.billing.active[BillingClient.ProductType.SUBS] = listOf(purchase)
+        restarted.service.recover()
+        assertFalse("A purchase moved to B grants A nothing", restarted.core.featureInfo.isAllowed("pro"))
+        restarted.close()
+        fixture.close()
+    }
+
+    @Test
+    fun restoreReportsAFailureForAPurchaseWhoseSignatureFailed() = runTest {
+        val actions = mutableListOf<String>()
+        val fixture = fixture(this, actions = actions, verifyPurchaseSignature = { _, _, _ -> false })
+        val owner = fixture.core.identity.distinctId()
+        fixture.service.rememberProduct(product())
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("forged", obfuscatedAccountId = accountHash(owner)),
+        )
+
+        val host = fixture.service.restorePurchases()
+        val journey = fixture.service.restorePurchases(expectedOwnerDistinctId = owner)
+
+        for (result in listOf(host, journey)) {
+            assertTrue("A purchase that failed verification is not NoPurchases: $result", result is RestoreResult.Failed)
+            assertTrue((result as RestoreResult.Failed).cause.message.orEmpty().contains("could not be verified"))
+        }
+        assertNull("An unverified purchase owes no send", fixture.store.load().getValue("forged").pendingSend)
+        assertEquals(0, actions.count { it == SystemEventNames.RESTORE_NO_PURCHASES })
+        assertTrue(fixture.requests.isEmpty())
+        fixture.close()
+    }
+
+    @Test
+    fun restoreRefusalAsksTheServerForAFreshProfileWhichDecidesAccess() = runTest {
+        val fixture = fixture(this)
+        val owner = fixture.core.identity.distinctId()
+        fixture.store.upsert(retainedRestoreEvidence(owner))
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("refresh-token", obfuscatedAccountId = accountHash(owner)).copy(acknowledged = true),
+        )
+        val proProfile = Json.parseToJsonElement(
+            """{"features":[{"id":"pro","type":"boolean","unlimited":false},{"id":"other","type":"boolean","unlimited":false}]}""",
+        ).jsonObject
+        // The profile was fetched while the purchase still granted "pro".
+        fixture.core.features.hydrateProfile(owner, proProfile)
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(refused = true) }
+        assertTrue(fixture.service.restorePurchases() is RestoreResult.Failed)
+
+        assertEquals("A refusal asks for a fresh profile", 1, fixture.authorityRefreshes)
+        // Until it lands (or while offline), the cached profile keeps showing the
+        // purchase, the way it shows a refund this device has not heard about.
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.core.features.hydrateProfile(
+            owner,
+            Json.parseToJsonElement("""{"features":[{"id":"other","type":"boolean","unlimited":false}]}""").jsonObject,
+        )
+        assertFalse("The server's profile decides", fixture.core.featureInfo.isAllowed("pro"))
+        assertTrue(fixture.core.featureInfo.isAllowed("other"))
+        fixture.close()
+    }
+
+    @Test
+    fun restoreTransferAwayFromTheCurrentCustomerAsksForTheirFreshProfile() = runTest {
+        val fixture = fixture(this)
+        fixture.core.identity.setDistinctId("customer-a")
+        fixture.store.upsert(retainedRestoreEvidence("customer-a"))
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("refresh-token", obfuscatedAccountId = accountHash("customer-a")).copy(acknowledged = true),
+        )
+        fixture.core.identity.setDistinctId("customer-b")
+        fixture.core.featureInfo.publish(fixture.core.features.handleUserChange("customer-a", "customer-b"))
+        val verificationStarted = CompletableDeferred<Unit>()
+        val serverAnswers = CompletableDeferred<Unit>()
+        fixture.synchronizer = {
+            verificationStarted.complete(Unit)
+            serverAnswers.await()
+            accepted("customer-b", it)
+        }
+        val restore = async { fixture.service.restorePurchases() }
+        runCurrent()
+        verificationStarted.await()
+
+        // The app returns to A, whose cached profile still carries the purchase's grant.
+        fixture.core.identity.setDistinctId("customer-a")
+        fixture.core.featureInfo.publish(fixture.core.features.handleUserChange("customer-b", "customer-a"))
+        fixture.core.features.hydrateProfile(
+            "customer-a",
+            Json.parseToJsonElement("""{"features":[{"id":"pro","type":"boolean","unlimited":false}]}""").jsonObject,
+        )
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        serverAnswers.complete(Unit)
+        assertEquals(RestoreResult.Restored, restore.await())
+
+        assertEquals("customer-b", fixture.store.load().getValue("refresh-token").ownerDistinctId)
+        // Only the current customer's profile is fetched after an answer; B is not current.
+        // Until A's next profile lands, A's cached profile keeps showing the moved purchase.
+        assertEquals(0, fixture.authorityRefreshes)
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.core.features.hydrateProfile(
+            "customer-a",
+            Json.parseToJsonElement("""{"features":[]}""").jsonObject,
+        )
+        assertFalse("A's fresh profile no longer grants the moved purchase", fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
+    fun refusalAfterTheRequesterStoppedBeingCurrentAsksForNoProfile() = runTest {
+        val fixture = fixture(this)
+        fixture.core.identity.setDistinctId("customer-a")
+        fixture.store.upsert(retainedRestoreEvidence("customer-a"))
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("refresh-token", obfuscatedAccountId = accountHash("customer-a")).copy(acknowledged = true),
+        )
+        val verificationStarted = CompletableDeferred<Unit>()
+        val serverAnswers = CompletableDeferred<Unit>()
+        fixture.synchronizer = {
+            verificationStarted.complete(Unit)
+            serverAnswers.await()
+            PurchaseSyncOutcome.Rejected(refused = true)
+        }
+        val restore = async { fixture.service.restorePurchases() }
+        runCurrent()
+        verificationStarted.await()
+
+        // The app moves to B before the server refuses A's Restore.
+        fixture.core.identity.setDistinctId("customer-b")
+        serverAnswers.complete(Unit)
+        assertTrue(restore.await() is RestoreResult.Failed)
+
+        // A is no longer current: their profile is fetched when they return, not now.
+        assertEquals(0, fixture.authorityRefreshes)
+        assertNull("The server says A no longer owns it", fixture.store.load().getValue("refresh-token").ownerDistinctId)
+        fixture.close()
+    }
+
+    @Test
+    fun checkoutRetryKeepsThePurchaseReason() = runTest {
+        val fixture = fixture(this, initialRetryDelayMillis = 10, maxRetryDelayMillis = 10)
+        val buyer = fixture.core.identity.distinctId()
+        val outcomes = mutableListOf<PurchaseSyncOutcome?>(PurchaseSyncOutcome.Rejected(), null)
+        fixture.synchronizer = { outcomes.removeAt(0) ?: accepted(buyer, it) }
+        val checkout = async { fixture.service.purchase(activity(), product(), null) }
+        runCurrent()
+        fixture.service.onPurchasesUpdated(okUpdate(playPurchase("retried-checkout").forCheckout(fixture)))
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+
+        advanceTimeBy(100)
+        runCurrent()
+
+        assertEquals(
+            "A transient failure must not turn a checkout into a sync",
+            listOf(PurchaseSyncReason.PURCHASE, PurchaseSyncReason.PURCHASE),
+            fixture.requests.map { it.second.reason },
+        )
+        assertTrue(fixture.store.load().getValue("retried-checkout").synced)
+        fixture.close()
+    }
+
+    @Test
+    fun checkoutReasonSurvivesARestart() = runTest {
+        val fixture = fixture(this)
+        val buyer = fixture.core.identity.distinctId()
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
+        val checkout = async { fixture.service.purchase(activity(), product(), null) }
+        runCurrent()
+        val bought = playPurchase("restarted-checkout").forCheckout(fixture)
+        fixture.service.onPurchasesUpdated(okUpdate(bought))
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+
+        val restarted = fixture(this, store = fixture.store)
+        restarted.billing.active[BillingClient.ProductType.INAPP] = listOf(bought)
+        restarted.service.recover()
+
+        assertEquals(
+            "restarted-checkout" to PurchaseSyncRequest(PurchaseSyncReason.PURCHASE, buyer, CustomerKind.ANONYMOUS),
+            restarted.requests.first(),
+        )
+        restarted.close()
+        fixture.close()
+    }
+
+    @Test
+    fun restoreRetryKeepsTheRestoreReasonAndItsRequester() = runTest {
+        val fixture = fixture(this, initialRetryDelayMillis = 10, maxRetryDelayMillis = 10)
+        // Another customer's unsent purchase: the Restore is written into the
+        // outbox as the restoring customer's claim before it is sent.
+        fixture.store.upsert(owedRestoreEvidence("customer-a", kind = CustomerKind.IDENTIFIED))
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("refresh-token", obfuscatedAccountId = accountHash("customer-a")).copy(acknowledged = true),
+        )
+        fixture.core.identity.setDistinctId("customer-b")
+        val outcomes = mutableListOf<PurchaseSyncOutcome?>(PurchaseSyncOutcome.Rejected(), null)
+        fixture.synchronizer = { outcomes.removeAt(0) ?: accepted("customer-b", it) }
+        assertTrue(fixture.service.restorePurchases() is RestoreResult.Failed)
+
+        advanceTimeBy(100)
+        runCurrent()
+
+        val restore = PurchaseSyncRequest(PurchaseSyncReason.RESTORE, "customer-b", CustomerKind.IDENTIFIED)
+        assertEquals(listOf(restore, restore), fixture.requests.map { it.second })
+        assertEquals("customer-b", fixture.store.load().getValue("refresh-token").ownerDistinctId)
+        fixture.close()
+    }
+
+    @Test
+    fun restoreOfAPurchaseNeverRecordedHereAdmitsTheRestore() = runTest {
+        val fixture = fixture(this, initialRetryDelayMillis = 10, maxRetryDelayMillis = 10)
+        // Another install bought it: this device has no record of the purchase.
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("refresh-token", obfuscatedAccountId = accountHash("customer-a")).copy(acknowledged = true),
+        )
+        fixture.core.identity.setDistinctId("customer-b")
+        val outcomes = mutableListOf<PurchaseSyncOutcome?>(PurchaseSyncOutcome.Rejected(), null)
+        fixture.synchronizer = { outcomes.removeAt(0) ?: accepted("customer-b", it) }
+        assertTrue(fixture.service.restorePurchases() is RestoreResult.Failed)
+
+        advanceTimeBy(100)
+        runCurrent()
+
+        val restore = PurchaseSyncRequest(PurchaseSyncReason.RESTORE, "customer-b", CustomerKind.IDENTIFIED)
+        assertEquals(listOf(restore, restore), fixture.requests.map { it.second })
+        assertEquals("customer-b", fixture.store.load().getValue("refresh-token").ownerDistinctId)
+        fixture.close()
+    }
+
+    @Test
+    fun restoreOfARefusedPurchaseGrantsNothingUntilTheServerAccepts() = runTest {
+        val fixture = fixture(this, initialRetryDelayMillis = 10, maxRetryDelayMillis = 10)
+        val customer = fixture.core.identity.distinctId()
+        refuseThenRestoreWithATransientFailure(fixture, customer)
+        assertFalse("An unanswered Restore grants nothing", fixture.core.featureInfo.isAllowed("pro"))
+
+        fixture.synchronizer = { accepted(customer, it) }
+        advanceTimeBy(100)
+        runCurrent()
+        assertEquals(
+            "A refused purchase is claimed again only by another Restore",
+            listOf(PurchaseSyncReason.SYNC, PurchaseSyncReason.RESTORE),
+            fixture.requests.map { it.second.reason },
+        )
+
+        assertEquals(RestoreResult.Restored, fixture.service.restorePurchases())
+        assertEquals(
+            listOf(PurchaseSyncReason.SYNC, PurchaseSyncReason.RESTORE, PurchaseSyncReason.RESTORE),
+            fixture.requests.map { it.second.reason },
+        )
+        val restored = fixture.store.load().getValue("revoked-then-restored")
+        assertTrue(restored.synced)
+        assertFalse(restored.refused)
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
+    fun restoreOfARefusedPurchaseAfterARestartAsksTheServerAgain() = runTest {
+        val fixture = fixture(this)
+        val customer = fixture.core.identity.distinctId()
+        val purchase = refuseThenRestoreWithATransientFailure(fixture, customer)
+
+        val restarted = fixture(this, store = fixture.store)
+        restarted.billing.active[BillingClient.ProductType.INAPP] = listOf(purchase)
+        restarted.service.rememberProduct(
+            product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+        )
+        runCurrent()
+        assertFalse(restarted.core.featureInfo.isAllowed("pro"))
+        restarted.service.recover()
+        assertTrue("A refused purchase is not sent again on its own", restarted.requests.isEmpty())
+
+        restarted.synchronizer = { accepted(customer, it) }
+        assertEquals(RestoreResult.Restored, restarted.service.restorePurchases())
+        assertEquals(
+            "revoked-then-restored" to PurchaseSyncRequest(PurchaseSyncReason.RESTORE, customer, CustomerKind.ANONYMOUS),
+            restarted.requests.single(),
+        )
+        assertTrue(restarted.store.load().getValue("revoked-then-restored").synced)
+        restarted.close()
+        fixture.close()
+    }
+
+    /** An app-start sync is refused, then a Restore of the same purchase fails transiently. */
+    private suspend fun TestScope.refuseThenRestoreWithATransientFailure(
+        fixture: Fixture,
+        customer: String,
+    ): PlayPurchase {
+        fixture.service.rememberProduct(
+            product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+        )
+        val purchase = playPurchase("revoked-then-restored", obfuscatedAccountId = accountHash(customer))
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(purchase)
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(refused = true) }
+        fixture.service.recover()
+        assertTrue(fixture.store.load().getValue("revoked-then-restored").refused)
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
+        assertTrue(fixture.service.restorePurchases() is RestoreResult.Failed)
+        runCurrent()
+        return purchase
+    }
+
+    @Test
+    fun aRefusedRestoreIsNotRetriedInTheBackground() = runTest {
+        val fixture = fixture(this, initialRetryDelayMillis = 10, maxRetryDelayMillis = 10)
+        fixture.store.upsert(owedRestoreEvidence("customer-a", kind = CustomerKind.IDENTIFIED))
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("refresh-token", obfuscatedAccountId = accountHash("customer-a")).copy(acknowledged = true),
+        )
+        fixture.core.identity.setDistinctId("customer-b")
+        val outcomes = mutableListOf<PurchaseSyncOutcome>(
+            PurchaseSyncOutcome.Rejected(),
+            PurchaseSyncOutcome.Rejected(refused = true),
+        )
+        fixture.synchronizer = { outcomes.removeFirstOrNull() ?: PurchaseSyncOutcome.Rejected() }
+        assertTrue(fixture.service.restorePurchases() is RestoreResult.Failed)
+        advanceTimeBy(100)
+        runCurrent()
+
+        fixture.service.recover()
+
+        advanceTimeBy(100)
+        runCurrent()
+
+        val restore = PurchaseSyncRequest(PurchaseSyncReason.RESTORE, "customer-b", CustomerKind.IDENTIFIED)
+        assertEquals(
+            // The Restore of another customer's purchase is the outbox entry: its
+            // failed send is retried; once refused, it is over.
+            listOf(restore, restore),
+            fixture.requests.map { it.second },
+        )
+        val refused = fixture.store.load().getValue("refresh-token")
+        assertNull(refused.pendingSend)
+        assertTrue(refused.refused)
+        fixture.close()
+    }
+
+    @Test
+    fun restoreReportsAFailureWhenItCannotRetainAPlayPurchase() = runTest {
+        val actions = mutableListOf<String>()
+        val fixture = fixture(this, actions = actions)
+        val owner = fixture.core.identity.distinctId()
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("unretained", obfuscatedAccountId = accountHash(owner)),
+        )
+        fixture.store.failEvidenceUpserts = true
+
+        val host = fixture.service.restorePurchases()
+        val journey = fixture.service.restorePurchases(expectedOwnerDistinctId = owner)
+
+        for (result in listOf(host, journey)) {
+            assertTrue("Play owns a purchase, so this is not NoPurchases: $result", result is RestoreResult.Failed)
+            assertTrue(
+                (result as RestoreResult.Failed).cause.message.orEmpty().contains("could not be retained"),
+            )
+        }
+        assertEquals(0, actions.count { it == SystemEventNames.RESTORE_NO_PURCHASES })
+        assertEquals(2, actions.count { it == SystemEventNames.RESTORE_FAILED })
+        assertTrue(fixture.requests.isEmpty())
+        fixture.close()
+    }
+
+    @Test
+    fun refusalThatCannotBeWrittenStillEndsAccessAndIsAnsweredAgain() = runTest {
+        val fixture = fixture(this)
+        val owner = fixture.core.identity.distinctId()
+        fixture.service.rememberProduct(
+            product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+        )
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("refresh-token", obfuscatedAccountId = accountHash(owner)).copy(acknowledged = true),
+        )
+        // The launch scan gets no answer: the buyer's own unanswered purchase unlocks early.
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
+        fixture.service.recover()
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+
+        val conflict = NuxieApiPurchaseSynchronizer(conflictApi(mutableListOf()))
+        fixture.synchronizer = { conflict.sync(it, fixture.requests.last().second) }
+        // Only the write that records the refusal fails.
+        fixture.store.rejectEvidenceUpsert = { it.purchaseToken == "refresh-token" && it.refused }
+        assertTrue(fixture.service.restorePurchases() is RestoreResult.Failed)
+
+        assertFalse("A refusal ends the early unlock at once", fixture.core.featureInfo.isAllowed("pro"))
+        assertNotNull("The unwritten answer leaves the entry owed", fixture.store.load().getValue("refresh-token").pendingSend)
+
+        // Once the store accepts writes again, recovery sends it and writes the answer.
+        fixture.store.rejectEvidenceUpsert = null
+        fixture.service.recover()
+        val answered = fixture.store.load().getValue("refresh-token")
+        assertNull(answered.pendingSend)
+        assertTrue(answered.refused)
+        assertNull(answered.pendingSend)
+        assertTrue(answered.refused)
+
+        val restarted = fixture(this, store = fixture.store)
+        restarted.billing.active[BillingClient.ProductType.SUBS] = fixture.billing.active.getValue(
+            BillingClient.ProductType.SUBS,
+        )
+        restarted.service.recover()
+        assertFalse(restarted.core.featureInfo.isAllowed("pro"))
+        assertTrue("A refused purchase is not sent again on its own", restarted.requests.isEmpty())
+        restarted.close()
+        fixture.close()
+    }
+
+    @Test
+    fun restoreReportsRestoredOnlyForAPurchaseTheServerRestored() = runTest {
+        val actions = mutableListOf<String>()
+        val fixture = fixture(this, actions = actions)
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("owned-by-play", obfuscatedAccountId = accountHash("someone-else")),
+        )
+
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(refused = true) }
+        val refused = fixture.service.restorePurchases()
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
+        val unanswered = fixture.service.restorePurchases()
+        fixture.synchronizer = { accepted(fixture.core.identity.distinctId(), it) }
+        val restored = fixture.service.restorePurchases()
+
+        assertTrue("Play ownership alone is not a restore", refused is RestoreResult.Failed)
+        assertTrue(unanswered is RestoreResult.Failed)
+        assertEquals(RestoreResult.Restored, restored)
+        assertEquals(2, actions.count { it == SystemEventNames.RESTORE_FAILED })
+        assertEquals(1, actions.count { it == SystemEventNames.RESTORE_COMPLETED })
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
+    fun restoreAsksAgainForAPurchaseAnEarlierSyncRefused() = runTest {
+        val fixture = fixture(this)
+        val customer = fixture.core.identity.distinctId()
+        val purchase = playPurchase("bought-on-another-phone", obfuscatedAccountId = accountHash("previous-install"))
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(purchase)
+        // App start may not move another customer's purchase.
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(refused = true) }
+        fixture.service.recover()
+        assertTrue(fixture.store.load().getValue("bought-on-another-phone").refused)
+
+        fixture.synchronizer = { accepted(customer, it) }
+        assertEquals(RestoreResult.Restored, fixture.service.restorePurchases())
+
+        val restored = fixture.store.load().getValue("bought-on-another-phone")
+        assertFalse(restored.refused)
+        assertTrue(restored.synced)
+        assertEquals(customer, restored.ownerDistinctId)
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        assertEquals(
+            listOf(PurchaseSyncReason.SYNC, PurchaseSyncReason.RESTORE),
+            fixture.requests.map { it.second.reason },
+        )
+        assertEquals(0, fixture.purchaseCompletionEventIds.size)
+        fixture.close()
+    }
+
+    @Test
+    fun restoreMovesAnotherCustomersPurchaseAndThePreviousOwnerLosesItHere() = runTest {
+        val fixture = fixture(this)
+        fixture.service.rememberProduct(
+            product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+        )
+        fixture.core.identity.setDistinctId("customer-a")
+        val checkout = async {
+            fixture.service.purchase(
+                activity(),
+                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+                null,
+            )
+        }
+        runCurrent()
+        val bought = playPurchase("moved-token").forCheckout(fixture)
+        fixture.service.onPurchasesUpdated(okUpdate(bought))
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        assertEquals("customer-a", fixture.store.load().getValue("moved-token").ownerDistinctId)
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(bought.copy(acknowledged = true))
+
+        fixture.core.identity.setDistinctId("customer-b")
+        fixture.core.featureInfo.publish(fixture.core.features.handleUserChange("customer-a", "customer-b"))
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        assertEquals(RestoreResult.Restored, fixture.service.restorePurchases())
+
+        assertEquals(
+            "moved-token" to PurchaseSyncRequest(PurchaseSyncReason.RESTORE, "customer-b", CustomerKind.IDENTIFIED),
+            fixture.requests.last(),
+        )
+        val moved = fixture.store.load().getValue("moved-token")
+        assertEquals("customer-b", moved.ownerDistinctId)
+        assertEquals("The buyer is still A", "customer-a", moved.buyerDistinctId)
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+
+        // Customer A's checkout binding still names this Play account; a passive
+        // scan after a restart must not hand A the access the server moved to B.
+        fixture.core.identity.setDistinctId("customer-a")
+        val restarted = fixture(this, store = fixture.store)
+        assertEquals("customer-a", restarted.core.identity.distinctId())
+        restarted.billing.active[BillingClient.ProductType.INAPP] = listOf(bought.copy(acknowledged = true))
+        restarted.service.recover()
+
+        assertEquals("customer-b", fixture.store.load().getValue("moved-token").ownerDistinctId)
+        assertFalse(restarted.core.featureInfo.isAllowed("pro"))
+        restarted.close()
+        fixture.close()
+    }
+
+    @Test
+    fun onlyAConflictOrAnInvalidPurchaseIsARefusal() = runTest {
+        val request = PurchaseSyncRequest(PurchaseSyncReason.RESTORE, "customer", CustomerKind.IDENTIFIED)
+        val evidence = retainedRestoreEvidence("customer")
+        val refusals = listOf(409, 400, 401, 403, 503).associateWith { status ->
+            val api = NuxieApi("pk_test", NuxieEnvironment.DEVELOPMENT, object : HttpTransport {
+                override fun execute(request: HttpTransport.Request) =
+                    HttpTransport.Response(status, """{"success":false}""".encodeToByteArray())
+            })
+            (NuxieApiPurchaseSynchronizer(api).sync(evidence, request) as PurchaseSyncOutcome.Rejected).refused
+        }
+        assertEquals(mapOf(409 to true, 400 to true, 401 to false, 403 to false, 503 to false), refusals)
+    }
+
+    // purchases/purchase-outbox.json: the outbox contract iOS defines, driven
+    // through Android's production entry points against a recording server.
+
+    private val outboxContract by lazy {
+        Json.parseToJsonElement(
+            File(FixtureRunner.fixturesRoot(), "purchases/purchase-outbox.json").readText(),
+        ).jsonObject.also {
+            assertEquals("purchases/purchase-outbox", it.getValue("suite").jsonPrimitive.content)
+            assertEquals(1, it.getValue("version").jsonPrimitive.int)
+        }
+    }
+
+    private fun outboxAnswer(name: String): JsonObject = outboxContract.getValue("answers").jsonArray
+        .map { it.jsonObject }
+        .single { it.getValue("name").jsonPrimitive.content == name }
+
+    /**
+     * A `/purchase` server answering each request body with [answerFor]'s
+     * answer (a null status is a transport failure), recording every body.
+     */
+    private fun outboxApi(bodies: MutableList<JsonObject>, answerFor: (JsonObject) -> JsonObject) = NuxieApi(
+        "pk_test",
+        NuxieEnvironment.DEVELOPMENT,
+        object : HttpTransport {
+            override fun execute(request: HttpTransport.Request): HttpTransport.Response {
+                val path = outboxContract.getValue("request").jsonObject
+                assertEquals(path.getValue("path").jsonPrimitive.content, request.url.path)
+                assertEquals(path.getValue("method").jsonPrimitive.content, request.method)
+                val body = Json.parseToJsonElement(request.body.decodeToString()).jsonObject
+                bodies += body
+                val answer = answerFor(body)
+                val status = (answer.getValue("status") as? JsonPrimitive)?.intOrNull
+                    ?: throw java.io.IOException("offline")
+                val reply = if (status == 200) {
+                    """{"success":true,"customer_id":${body.getValue("distinct_id")},"features":[{"id":"pro","type":"boolean","allowed":true,"unlimited":false}],"catalog_product":{"id":"nuxie-pro","store_product_id":"play-pro","store_product_type":"nonConsumable"}}"""
+                } else {
+                    """{"success":false,"code":${answer["code"] ?: JsonPrimitive("unavailable")}}"""
+                }
+                return HttpTransport.Response(status, reply.encodeToByteArray())
+            }
+        },
+        // Answer on the test's clock, so a backoff retry lands within advanceTimeBy.
+        ioDispatcher = Dispatchers.Unconfined,
+    )
+
+    private fun Fixture.answerThroughTheApi(bodies: MutableList<JsonObject>, answerFor: (JsonObject) -> JsonObject) {
+        val api = NuxieApiPurchaseSynchronizer(outboxApi(bodies, answerFor))
+        synchronizer = { api.sync(it, requests.last().second) }
+    }
+
+    /** What the contract checks in each request body. */
+    private fun JsonObject.outboxFields(): Triple<String, String, String> = Triple(
+        getValue("distinct_id").jsonPrimitive.content,
+        getValue("reason").jsonPrimitive.content,
+        getValue("customer_kind").jsonPrimitive.content,
+    )
+
+    @Test
+    fun outboxContractRecordsEachSendWhenItIsAdmitted() = runTest {
+        val accepted = outboxAnswer("accepted")
+        val offline = outboxAnswer("offline")
+        val sends = outboxContract.getValue("sends").jsonArray.map { it.jsonObject }
+        val drivenProducers = mutableSetOf<String>()
+        for (case in sends) {
+            val name = case.getValue("name").jsonPrimitive.content
+            val producer = case.getValue("producer").jsonPrimitive.content
+            val customer = case.getValue("customer").jsonObject
+            val fixture = fixture(this, initialRetryDelayMillis = 10, maxRetryDelayMillis = 10)
+            // Identity persists across fixtures in one test: every case starts anonymous.
+            fixture.core.identity.reset(keepAnonymousId = false)
+            val anonymousId = fixture.core.identity.anonymousId()
+            if (customer.getValue("identified").jsonPrimitive.boolean) {
+                fixture.core.identity.setDistinctId(customer.getValue("distinctId").jsonPrimitive.content)
+            }
+            val current = fixture.core.identity.distinctId()
+            val bodies = mutableListOf<JsonObject>()
+            var answer = accepted
+            fixture.answerThroughTheApi(bodies) { answer }
+            val owned = playPurchase("outbox-token", obfuscatedAccountId = accountHash(current))
+            when (producer) {
+                "checkout" -> {
+                    val checkout = async { fixture.service.purchase(activity(), product(), null) }
+                    runCurrent()
+                    fixture.service.onPurchasesUpdated(okUpdate(playPurchase("outbox-token").forCheckout(fixture)))
+                    assertEquals(name, PurchaseResult.Purchased, checkout.await())
+                }
+                "already_owned" -> {
+                    fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(owned)
+                    fixture.billing.launchCode = BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED
+                    val result = fixture.service.purchase(activity(), product(), null)
+                    assertTrue(name, (result as PurchaseResult.Failed).cause is PurchaseAlreadyOwnedException)
+                }
+                "restore" -> {
+                    fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(owned)
+                    assertEquals(name, RestoreResult.Restored, fixture.service.restorePurchases())
+                }
+                "transaction_stream" -> fixture.service.onPurchasesUpdated(okUpdate(owned))
+                "launch_scan" -> {
+                    fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(owned)
+                    fixture.service.recover()
+                }
+                "retry_after_reset" -> {
+                    answer = offline
+                    val checkout = async { fixture.service.purchase(activity(), product(), null) }
+                    runCurrent()
+                    fixture.service.onPurchasesUpdated(okUpdate(playPurchase("outbox-token").forCheckout(fixture)))
+                    assertEquals(name, PurchaseResult.Purchased, checkout.await())
+                    fixture.core.identity.reset(keepAnonymousId = false)
+                    answer = accepted
+                    advanceTimeBy(100)
+                    runCurrent()
+                    assertEquals(name, 2, bodies.size)
+                }
+                "retry_unrecorded" -> {
+                    fixture.store.upsert(unrecordedEntry("departed-customer"))
+                    fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+                        playPurchase("outbox-token", obfuscatedAccountId = accountHash("departed-customer")),
+                    )
+                    fixture.service.recover()
+                }
+                else -> error("Unknown outbox producer $producer in $name")
+            }
+            drivenProducers += producer
+            val expected = case.getValue("expectedRequest").jsonObject
+            val expectedFields = Triple(
+                expected.getValue("distinct_id").jsonPrimitive.content
+                    .replace("<anonymousId>", anonymousId),
+                expected.getValue("reason").jsonPrimitive.content,
+                expected.getValue("customer_kind").jsonPrimitive.content,
+            )
+            assertTrue("$name sends", bodies.isNotEmpty())
+            for (body in bodies) assertEquals(name, expectedFields, body.outboxFields())
+            assertNull(name, fixture.store.load().getValue("outbox-token").pendingSend)
+            fixture.close()
+        }
+        assertEquals(sends.map { it.getValue("producer").jsonPrimitive.content }.toSet(), drivenProducers)
+    }
+
+    /** A stored entry written before its kind and reason were recorded, decoded by the real store. */
+    private suspend fun unrecordedEntry(requester: String): PurchaseEvidence {
+        val directory = temporaryFolder.newFolder()
+        val writer = FilePurchaseEvidenceStore(directory, Dispatchers.Unconfined)
+        assertTrue(writer.upsert(
+            owedRestoreEvidence(requester).copy(
+                purchaseToken = "outbox-token",
+                productType = BillingClient.ProductType.INAPP,
+                obfuscatedAccountId = accountHash(requester),
+            ),
+        ))
+        val file = File(directory, "purchase-evidence.json")
+        val stored = Json.parseToJsonElement(file.readText()).jsonObject
+        val entry = stored.getValue("outbox-token").jsonObject
+        val send = entry.getValue("pendingSend").jsonObject
+        file.writeText(JsonObject(stored + ("outbox-token" to JsonObject(
+            entry + ("pendingSend" to JsonObject(send - "reason" - "customerKind")),
+        ))).toString())
+        val decoded = FilePurchaseEvidenceStore(directory, Dispatchers.Unconfined).load().getValue("outbox-token")
+        assertEquals(PurchaseSend(PurchaseSyncReason.SYNC, requester, CustomerKind.IDENTIFIED), decoded.pendingSend)
+        return decoded
+    }
+
+    @Test
+    fun outboxContractClearsAnEntryOnlyWhenTheServerAnswers() = runTest {
+        for (answer in outboxContract.getValue("answers").jsonArray.map { it.jsonObject }) {
+            val name = answer.getValue("name").jsonPrimitive.content
+            val fixture = fixture(this)
+            fixture.core.identity.setDistinctId("buyer")
+            val bodies = mutableListOf<JsonObject>()
+            fixture.answerThroughTheApi(bodies) { answer }
+
+            val checkout = async { fixture.service.purchase(activity(), product(), null) }
+            runCurrent()
+            fixture.service.onPurchasesUpdated(okUpdate(playPurchase("outbox-token").forCheckout(fixture)))
+            checkout.await()
+
+            val entry = fixture.store.load().getValue("outbox-token")
+            assertEquals(name, 1, bodies.size)
+            when (answer.getValue("entry").jsonPrimitive.content) {
+                "cleared" -> assertNull(name, entry.pendingSend)
+                "kept" -> assertNotNull(name, entry.pendingSend)
+                else -> error("Unknown entry state in $name")
+            }
+            assertEquals(name, answer.getValue("sendAttempts").jsonPrimitive.int, entry.syncAttempts)
+            assertEquals(name, answer.getValue("profileRefreshes").jsonPrimitive.int, fixture.authorityRefreshes)
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun outboxContractBacksOffAKeptEntry() = runTest {
+        val retry = outboxContract.getValue("retry").jsonObject
+        val initial = retry.getValue("initialDelaySeconds").jsonPrimitive.long * 1_000
+        val maximum = retry.getValue("maximumDelaySeconds").jsonPrimitive.long * 1_000
+        assertEquals(2, retry.getValue("multiplier").jsonPrimitive.int)
+        for (row in retry.getValue("delayAfterAttempts").jsonArray.map { it.jsonObject }) {
+            assertEquals(
+                row.getValue("delaySeconds").jsonPrimitive.long * 1_000,
+                outboxRetryDelayMillis(row.getValue("attempts").jsonPrimitive.int),
+            )
+        }
+
+        // A kept entry goes out again after exactly that delay.
+        val fixture = fixture(this, initialRetryDelayMillis = initial, maxRetryDelayMillis = maximum)
+        val customer = fixture.core.identity.distinctId()
+        val offline = outboxAnswer("offline")
+        val bodies = mutableListOf<JsonObject>()
+        fixture.answerThroughTheApi(bodies) { offline }
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("outbox-token", obfuscatedAccountId = accountHash(customer)),
+        )
+        fixture.service.recover()
+        for ((attempts, sends) in listOf(1 to 1, 2 to 2, 3 to 3)) {
+            assertEquals(sends, bodies.size)
+            assertEquals(attempts, fixture.store.load().getValue("outbox-token").syncAttempts)
+            advanceTimeBy(outboxRetryDelayMillis(attempts) - 1)
+            runCurrent()
+            assertEquals("Not before the backoff", sends, bodies.size)
+            advanceTimeBy(1)
+            runCurrent()
+        }
+        fixture.close()
+    }
+
+    @Test
+    fun outboxContractReportsARestoreOnlyWhenTheServerGrantsOne() = runTest {
+        for (case in outboxContract.getValue("restore").jsonArray.map { it.jsonObject }) {
+            val name = case.getValue("name").jsonPrimitive.content
+            val answers = case.getValue("answers").jsonArray.map { outboxAnswer(it.jsonPrimitive.content) }
+            val fixture = fixture(this)
+            fixture.core.identity.setDistinctId("restorer")
+            val bodies = mutableListOf<JsonObject>()
+            fixture.answerThroughTheApi(bodies) { body ->
+                answers[body.getValue("purchase_token").jsonPrimitive.content.removePrefix("restore-").toInt()]
+            }
+            fixture.billing.active[BillingClient.ProductType.INAPP] = answers.indices.map {
+                playPurchase("restore-$it", obfuscatedAccountId = accountHash("restorer"))
+            }
+
+            val result = fixture.service.restorePurchases()
+
+            when (case.getValue("result").jsonPrimitive.content) {
+                "restored" -> assertEquals(name, RestoreResult.Restored, result)
+                "no_purchases" -> assertEquals(name, RestoreResult.NoPurchases, result)
+                "failed" -> assertEquals(
+                    name,
+                    when (case.getValue("error").jsonPrimitive.content) {
+                        "owned_by_another_account" -> RestoreClaimError.OWNED_BY_ANOTHER_ACCOUNT
+                        "unconfirmed" -> RestoreClaimError.UNCONFIRMED
+                        else -> error("Unknown Restore error in $name")
+                    },
+                    ((result as RestoreResult.Failed).cause as RestoreClaimException).error,
+                )
+                else -> error("Unknown Restore result in $name")
+            }
+            assertEquals(name, answers.size, bodies.size)
+            assertTrue(name, bodies.all { it.outboxFields() == Triple("restorer", "restore", "identified") })
+            fixture.close()
+        }
+    }
+
+    private fun conflictApi(bodies: MutableList<String>) = NuxieApi(
+        "pk_test",
+        NuxieEnvironment.DEVELOPMENT,
+        object : HttpTransport {
+            override fun execute(request: HttpTransport.Request): HttpTransport.Response {
+                bodies += request.body.decodeToString()
+                return HttpTransport.Response(
+                    409,
+                    """{"success":false,"error":"Google Play purchase conflicts with retained ownership","code":"google_play_purchase_conflict"}""".encodeToByteArray(),
+                )
+            }
+        },
+    )
+
+    /** [owner]'s own purchase the server already accepted for them. */
     private fun retainedRestoreEvidence(owner: String) = PurchaseEvidence(
         purchaseToken = "refresh-token", packageName = "com.example.app",
         storeProductIds = listOf("play-pro"), nuxieProductId = "nuxie-pro",
         productType = BillingClient.ProductType.SUBS, purchaseState = StoredPurchaseState.PURCHASED,
-        obfuscatedAccountId = accountHash(owner), syncAttributionDistinctId = owner,
-        ownerDistinctId = owner, nuxieManaged = true, acknowledged = true, synced = true, syncedCustomerId = owner,
+        obfuscatedAccountId = accountHash(owner), buyerDistinctId = owner,
+        ownerDistinctId = owner, nuxieManaged = true, acknowledged = true, syncedCustomerId = owner,
         backendSyncedAtMillis = 1L, firstSeenMillis = 1L, catalogResolved = true,
         completionEmitted = true, syncedEventEmitted = true, signatureVerified = true,
         authorityScope = "test-fixture",
     )
+
+    /** [buyer]'s own purchase still owing its send to the server. */
+    private fun owedRestoreEvidence(
+        buyer: String,
+        reason: PurchaseSyncReason = PurchaseSyncReason.PURCHASE,
+        kind: CustomerKind = CustomerKind.ANONYMOUS,
+    ) = retainedRestoreEvidence(buyer).copy(
+        ownerDistinctId = null,
+        syncedCustomerId = null,
+        backendSyncedAtMillis = null,
+        pendingSend = PurchaseSend(reason, buyer, kind),
+    )
+
+    /** The requester of the send the synchronizer is answering. */
+    private val PurchaseEvidence.requester: String get() = checkNotNull(pendingSend).distinctId
 
     @Test
     fun recoveryDoesNotBypassAPendingManagedCompletionBackoff() = runTest {
@@ -2365,10 +3581,9 @@ class PurchaseServiceTest {
                 packageName = "com.example.app",
                 storeProductIds = listOf("play-pro"),
                 purchaseState = StoredPurchaseState.PURCHASED,
-                syncAttributionDistinctId = owner,
+                buyerDistinctId = owner,
                 ownerDistinctId = owner,
                 acknowledged = false,
-                synced = true,
                 firstSeenMillis = 1L,
                 catalogResolved = true,
                 syncedEventEmitted = true,
@@ -2404,10 +3619,9 @@ class PurchaseServiceTest {
                 nuxieProductId = "nuxie-pro",
                 purchaseState = StoredPurchaseState.PURCHASED,
                 obfuscatedAccountId = accountHash(owner),
-                syncAttributionDistinctId = owner,
+                buyerDistinctId = owner,
                 ownerDistinctId = owner,
                 acknowledged = true,
-                synced = true,
                 firstSeenMillis = 1L,
                 catalogResolved = true,
                 syncedEventEmitted = true,
@@ -2439,19 +3653,6 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun explicitVerificationFailureIsPermanentButAmbiguousFailureIsTransient(): Unit = kotlinx.coroutines.runBlocking {
-        val permanent = Json.parseToJsonElement(
-            """{"success":false,"error":"verification failed"}""",
-        ).jsonObject
-        val ambiguous = Json.parseToJsonElement(
-            """{"success":false,"reason":"try_again"}""",
-        ).jsonObject
-
-        assertTrue(isPermanentPurchaseRejection(permanent))
-        assertFalse(isPermanentPurchaseRejection(ambiguous))
-    }
-
-    @Test
     fun testStoreIgnoresRetainedNativeEvidenceAndPlayCallbacks() = runTest {
         val actions = mutableListOf<String>()
         val fixture = fixture(this, actions = actions, testStore = NuxieTestStore(object : TestStoreChoices {
@@ -2463,7 +3664,8 @@ class PurchaseServiceTest {
             purchaseToken = "real-token", packageName = "com.example.app",
             storeProductIds = listOf("play-pro"), nuxieProductId = "nuxie-pro",
             authorityScope = "test-fixture", purchaseState = StoredPurchaseState.PURCHASED,
-            syncAttributionDistinctId = owner, ownerDistinctId = owner,
+            buyerDistinctId = owner,
+            pendingSend = PurchaseSend(PurchaseSyncReason.PURCHASE, owner, CustomerKind.ANONYMOUS),
             acknowledged = false, firstSeenMillis = 1L, catalogResolved = true,
         )
         fixture.store.upsert(retained)
@@ -2631,7 +3833,7 @@ class PurchaseServiceTest {
         )
         fixture.synchronizer = {
             actions += "sync"
-            accepted(it.syncAttributionDistinctId, it)
+            accepted(it.requester, it)
         }
         fixture.settings.delegate = object : NuxiePurchaseDelegate {
             override suspend fun purchase(product: StoreProduct): PurchaseResult = PurchaseResult.Purchased
@@ -2866,7 +4068,7 @@ class PurchaseServiceTest {
         val fixture = fixture(this, actions = actions, emissions = emissions)
         fixture.synchronizer = {
             actions += "sync"
-            accepted(it.syncAttributionDistinctId, it)
+            accepted(it.requester, it)
         }
         fixture.settings.delegate = object : NuxiePurchaseDelegate {
             override suspend fun purchase(product: StoreProduct): PurchaseResult = PurchaseResult.Cancelled
@@ -2901,7 +4103,7 @@ class PurchaseServiceTest {
         val fixture = fixture(this, actions = actions)
         fixture.synchronizer = {
             actions += "sync"
-            accepted(it.syncAttributionDistinctId, it)
+            accepted(it.requester, it)
         }
         val purchase = async { fixture.service.purchase(activity(), product(consumable = true), null) }
         runCurrent()
@@ -2936,7 +4138,7 @@ class PurchaseServiceTest {
     @Test
     fun missingAppManagedConsumableRemainsEligibleForSyncAfterHostConsumption() = runTest {
         val fixture = fixture(this, mode = PurchaseHandlingMode.APP_MANAGED)
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
         val checkout = async {
             fixture.service.purchase(
                 activity(),
@@ -2963,15 +4165,15 @@ class PurchaseServiceTest {
         assertEquals(RestoreResult.NoPurchases, fixture.service.restorePurchases())
 
         val afterRestore = fixture.store.load().getValue("app-managed-consumable")
-        assertFalse(afterRestore.revoked)
+        assertNotNull("Its send is still owed", afterRestore.pendingSend)
         assertFalse(afterRestore.synced)
         assertTrue(fixture.core.featureInfo.isAllowed("pro"))
 
-        fixture.synchronizer = { accepted(it.syncAttributionDistinctId, it) }
+        fixture.synchronizer = { accepted(it.requester, it) }
         fixture.service.recover()
 
         val afterRecovery = fixture.store.load().getValue("app-managed-consumable")
-        assertFalse(afterRecovery.revoked)
+        assertFalse(afterRecovery.refused)
         assertTrue(afterRecovery.synced)
         fixture.close()
     }
@@ -2980,7 +4182,7 @@ class PurchaseServiceTest {
     fun storedEvidenceRehydratesProjectionAfterRestartAndCompletesInterruptedSync() = runTest {
         val shared = RecordingEvidenceStore()
         val first = fixture(this, store = shared)
-        first.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        first.synchronizer = { PurchaseSyncOutcome.Rejected() }
         val purchase = async {
             first.service.purchase(
                 activity(),
@@ -3004,7 +4206,7 @@ class PurchaseServiceTest {
         )
         second.synchronizer = {
             assertTrue(second.core.featureInfo.isAllowed("pro"))
-            accepted(it.syncAttributionDistinctId, it)
+            accepted(it.requester, it)
         }
         second.service.recover()
 
@@ -3129,14 +4331,14 @@ class PurchaseServiceTest {
         fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
             playPurchase("deferred-authenticated-restore", obfuscatedAccountId = accountHash(owner)),
         )
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(permanent = false) }
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
 
         val result = fixture.service.restorePurchases(expectedOwnerDistinctId = owner)
 
         assertTrue(result is RestoreResult.Failed)
-        assertTrue(
-            (result as RestoreResult.Failed).cause.message.orEmpty()
-                .contains("waiting for purchase verification"),
+        assertEquals(
+            RestoreClaimError.UNCONFIRMED,
+            ((result as RestoreResult.Failed).cause as RestoreClaimException).error,
         )
         assertFalse(fixture.store.load().getValue("deferred-authenticated-restore").synced)
         fixture.close()
@@ -3223,7 +4425,7 @@ class PurchaseServiceTest {
 
         assertEquals(
             fixture.core.identity.distinctId(),
-            fixture.store.load().getValue("other-customer").syncAttributionDistinctId,
+            fixture.requests.single().second.distinctId,
         )
         assertTrue(fixture.store.load().getValue("other-customer").synced)
         fixture.close()
@@ -3292,9 +4494,13 @@ class PurchaseServiceTest {
             purchaseStorageScope = "test-fixture",
             billing = billing,
             evidenceStore = store,
-            synchronizer = PurchaseSynchronizer { fixture.synchronizer(it) },
+            synchronizer = PurchaseSynchronizer { evidence, request ->
+                fixture.requests += evidence.purchaseToken to request
+                fixture.synchronizer(evidence)
+            },
             features = core.features,
             distinctId = { core.identity.distinctId() },
+            customerKind = core.identity::customerKind,
             emit = { name, properties ->
                 actions += name
                 emissions += name to properties
@@ -3303,6 +4509,8 @@ class PurchaseServiceTest {
             scope = scope.backgroundScope,
             initialRetryDelayMillis = initialRetryDelayMillis,
             maxRetryDelayMillis = maxRetryDelayMillis,
+            outboxRetryInitialDelayMillis = initialRetryDelayMillis,
+            outboxRetryMaxDelayMillis = maxRetryDelayMillis,
             api = core.api,
             capturePurchaseEvent = { name, properties, eventId, capturedDistinctId ->
                 purchaseEventCaptureAttempts += eventId
@@ -3335,6 +4543,7 @@ class PurchaseServiceTest {
             logDroppedExternalPurchase = logDroppedExternalPurchase,
             testStore = testStore,
             ioDispatcher = ioDispatcher,
+            refreshFeatureAuthority = { fixture.authorityRefreshes += 1 },
         )
         fixture = Fixture(
             core,
@@ -3361,6 +4570,13 @@ class PurchaseServiceTest {
         val purchaseEventDistinctIds: List<String>,
         var synchronizer: suspend (PurchaseEvidence) -> PurchaseSyncOutcome,
     ) {
+        /** How often the service asked for a fresh server profile. */
+        var authorityRefreshes = 0
+
+        /** Every `/purchase` submission, by purchase token, in order. */
+        val requests: MutableList<Pair<String, PurchaseSyncRequest>> =
+            java.util.Collections.synchronizedList(mutableListOf())
+
         fun close() = core.stop()
     }
 
@@ -3371,6 +4587,8 @@ class PurchaseServiceTest {
         private val mappings = linkedMapOf<StoredProductIdentity, StoredProductMapping>()
         var actions: MutableList<String> = mutableListOf()
         var failEvidenceUpserts = false
+        /** Rejects only the evidence writes it matches. */
+        var rejectEvidenceUpsert: ((PurchaseEvidence) -> Boolean)? = null
         var afterNextLoad: ((Map<String, PurchaseEvidence>) -> Unit)? = null
         var afterNextMappingsLoad: (suspend (List<StoredProductMapping>) -> Unit)? = null
         override suspend fun load(): Map<String, PurchaseEvidence> {
@@ -3383,7 +4601,7 @@ class PurchaseServiceTest {
         }
         override suspend fun upsert(evidence: PurchaseEvidence): Boolean {
             actions += "persist"
-            if (failEvidenceUpserts) return false
+            if (failEvidenceUpserts || rejectEvidenceUpsert?.invoke(evidence) == true) return false
             entries[evidence.purchaseToken] = evidence
             return true
         }

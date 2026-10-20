@@ -25,6 +25,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import ai.nuxie.sdk.identity.CustomerKind
 
 @RunWith(RobolectricTestRunner::class)
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
@@ -91,7 +92,7 @@ class PurchaseEvidenceStoreTest {
                 packageName = "com.example.app",
                 storeProductIds = listOf("play-pro"),
                 purchaseState = StoredPurchaseState.PURCHASED,
-                syncAttributionDistinctId = "customer-1",
+                buyerDistinctId = "customer-1",
                 acknowledged = false,
                 firstSeenMillis = 1L,
             )
@@ -197,8 +198,10 @@ class PurchaseEvidenceStoreTest {
                 packageName = "com.example.app",
                 storeProductIds = listOf("pro"),
                 purchaseState = StoredPurchaseState.PURCHASED,
-                syncAttributionDistinctId = "customer-1",
+                buyerDistinctId = "customer-1",
                 ownerDistinctId = "customer-1",
+                refused = true,
+                pendingSend = PurchaseSend(PurchaseSyncReason.RESTORE, "restoring-customer", CustomerKind.IDENTIFIED),
                 context = StoredPurchaseContext(
                     "primary",
                     "experience-1",
@@ -211,13 +214,9 @@ class PurchaseEvidenceStoreTest {
                 syncAttempts = 1,
                 completionAttempts = 2,
                 firstSeenMillis = 123L,
-                acceptedResponseBody = Json.parseToJsonElement(
-                    """{"success":true,"features":[{"id":"pro","type":"boolean","allowed":true}]}""",
-                ).jsonObject,
                 signatureVerificationRequired = true,
                 signatureVerified = true,
                 authorityScope = "authority-scope",
-                revoked = true,
                 backendSyncedAtMillis = 456L,
             )
             assertTrue(FilePurchaseEvidenceStore(directory).upsert(evidence))
@@ -233,6 +232,53 @@ class PurchaseEvidenceStoreTest {
     }
 
     @Test
+    fun anEntryWrittenBeforeTheOutboxReadsItsAnswerFromItsPreviousFields(): Unit = kotlinx.coroutines.runBlocking {
+        val directory = Files.createTempDirectory("nuxie-purchase-evidence").toFile()
+        try {
+            // The format before the outbox: the answer in `synced` and
+            // `permanentlyRejected`, the requester in `syncAttributionDistinctId`,
+            // and in `ownerDistinctId` the SDK's own guess at the owner.
+            fun previous(token: String, synced: Boolean, rejected: Boolean, state: String = "PURCHASED") =
+                """"$token":{"purchaseToken":"$token","packageName":"com.example.app","storeProductIds":["pro"],""" +
+                    """"purchaseState":"$state","syncAttributionDistinctId":"requester","ownerDistinctId":"guessed-owner",""" +
+                    """"acknowledged":true,"consumed":false,"synced":$synced,"permanentlyRejected":$rejected,""" +
+                    """"syncAttempts":3,"completionAttempts":0,"firstSeenMillis":1}"""
+            File(directory, "purchase-evidence.json").writeText(
+                "{" + listOf(
+                    previous("accepted", synced = true, rejected = false),
+                    previous("refused", synced = false, rejected = true),
+                    previous("unanswered", synced = false, rejected = false),
+                    previous("pending", synced = false, rejected = false, state = "PENDING"),
+                ).joinToString(",") + "}",
+            )
+
+            val loaded = FilePurchaseEvidenceStore(directory).load()
+
+            val accepted = loaded.getValue("accepted")
+            assertEquals("The server accepted it for its requester", "requester", accepted.ownerDistinctId)
+            assertEquals(null, accepted.pendingSend)
+            assertFalse(accepted.refused)
+            assertEquals(0, accepted.syncAttempts)
+            val refused = loaded.getValue("refused")
+            assertEquals(null, refused.ownerDistinctId)
+            assertEquals(null, refused.pendingSend)
+            assertTrue("Answered: never sent again on its own", refused.refused)
+            val unanswered = loaded.getValue("unanswered")
+            assertEquals("The SDK's guess is not the server's word", null, unanswered.ownerDistinctId)
+            assertEquals(
+                "Unanswered: an outbox entry, a sync for a signed-in customer",
+                PurchaseSend(PurchaseSyncReason.SYNC, "requester", CustomerKind.IDENTIFIED),
+                unanswered.pendingSend,
+            )
+            assertEquals(3, unanswered.syncAttempts)
+            assertEquals("requester", unanswered.buyerDistinctId)
+            assertEquals("Not purchased yet: nothing to send", null, loaded.getValue("pending").pendingSend)
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun fileStoreDistinguishesAbsentEmptyAndPopulatedPinnedAllowances(): Unit = kotlinx.coroutines.runBlocking {
         val directory = Files.createTempDirectory("nuxie-pinned-purchase-allowances").toFile()
         try {
@@ -242,7 +288,7 @@ class PurchaseEvidenceStoreTest {
                 storeProductIds = listOf("play-product"),
                 nuxieProductId = "nuxie-product",
                 purchaseState = StoredPurchaseState.PURCHASED,
-                syncAttributionDistinctId = "customer-1",
+                buyerDistinctId = "customer-1",
                 ownerDistinctId = "customer-1",
                 acknowledged = false,
                 firstSeenMillis = 123L,
@@ -323,7 +369,7 @@ class PurchaseEvidenceStoreTest {
                 packageName = "com.example.app",
                 storeProductIds = listOf("pro"),
                 purchaseState = StoredPurchaseState.PURCHASED,
-                syncAttributionDistinctId = "customer-1",
+                buyerDistinctId = "customer-1",
                 ownerDistinctId = "customer-1",
                 acknowledged = false,
                 firstSeenMillis = 123L,

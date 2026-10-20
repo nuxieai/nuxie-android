@@ -90,8 +90,10 @@ sealed interface PurchaseResult {
 
 /** The result of asking the configured purchase system to restore purchases. */
 sealed interface RestoreResult {
+    /** With Google Play, Nuxie restored at least one purchase to the current customer. */
     data object Restored : RestoreResult
     data object NoPurchases : RestoreResult
+    /** Includes a purchase Nuxie refused to restore, such as one a signed-in customer owns. */
     data class Failed(val cause: Throwable) : RestoreResult
 }
 

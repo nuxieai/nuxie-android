@@ -66,6 +66,7 @@ Test each applicable product type and exact offer selection.
 | Pending payment, then approval or cancellation | Pending creates no terminal checkout outcome or access grant; restart while pending; approval reconciles through the normal native recovery path, cancellation leaves access unchanged |
 | Backend unavailable after Play success | Evidence survives process death; recovery later converges without a second purchase or duplicate grant; inspect both immediate SDK state and authoritative Feature state |
 | Restore with a stable customer | Same eligible native purchase converges to its existing lineage; no duplicate grant; an empty restore and an unavailable/rejected backend remain distinguishable |
+| Restore by another customer | A signed-in customer's Restore moves the purchase to them and the previous owner loses access on each device once its next profile arrives (offline, a cached profile keeps showing it until then); an anonymous customer's Restore of a signed-in customer's purchase reports Failed and grants nothing; app start and sign-in never move it |
 | Customer changes during checkout | Outcome remains bound to the initiating customer; another customer cannot claim already-owned native evidence |
 | Consumable repeat purchase | Consumption follows acceptance and permits a later independent purchase; each grant is counted once |
 | Subscription lifecycle | Renewals, cancellation, expiry, grace/hold and recovery produce the expected verified Feature state without relying on accelerated test timing |

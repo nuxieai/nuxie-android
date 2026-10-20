@@ -4,7 +4,10 @@ import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.billing.NuxieApiPurchaseSynchronizer
 import ai.nuxie.sdk.billing.PurchaseEvidence
 import ai.nuxie.sdk.billing.PurchaseSyncOutcome
+import ai.nuxie.sdk.billing.PurchaseSyncReason
+import ai.nuxie.sdk.billing.PurchaseSyncRequest
 import ai.nuxie.sdk.billing.StoredPurchaseState
+import ai.nuxie.sdk.identity.CustomerKind
 import ai.nuxie.sdk.journey.JourneyResponseSave
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
@@ -34,7 +37,8 @@ class MainDispatcherNetworkTest {
             "/feature/consume" to { consumeFeature(JsonObject(emptyMap())) },
             "/entitled" to { checkFeature("customer", "feature", null, null) },
             "/purchase" to { postPurchase(NuxieApi.PlayPurchaseReport("product", "token", null,
-                offerId = null, obfuscatedAccountId = null, distinctId = "customer")) },
+                offerId = null, obfuscatedAccountId = null, distinctId = "customer",
+                reason = PurchaseSyncReason.SYNC, customerKind = CustomerKind.ANONYMOUS)) },
             "/feature/consume" to { useFeatureWithPurchase(NuxieApi.PurchaseBackedFeatureUseReport(
                 "customer", "feature", 1.0, NuxieApi.FeatureUseEventData(1.0, null), null,
                 NuxieApi.PlayPurchaseUseReport("test.package", "product", "token", null,
@@ -68,9 +72,9 @@ class MainDispatcherNetworkTest {
         val caught = assertThrows(CancellationException::class.java) {
             runBlocking { NuxieApiPurchaseSynchronizer(api).sync(PurchaseEvidence(
                 purchaseToken = "token", packageName = "test.package", storeProductIds = listOf("product"),
-                purchaseState = StoredPurchaseState.PURCHASED, syncAttributionDistinctId = "customer",
-                acknowledged = true, synced = true, firstSeenMillis = 1L,
-            )) }
+                purchaseState = StoredPurchaseState.PURCHASED, ownerDistinctId = "customer",
+                acknowledged = true, firstSeenMillis = 1L,
+            ), PurchaseSyncRequest(PurchaseSyncReason.SYNC, "customer", CustomerKind.ANONYMOUS)) }
         }
         assertEquals("controlled cancellation", caught.message)
     }
@@ -112,11 +116,14 @@ class MainDispatcherNetworkTest {
                     val evidence = PurchaseEvidence(
                         purchaseToken = "test-token", packageName = "test.package", storeProductIds = listOf("play-pro"),
                         productType = "subs", purchaseState = StoredPurchaseState.PURCHASED,
-                        syncAttributionDistinctId = "customer", ownerDistinctId = "customer", nuxieManaged = true,
-                        acknowledged = true, synced = true, firstSeenMillis = 1L, authorityScope = "test",
+                        ownerDistinctId = "customer", nuxieManaged = true,
+                        acknowledged = true, firstSeenMillis = 1L, authorityScope = "test",
                     )
                     val result = withContext(Dispatchers.Main.immediate) {
-                        NuxieApiPurchaseSynchronizer(api).sync(evidence)
+                        NuxieApiPurchaseSynchronizer(api).sync(
+                            evidence,
+                            PurchaseSyncRequest(PurchaseSyncReason.RESTORE, "customer", CustomerKind.IDENTIFIED),
+                        )
                     }
                     assertTrue("A retained purchase refresh must reach the backend from a Main caller", result is PurchaseSyncOutcome.Accepted)
                     assertEquals("POST /purchase HTTP/1.1", requestLine.get())
