@@ -1224,13 +1224,17 @@ internal class PurchaseService(
                 ),
             )
         }
+        // A refusal clears the refused purchase's owner, so the Restore's own
+        // answers are read before selecting purchases by the owner each has now.
+        if (results.values.any { it == SyncResult.REFUSED }) {
+            return RestoreResult.Failed(
+                RestoreReconciliationException("A restored purchase could not be verified."),
+            )
+        }
         val selected = found.mapNotNull { evidenceByToken[it.purchaseToken] }
             .filter { it.ownerDistinctId == initiatingOwner }
         return when {
             selected.isEmpty() -> RestoreResult.NoPurchases
-            selected.any { results[it.purchaseToken] == SyncResult.REFUSED } -> RestoreResult.Failed(
-                RestoreReconciliationException("A restored purchase could not be verified."),
-            )
             selected.any { !it.catalogResolved } -> RestoreResult.Failed(
                 RestoreReconciliationException(
                     "A restored purchase did not match one exact signed Product.",
