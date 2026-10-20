@@ -376,6 +376,8 @@ internal class JourneyService(
     private var initialized = false
     /** Fetches of each customer's copy that have not settled. */
     private val profileRefetchesInFlight = mutableMapOf<String, Int>()
+    /** An event left a due timeout for a pass at the current time. */
+    private var timeoutPassDue = false
     // Setup can run from a receiver, worker, or service before any Activity is
     // visible. Keep screen-bearing admission closed until the lifecycle
     // coordinator observes the first Activity entering the foreground.
@@ -1542,6 +1544,8 @@ internal class JourneyService(
         if (state != null && (identityScope.distinctId != state.distinctId || !isCurrent(state))) return
         if (event == null && !foreground.get()) return
         val currentJournal = journal?.takeIf { it.distinctId == identityScope.distinctId } ?: return
+        // This pass resolves every timeout due now.
+        if (event == null) timeoutPassDue = false
         val executionToken = if (state != null) {
             executionFence.token(state.executionFenceToken) ?: return
         } else {
@@ -1598,7 +1602,13 @@ internal class JourneyService(
             // event after it satisfies.
             val now = nowMillis()
             val timeoutClock = event?.let { minOf(it.timestampMillis, now) } ?: now
-            if (selected == null && park.wakeAtMillis?.let { it > timeoutClock } == true) continue
+            val wakeAt = park.wakeAtMillis
+            if (selected == null && wakeAt != null && wakeAt > timeoutClock) {
+                // Due now, but not when the event happened: the next wake
+                // resolves it once the events before it are handled.
+                if (wakeAt <= now) timeoutPassDue = true
+                continue
+            }
             beforeParkedResume()
             val resumed = profileFence.performIfCurrent(profileToken) {
                 publishJournalIfCurrent(executionToken, identityScope) {
@@ -3146,13 +3156,14 @@ internal class JourneyService(
     private suspend fun scheduleNextWake() {
         cancelWake()
         if (!foreground.get() || currentState() == null) return
-        val next = journal?.runs()?.asSequence()
+        val upcoming = journal?.runs()?.asSequence()
             ?.filter { it.completion == null }
             ?.mapNotNull { run -> run.park?.let { park ->
                 nativeRestoreRetryAt[run.id] ?: if (park.pendingEvent != null || park.candidateEvents.isNotEmpty())
                     nowMillis() else park.wakeAtMillis?.takeIf { it > nowMillis() }
             } }
-            ?.minOrNull() ?: return
+            ?.minOrNull()
+        val next = (if (timeoutPassDue) minOf(upcoming ?: Long.MAX_VALUE, nowMillis()) else upcoming) ?: return
         wakeGeneration += 1
         val generation = wakeGeneration
         wakeJob = scope.launch {

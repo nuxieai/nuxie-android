@@ -24,7 +24,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -207,6 +209,28 @@ class JourneyRefetchEventHoldTest {
         launch.track("go")
         launch.eventLog.awaitBarrier()
         assertEquals("Routing is live again", 1, launch.starts("customer-b"))
+    }
+
+    /**
+     * An event captured before a wait's deadline but handled after it leaves
+     * that timeout to a pass at the current time, which still runs.
+     */
+    @Test fun `a late event does not strand a wait that is due`() = runBlocking {
+        val launch = Launch("customer")
+        val saved = launch.copy("customer", 1, "start_waiting")
+        launch.start()
+        launch.commit("customer", saved)
+        launch.track("start_waiting")
+        val capturedAt = launch.clock.get() + 30_000L
+        launch.clock.addAndGet(70_000L)
+        assertTrue(launch.journeys.handleEvent(
+            StoredEvent("late-event", "screen_viewed", timestampMillis = capturedAt, distinctId = "customer"),
+            launch.journeys.eventAdmissionGeneration(),
+        ))
+        withTimeout(5_000L) {
+            while (launch.outcomes("customer", "timed_out") == 0) delay(20)
+        }
+        assertEquals(0, launch.outcomes("customer", "took_go"))
     }
 
     /** One launch: Journey subscribed to a real EventLog as NuxieCore subscribes it. */

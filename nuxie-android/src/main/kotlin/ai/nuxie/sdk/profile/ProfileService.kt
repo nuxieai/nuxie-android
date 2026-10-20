@@ -331,8 +331,8 @@ internal class ProfileService(
 
     private suspend fun refreshSafely(): Boolean {
         val distinctId = identity.captureScope().distinctId
-        journeys.profileRefetchWillBegin(distinctId)
         return try {
+            journeys.profileRefetchWillBegin(distinctId)
             refreshNow()
         } catch (cancelled: CancellationException) {
             throw cancelled
