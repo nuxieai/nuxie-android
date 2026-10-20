@@ -135,5 +135,27 @@ class ExperienceLayerStepTest {
         val descriptor = kotlinx.serialization.json.Json.parseToJsonElement("""{"render":{"transitions":[]}}""") as kotlinx.serialization.json.JsonObject
         assertEquals(push, history.visit("b", null).backTransition(1, "a", descriptor))
         assertNull(history.backTransition(2, "a", descriptor))
+    }    @Test fun `skipping Back refuses route pairs and selects only usable compiler defaults`() {
+        val history = ExperienceLayerHistory(listOf("a")).visit("b", null).visit("c", null)
+        fun pair(id: String, marker: String?, swapped: Boolean = false, reverse: Boolean = true): String =
+            """{"id":"$id","kind":"layer","sourceScreenId":"${if (swapped) "a" else "c"}",
+                "destinationScreenId":"${if (swapped) "c" else "a"}","durationMs":100,"incomingOnTop":true,
+                "source":{"completeEventName":"leave"},"destination":{"completeEventName":"arrive"}
+                ${if (marker == null) "" else ",\"defaultPair\":$marker"}
+                ${if (!reverse) "" else ",\"reverse\":{\"source\":{\"completeEventName\":\"back-leave\"},\"destination\":{\"completeEventName\":\"back-arrive\"}}"}}"""
+        fun descriptor(vararg declarations: String) = kotlinx.serialization.json.Json.parseToJsonElement(
+            """{"render":{"transitions":[${declarations.joinToString(",")}]}}""") as kotlinx.serialization.json.JsonObject
+        val route = pair("route", null)
+        val notDefault = pair("false", "false")
+        assertNull("An unmarked route must not become the skipping Back plan", history.backTransition(2, "a", descriptor(route)))
+        assertNull(history.backTransition(2, "a", descriptor(notDefault)))
+        for (swapped in listOf(false, true)) {
+            val result = history.backTransition(2, "a", descriptor(route, notDefault, pair("default", "true", swapped)))
+            assertEquals(kotlinx.serialization.json.Json.parseToJsonElement("""{"type":"magic-move","transitionId":"default"}"""), result)
+        }
+        assertNull(history.backTransition(2, "a", descriptor(pair("unusable", "true", swapped = true, reverse = false))))
+        val recorded = kotlinx.serialization.json.Json.parseToJsonElement("""{"type":"push","transitionId":"route"}""") as kotlinx.serialization.json.JsonObject
+        assertEquals(recorded, ExperienceLayerHistory(listOf("a")).visit("c", recorded).backTransition(1, "a", descriptor(route)))
     }
+
 }

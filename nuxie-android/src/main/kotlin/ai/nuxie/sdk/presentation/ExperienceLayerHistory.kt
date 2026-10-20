@@ -24,7 +24,7 @@ internal data class ExperienceLayerHistory(val screens: List<String>,
         if (steps == 1) return transitions.last()
         val render = descriptor["render"] as kotlinx.serialization.json.JsonObject
         val pair = ai.nuxie.sdk.experiences.ExperienceLayerHostContract.transitions(render).firstOrNull {
-            it.resolve(screens.last(), target) != null
+            it.isDefaultPair && it.resolve(screens.last(), target) != null
         } ?: return null
         return kotlinx.serialization.json.buildJsonObject {
             put("type", kotlinx.serialization.json.JsonPrimitive("magic-move"))

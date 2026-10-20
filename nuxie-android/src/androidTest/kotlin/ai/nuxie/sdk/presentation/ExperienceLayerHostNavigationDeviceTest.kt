@@ -56,7 +56,8 @@ class ExperienceLayerHostNavigationDeviceTest {
         val revealedPhases = CopyOnWriteArrayList<Long?>()
         val retirements = java.util.concurrent.ConcurrentHashMap<String, CountDownLatch>()
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
-        val activity: Activity
+        var activity: Activity
+            private set
         init {
             assertTrue(NuxieRuntime.shared.isAvailable)
             instrumentation.addMonitor(monitor)
@@ -119,6 +120,19 @@ class ExperienceLayerHostNavigationDeviceTest {
             assertTrue("Incoming row activation", ready.await(15, TimeUnit.SECONDS))
             checkFailure()
             return mounted().surface
+        }
+        fun recreate() {
+            val previous = activity
+            val phases = revealedPhases.size
+            val recreation = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
+            instrumentation.addMonitor(recreation)
+            try {
+                instrumentation.runOnMainSync { previous.recreate() }
+                activity = checkNotNull(recreation.waitForActivityWithTimeout(15_000))
+            } finally { instrumentation.removeMonitor(recreation) }
+            assertNotSame(previous, activity)
+            eventually { revealedPhases.size > phases }
+            checkFailure()
         }
         fun checkFailure() { failures.get()?.let { throw AssertionError("Layer failed", it) } }
         override fun close() {
@@ -247,6 +261,41 @@ class ExperienceLayerHostNavigationDeviceTest {
                 }
             } finally { directory.deleteRecursively() }
         }
+    }
+
+    @Test fun revisitedScreenKeepsItsLifecycleAndAuthoredValuesAcrossActivityRecreation() = runBlocking {
+        val directory = directory()
+        try {
+            var a = intermediate(directory)
+            Harness(a).use { harness ->
+                val first = harness.mounted().surface
+                first.layerOperation { it.applyJourneyValuesOnLane("screen_1", mapOf("keptValue" to NuxieViewModelScalarValue.NumberValue(42.0))) }
+                suspend fun revisit(staleLifecycle: Boolean = false) {
+                    val b = a.copy(screenId = "screen_2", artboardName = "Upsell", transition = pair,
+                        retainedViewModel = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle())
+                    harness.navigate(b)
+                    a = a.copy(transition = pair, isBack = true, screenLifecycle = if (staleLifecycle)
+                        ExperienceScreenLifecycle() else a.screenLifecycle.copyForPreparation())
+                    harness.navigate(a)
+                }
+                revisit()
+                assertEquals(2L, (first.layerOperation { it.snapshotOnLane("screen_1").resolveScalar(listOf("screen", "appearances")) }
+                    as NuxieViewModelScalarValue.NumberValue).value.toLong())
+                for (appearances in listOf(2L, 3L)) {
+                    val before = harness.mounted().surface
+                    harness.recreate()
+                    val restored = harness.mounted().surface
+                    assertNotSame(before, restored)
+                    val values = restored.layerOperation { it.snapshotOnLane("screen_1") }
+                    assertEquals("Recreation must preserve the cumulative appearance count", appearances,
+                        (values.resolveScalar(listOf("screen", "appearances")) as NuxieViewModelScalarValue.NumberValue).value.toLong())
+                    assertEquals(42.0, (values.resolveScalar(listOf("keptValue")) as NuxieViewModelScalarValue.NumberValue).value, 0.01)
+                    assertEquals(appearances.toULong(), a.screenLifecycle.appearances)
+                    assertEquals(ExperienceScreenLifecycle.Phase.ACTIVE, a.screenLifecycle.phase)
+                    if (appearances == 2L) revisit(staleLifecycle = true)
+                }
+            }
+        } finally { directory.deleteRecursively() }
     }
 
     @Test fun rowInitiatedCaptureDeliversBothHalvesAndARemovedRowsLateAdvance() = runBlocking {

@@ -127,7 +127,7 @@ internal class ExperienceSurfaceHost(
         val completion = CompletableDeferred<T>()
         val accepted = lane.enqueue {
             pendingTextWrites.addLast {
-                try {
+                if (completion.isActive) try {
                     check(!released.get() && !failureReported.get()) { "Layer surface is unavailable" }
                     completion.complete(work(checkNotNull(interactiveLayer)))
                 } catch (error: Throwable) { completion.completeExceptionally(error) }
@@ -135,12 +135,26 @@ internal class ExperienceSurfaceHost(
             drainTextWrites()
         }
         if (!accepted) completion.cancel()
-        return completion.await()
+        try {
+            if (kotlinx.coroutines.withTimeoutOrNull(250) { completion.await(); true } != true) {
+                retireStalledLayerSubmission(completion)
+            }
+            return completion.await()
+        } finally { completion.cancel() }
+    }
+
+    private suspend fun retireStalledLayerSubmission(completion: kotlinx.coroutines.Deferred<*>) = lane.call {
+        if (!completion.isCompleted) {
+            check(retireSubmission()) { "Experience layer submission retirement failed" }
+            drainTextWrites()
+            settleHiddenTransitions(force = true)
+        }
     }
 
     internal suspend fun prepareLayerRow(prepared: PreparedPresentation) = layerOperation { layer ->
         val id = checkNotNull(prepared.screenId)
-        layer.prepareOnLane(id, projection = prepared.viewModelProjection, snapshot = prepared.retainedViewModel.get())
+        layer.prepareOnLane(id, projection = prepared.viewModelProjection, snapshot = prepared.retainedViewModel.get(),
+            lifecycle = prepared.screenLifecycle)
         layerRetainedValues[id] = prepared.retainedViewModel
         layer.applyRuntimeValuesOnLane(id, runtimeValues.filterKeys {
             it == "fontScale" || it == "env/reduceMotion" || it.startsWith("safeArea/")
@@ -168,13 +182,7 @@ internal class ExperienceSurfaceHost(
             if (kotlinx.coroutines.withTimeoutOrNull(presentationTimeoutMs) { completion.await(); true } == true) return true
             // A healthy renderer may never present. Retire its submission before settling the
             // phase on the lane, so later row mutations cannot race that submitted revision.
-            lane.call {
-                if (!completion.isCompleted) {
-                    check(retireSubmission()) { "Experience phase retirement failed" }
-                    drainTextWrites()
-                    settleHiddenTransitions(force = true)
-                }
-            }
+            retireStalledLayerSubmission(completion)
             completion.await()
             return false
         } finally { completion.cancel() }
@@ -201,9 +209,11 @@ internal class ExperienceSurfaceHost(
 
     internal suspend fun restoreLayerRow(sourceId: String, targetId: String) = layerOperation { layer ->
         if (sourceId != targetId) {
-            if (targetId in layer.mountedScreenIdsOnLane()) captureLayerStep(layer.removeOnLane(targetId, nextCorrelationId++))
+            val targetMounted = targetId in layer.mountedScreenIdsOnLane()
+            if (targetMounted) captureLayerStep(layer.removeOnLane(targetId, nextCorrelationId++))
             if (sourceId !in layer.mountedScreenIdsOnLane()) layer.insertOnLane(sourceId, 0)
-            layer.setPhasesOnLane(listOf(targetId to ExperienceScreenLifecycle.Phase.HIDDEN,
+            // Cancelled preparation may not have created the target row.
+            layer.setPhasesOnLane(listOfNotNull((targetId to ExperienceScreenLifecycle.Phase.HIDDEN).takeIf { targetMounted },
                 sourceId to ExperienceScreenLifecycle.Phase.ACTIVE))
         }
         publishSteps()
@@ -569,8 +579,10 @@ internal class ExperienceSurfaceHost(
             try {
                 write.apply?.invoke()
                 runtimeValues.putAll(write.values)
-                if (write.apply == null) completeRuntimeWrites(applyRuntimeValues(runtimeValues))
-                runtimeValuesPending = false
+                if (write.apply == null || runtimeValuesPending || pendingRuntimeWrites.isNotEmpty()) {
+                    completeRuntimeWrites(applyRuntimeValues(runtimeValues))
+                    runtimeValuesPending = false
+                }
                 presentedTransitionWrite = write
             } catch (error: Throwable) {
                 write.completion.completeExceptionally(error)
@@ -830,12 +842,15 @@ internal class ExperienceSurfaceHost(
                     artboard = layer.artboard
                     player = layer.player
                     val id = checkNotNull(layerScreen.screenId)
-                    layer.prepareOnLane(id, projection = viewModelProjection, snapshot = layerScreen.retainedViewModel.get())
+                    layer.prepareOnLane(id, projection = viewModelProjection, snapshot = layerScreen.retainedViewModel.get(),
+                        lifecycle = layerScreen.screenLifecycle)
                     layerRetainedValues[id] = layerScreen.retainedViewModel
                     activeRowId = id
                     viewModelState = layer.valuesOnLane(id)
                     layer.insertOnLane(id, 0)
-                    layer.setPhasesOnLane(listOf(id to ExperienceScreenLifecycle.Phase.ENTERING))
+                    if (layerScreen.screenLifecycle.phase == ExperienceScreenLifecycle.Phase.HIDDEN)
+                        layer.setPhasesOnLane(listOf(id to ExperienceScreenLifecycle.Phase.ENTERING))
+                    else layer.applyLifecycleOnLane(id)
                     completeRuntimeWrites(applyRuntimeValues(runtimeValues))
                     if (semanticsEnabled) layer.player.enableSemantics()
                     if (videoBindings.isNotEmpty()) {
