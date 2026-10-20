@@ -107,6 +107,26 @@ class SharedValuesDeviceTest {
         } finally { directory.deleteRecursively() }
     }
 
+    @Test fun stateRulesKeepTheLastValueThatHeldThemOnThePublishedScreen() = runBlocking {
+        assertTrue(ai.nuxie.sdk.runtime.NuxieRuntime.shared.isAvailable)
+        val assets = InstrumentationRegistry.getInstrumentation().context.assets
+        val engine = Json.parseToJsonElement(assets.open("runtime/state-rules/policy.json")
+            .use { it.readBytes() }.decodeToString()).jsonObject.getValue("engine").jsonObject
+        val property = engine.getValue("property").jsonPrimitive.content
+        val descriptor = JsonObject(PublishedRunValuesFixture.descriptor + ("stateRules" to engine.getValue("rules")))
+        ai.nuxie.sdk.experiences.JourneyReleaseValuePolicy.parse(descriptor)
+        val run = ExperienceRunValues()
+        try { run.lane.call {
+            val values = checkNotNull(run.prepare(PublishedRunValuesFixture.bytes, descriptor, emptyMap()).values)
+            for (write in engine.getValue("writes").jsonArray.map { it.jsonObject }) {
+                val value = write.getValue("value").jsonPrimitive.double
+                values.setValue(property, NuxieViewModelScalarValue.NumberValue(value))
+                assertEquals("writing $value", NuxieViewModelScalarValue.NumberValue(write.getValue("kept").jsonPrimitive.double),
+                    values.snapshot().resolveScalar(listOf(property)))
+            }
+        } } finally { run.retire() }
+    }
+
     @Test fun nativePolicyRejectsModelAbsentFromFile() = runBlocking {
         val runtime = ai.nuxie.sdk.runtime.NuxieRuntime.shared
         assertTrue(runtime.isAvailable)
