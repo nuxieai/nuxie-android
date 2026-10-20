@@ -1,0 +1,7 @@
+{
+  "source": "fixtures/runtime/layer-host-interim/layer-host.riv",
+  "sourceSHA256": "bfeff40c394ce1307e611ed312c96b297b661d92048d3ca5ed737bfca3e47103",
+  "generator": "/Users/levi/dev/nuxie-handoff/recreation-loop/magic-move-sdk-playback/tools/make-android-layer-host-import-probe.py",
+  "outputSHA256": "7bd5422f628fda6e5561374687f9430dfb41a0ef01d252778d515b914b72175e",
+  "change": "Two FileAssetContents records removed. All other objects, rows, machines and timelines are unchanged. Source release supplies exact external bytes."
+}

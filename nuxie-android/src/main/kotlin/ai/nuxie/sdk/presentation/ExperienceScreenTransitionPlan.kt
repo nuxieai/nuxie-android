@@ -26,6 +26,15 @@ internal data class ExperienceScreenTransitionPlan(
     fun shouldAnimate(reduceMotion: Boolean): Boolean = kind != Kind.NONE && !reduceMotion
 
     companion object {
+        fun resolveLayer(intent: JsonObject?, descriptor: JsonObject, source: String, destination: String): Custom? {
+            val id = intent?.let(ai.nuxie.sdk.experiences.ExperienceLayerHostContract::intent)?.transitionId ?: return null
+            val render = descriptor["render"] as JsonObject
+            val declaration = ai.nuxie.sdk.experiences.ExperienceLayerHostContract.transitions(render).firstOrNull { it.id == id }
+                ?: return null
+            val edge = declaration.resolve(source, destination) ?: return null
+            return Custom(id, edge.durationMs, edge.incomingOnTop, edge.outgoingCompletionEvent, edge.incomingCompletionEvent)
+        }
+
         fun resolve(
             intent: JsonObject?,
             declarations: JsonArray,
