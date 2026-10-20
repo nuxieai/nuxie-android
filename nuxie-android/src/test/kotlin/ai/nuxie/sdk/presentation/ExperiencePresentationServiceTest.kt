@@ -33,6 +33,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.test.resetMain
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
@@ -2664,6 +2665,87 @@ class ExperiencePresentationServiceTest {
             sharedValues.retire()
             PresentationRegistry.clearForTesting()
         }
+    }
+
+    @Test
+    fun `layer navigation queues Back until the forward pair is recorded and self navigation waits too`() = runTest {
+        val signed = renderedJourneyRelease("text-input-navigation.json")
+        val field = signed.javaClass.getDeclaredField("envelope").apply { isAccessible = true }
+        val render = signed.descriptor.getValue("render").jsonObject
+        val declaration = Json.parseToJsonElement("""{"id":"pair","kind":"layer","sourceScreenId":"screen_welcome",
+            "destinationScreenId":"screen_details","durationMs":400,"incomingOnTop":true,
+            "source":{"completeEventName":"leave"},"destination":{"completeEventName":"arrive"},
+            "reverse":{"incomingOnTop":false,"source":{"completeEventName":"back-leave"},"destination":{"completeEventName":"back-arrive"}}}""").jsonObject
+        // Unsigned interim metadata exercises service ordering, independent of publisher admission.
+        val release = AuthenticatedJourneyRelease(field.get(signed) as ai.nuxie.sdk.experiences.JourneyReleaseEnvelope,
+            signed.identity, JsonObject(signed.descriptor + ("render" to JsonObject(render + mapOf(
+                "layerHost" to Json.parseToJsonElement("""{"artboardName":"LayerList","list":"screens"}"""),
+                "transitions" to JsonArray(listOf(declaration)))))), null)
+        val launched = mutableListOf<String>()
+        val service = service(this, launch = launched::add)
+        val gate = CompletableDeferred<Unit>()
+        val prepared = mutableListOf<PreparedPresentation>()
+        val revealSources = mutableListOf<Pair<String, String>>()
+        var currentId: String? = null
+        fun host(id: String): PresentationScreenHandle = object : PresentationScreenHandle {
+            var reason: CloseReason? = null
+            override fun requestCloseFromService(reason: CloseReason): Boolean { this.reason = reason; return true }
+            override fun screenCloseReason() = reason
+            override fun finishAfterServiceClose() {
+                if (reason != CloseReason.JourneyNavigation) PresentationRegistry.detach(id, this)
+            }
+            override suspend fun prepareNavigation(target: String, content: PreparedPresentation): PreparedScreenNavigation {
+                prepared += content
+                val source = this
+                return object : PreparedScreenNavigation {
+                    override suspend fun awaitExit() { if (prepared.size == 1) gate.await() }
+                    override fun activate() {
+                        PresentationRegistry.attach(target, host(target))
+                        currentId = target
+                        PresentationRegistry.detach(id, source)
+                        PresentationRegistry.reportFirstFrame(target)
+                    }
+                    override suspend fun abort() = Unit
+                }
+            }
+        }
+        suspend fun show(screen: String, transition: JsonObject? = null) = service.presentJourney(testPresentationFences(),
+            release, screen, "journey-1", "customer-1", if (currentId == null) service.reserveJourney("customer-1") else null,
+            acquire = { acquired(release.identity, Lease()) }, onOutcome = {}, transition = transition,
+            onPresentationRevealed = { revealSources += screen to it })
+        val first = async { show("screen_welcome") }
+        runCurrent()
+        currentId = launched.single()
+        PresentationRegistry.attach(currentId!!, host(currentId!!))
+        PresentationRegistry.reportFirstFrame(currentId!!)
+        first.await()
+        val push = Json.parseToJsonElement("""{"type":"push","transitionId":"pair"}""").jsonObject
+        val forward = async { show("screen_details", push) }
+        runCurrent()
+        val self = async { show("screen_details") }
+        val back = async { service.dispatchJourneyAction(JourneyPresentationOwner("journey-1", "customer-1"),
+            Json.parseToJsonElement("""{"type":"back"}""").jsonObject, "queued-back") }
+        runCurrent()
+        assertFalse(forward.isCompleted); assertFalse(self.isCompleted); assertFalse(back.isCompleted)
+        assertEquals(1, prepared.size)
+        gate.complete(Unit)
+        forward.await(); self.await()
+        assertEquals(JourneyPresentationActionResult.Navigate("screen_welcome"), back.await())
+        assertEquals(listOf(listOf("screen_welcome", "screen_details")), service.layerScreenIds())
+        show("screen_welcome")
+        assertTrue(prepared.last().isBack)
+        assertEquals(push, prepared.last().transition)
+        val resolved = ExperienceScreenTransitionPlan.resolveLayer(prepared.last().transition, release.descriptor,
+            "screen_details", "screen_welcome")!!
+        assertFalse(resolved.incomingOnTop)
+        assertEquals("back-leave", resolved.outgoingCompletionEvent)
+        show("screen_details", push)
+        assertTrue(checkNotNull(prepared.last().requestBack).invoke())
+        runCurrent()
+        assertEquals("screen_welcome", service.journeyScreenId(JourneyPresentationOwner("journey-1", "customer-1")))
+        assertEquals("screen_welcome" to "screen_welcome", revealSources.last())
+        assertTrue(prepared.last().isBack)
+        service.dismissFromHost("customer-1")
     }
 
     private fun service(
