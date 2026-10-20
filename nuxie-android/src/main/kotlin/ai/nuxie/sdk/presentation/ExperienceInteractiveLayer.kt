@@ -33,8 +33,8 @@ internal class ExperienceInteractiveLayer private constructor(
         val products: List<StoreProduct>,
         val textInputs: List<ExperienceTextInput>,
         val routing: JourneyRuntimeEmissionCoordinator?,
+        var lifecycle: ExperienceScreenLifecycle,
     ) {
-        var lifecycle = ExperienceScreenLifecycle()
         val completions = linkedMapOf<CompletableDeferred<Unit>, String>()
     }
     private val rows = linkedMapOf<String, Row>()
@@ -63,9 +63,16 @@ internal class ExperienceInteractiveLayer private constructor(
 
     internal fun prepareOnLane(screenId: String, products: List<StoreProduct> = emptyList(),
         routing: JourneyRuntimeEmissionCoordinator? = null,
-        projection: NuxieViewModelListProjection? = null, snapshot: NuxieViewModelSnapshot? = null): Boolean = checked {
-        if (screenId in rows) return@checked false
-        rows[screenId] = prepareRow(screenId, products, routing, projection, snapshot)
+        projection: NuxieViewModelListProjection? = null, snapshot: NuxieViewModelSnapshot? = null,
+        lifecycle: ExperienceScreenLifecycle? = null): Boolean = checked {
+        rows[screenId]?.let { row ->
+            lifecycle?.let {
+                it.restoreRetainedState(row.lifecycle)
+                row.lifecycle = it
+            }
+            return@checked false
+        }
+        rows[screenId] = prepareRow(screenId, products, routing, projection, snapshot, lifecycle ?: ExperienceScreenLifecycle())
         true
     }
 
@@ -125,14 +132,14 @@ internal class ExperienceInteractiveLayer private constructor(
     }
 
     private fun prepareRow(screenId: String, products: List<StoreProduct>, routing: JourneyRuntimeEmissionCoordinator?,
-        preparedProjection: NuxieViewModelListProjection? = null, snapshot: NuxieViewModelSnapshot? = null): Row {
+        preparedProjection: NuxieViewModelListProjection?, snapshot: NuxieViewModelSnapshot?, lifecycle: ExperienceScreenLifecycle): Row {
         val selection = ExperienceLayerHostContract.rowSelection(descriptor, screenId, file.viewModelCatalog())
         val projection = preparedProjection ?: GooglePlayProductViewModelProjection.prepare(descriptor, products, screenId)
         val values = snapshot?.let { runtime.restoreRowViewModel(file, it.withoutRootProperty("experience")) } ?: runtime.bindRowViewModel(file, selection.schemaIndex, selection.authoredInstanceIndex,
             selection.defaultInstanceId, ExperienceViewModelBinding.instanceBindings(descriptor), projection)
         try {
             sharedExperience?.let { check(values.linkViewModel("experience", it)) { "Screen lacks its shared Experience link" } }
-            return Row(selection, values, products.toList(), ExperienceTextInput.forScreen(descriptor, screenId), routing)
+            return Row(selection, values, products.toList(), ExperienceTextInput.forScreen(descriptor, screenId), routing, lifecycle)
         } catch (error: Throwable) {
             runCatching { values.close() }.exceptionOrNull()?.let(error::addSuppressed)
             throw error
@@ -149,13 +156,22 @@ internal class ExperienceInteractiveLayer private constructor(
         phases.forEach { row(it.first) }
         for ((id, phase) in phases) {
             val row = row(id)
-            val values = row.lifecycle.move(phase, transition, exitReason)
-            for ((path, value) in values) {
-                if (path.startsWith("env/")) continue
-                if (path == "fontScale" && !row.values.snapshot().containsValue(path)) continue
-                if (path == "screen/exitReason" && !row.values.supportsEnumPath(path)) continue
-                row.values.setValue(path, value)
-            }
+            writeLifecycle(row, row.lifecycle.move(phase, transition, exitReason))
+        }
+    }
+
+    /** Recreated rows restore their current phase without counting another appearance. */
+    internal fun applyLifecycleOnLane(screenId: String) = checked {
+        val row = row(screenId)
+        writeLifecycle(row, row.lifecycle.snapshot())
+    }
+
+    private fun writeLifecycle(row: Row, values: Map<String, NuxieViewModelScalarValue>) {
+        for ((path, value) in values) {
+            if (path.startsWith("env/")) continue
+            if (path == "fontScale" && !row.values.snapshot().containsValue(path)) continue
+            if (path == "screen/exitReason" && !row.values.supportsEnumPath(path)) continue
+            row.values.setValue(path, value)
         }
     }
 

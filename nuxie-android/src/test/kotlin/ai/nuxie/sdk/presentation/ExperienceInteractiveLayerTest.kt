@@ -227,6 +227,8 @@ class ExperienceInteractiveLayerTest {
         val freed = mutableListOf<String>()
         var renders = 0
         var detaches = 0
+        var presentation = 4
+        var onStep: () -> Unit = {}
         var globals = false
         val globalBindings = mutableListOf<Pair<String, Long>>()
         var allocated = 0
@@ -271,6 +273,7 @@ class ExperienceInteractiveLayerTest {
         }
         override fun stepPlayer(playerHandle: Long, inputs: List<NativePlayerInput>, pointers: List<NativePlayerPointer>, elapsedSeconds: Float, correlationId: Long, textRunNames: List<String>, focusInputs: List<NativeFocusInput>): NativeCallResult<NativePlayerStepOutcome> {
             trace += "step:$elapsedSeconds"
+            onStep()
             if (failStep) return NativeCallResult(11, null)
             return NativeCallResult(0,NativePlayerStepOutcome(true,IntArray(pointers.size),events,emptyArray(),emptyArray()))
         }
@@ -278,9 +281,10 @@ class ExperienceInteractiveLayerTest {
             globalBindings += name.decodeToString() to viewModelHandle
             return 0
         }
+        override fun resizeRenderer(rendererHandle: Long, width: Int, height: Int) = 0
         override fun attachRendererSurface(rendererHandle: Long, windowHandle: Long) = 0
         override fun detachRendererSurface(rendererHandle: Long): Int { detaches++; return 0 }
-        override fun renderAndPresent(rendererHandle: Long, playerHandle: Long, windowHandle: Long, clearColor: Int, layoutScaleFactor: Float): Int { renders++; return 4 }
+        override fun renderAndPresent(rendererHandle: Long, playerHandle: Long, windowHandle: Long, clearColor: Int, layoutScaleFactor: Float): Int { renders++; return presentation }
         override fun releaseWindow(handle: Long) { freed += "window" }
         override fun freeRenderer(handle: Long) { freed += "renderer" }
         override fun freePlayer(handle: Long) { freed += "player" }

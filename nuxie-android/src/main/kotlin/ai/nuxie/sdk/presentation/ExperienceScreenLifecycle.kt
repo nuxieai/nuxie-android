@@ -51,6 +51,27 @@ internal class ExperienceScreenLifecycle {
         it.fontScale = fontScale
     }
 
+    /** A kept row supplies its state to the new preparation owner without re-entering. */
+    internal fun restoreRetainedState(source: ExperienceScreenLifecycle) {
+        if (source === this) return
+        val retained = source.copyRetainedState()
+        synchronized(this) {
+            phase = retained.phase
+            appearances = retained.appearances
+            transition = retained.transition
+            exitReason = retained.exitReason
+            reduceMotion = retained.reduceMotion
+            fontScale = retained.fontScale
+        }
+    }
+
+    @Synchronized
+    private fun copyRetainedState(): ExperienceScreenLifecycle = copyForPreparation().also {
+        it.phase = phase
+        it.transition = transition
+        it.exitReason = exitReason
+    }
+
     /** Called only after an unrevealed native attempt has fully drained. */
     @Synchronized
     fun resetUnrevealedAttempt() {

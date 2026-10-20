@@ -38,6 +38,21 @@ class ExperienceLayerHostContractTest {
             JourneyRenderSchema.validate(JsonObject(render + ("unknown" to JsonNull)))
         }
     }
+    @Test fun `default pair fixture vectors validate optional strict boolean markers`() {
+        val baseline = render()
+        val outcomes = cases.getValue("defaultPairs").jsonArray.map { vector ->
+            val case = vector.jsonObject
+            val transitions = baseline.getValue("transitions").jsonArray.map {
+                JsonObject((it.jsonObject - "defaultPair") + if (case["omit"] == JsonPrimitive(true)) emptyMap()
+                    else mapOf("defaultPair" to case.getValue("value")))
+            }
+            val changed = JsonObject(baseline + ("transitions" to JsonArray(transitions)))
+            val accepted = runCatching { JourneyRenderSchema.validate(changed); ExperienceLayerHostContract.transitions(changed) }.isSuccess
+            case.getValue("accept").jsonPrimitive.boolean to accepted
+        }
+        assertEquals("Every imported defaultPairs vector must be exercised", outcomes.map { it.first }, outcomes.map { it.second })
+    }
+
     @Test fun `shared Journey vectors keep styles and transition identifiers`() {
         for (value in cases.getValue("journeyTransitions").jsonArray) {
             val case = value.jsonObject

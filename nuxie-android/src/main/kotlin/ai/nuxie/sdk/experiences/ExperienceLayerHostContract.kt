@@ -22,7 +22,8 @@ internal object ExperienceLayerHostContract {
     data class Endpoints(val durationMs: Long, val incomingOnTop: Boolean,
         val outgoingCompletionEvent: String, val incomingCompletionEvent: String)
     data class Transition(val id: String, val kind: Kind, val sourceScreenId: String,
-        val destinationScreenId: String, val forward: Endpoints, val reverse: Endpoints?) {
+        val destinationScreenId: String, val forward: Endpoints, val reverse: Endpoints?,
+        val isDefaultPair: Boolean = false) {
         fun resolve(source: String, destination: String): Endpoints? = when {
             source == sourceScreenId && destination == destinationScreenId -> forward
             source == destinationScreenId && destination == sourceScreenId -> reverse
@@ -81,7 +82,7 @@ internal object ExperienceLayerHostContract {
         Transition(JourneyReleaseSchema.releaseId(value["id"]), transitionKind(value["kind"]),
             JourneyReleaseSchema.releaseId(value["sourceScreenId"]),
             JourneyReleaseSchema.releaseId(value["destinationScreenId"]), endpoints(value),
-            value["reverse"]?.let { endpoints(record(it)) })
+            value["reverse"]?.let { endpoints(record(it)) }, value["defaultPair"]?.let(::boolean) ?: false)
     }
 
     /** Catalog defaults index the flat table; allocation takes a schema-local index. */
