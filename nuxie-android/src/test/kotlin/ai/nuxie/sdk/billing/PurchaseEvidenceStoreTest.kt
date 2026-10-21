@@ -232,74 +232,45 @@ class PurchaseEvidenceStoreTest {
     }
 
     @Test
-    fun anEntryWrittenBeforeTheOutboxReadsItsAnswerFromItsPreviousFields(): Unit = kotlinx.coroutines.runBlocking {
+    fun anEntryWrittenBeforeTheOutboxIsIgnoredAndDroppedOnTheNextWrite(): Unit = kotlinx.coroutines.runBlocking {
         val directory = Files.createTempDirectory("nuxie-purchase-evidence").toFile()
         try {
             // The format before the outbox: the answer in `synced` and
-            // `permanentlyRejected`, the requester in `syncAttributionDistinctId`,
-            // and in `ownerDistinctId` the SDK's own guess at the owner.
-            fun previous(token: String, synced: Boolean, rejected: Boolean, state: String = "PURCHASED") =
+            // `permanentlyRejected`, the requester in `syncAttributionDistinctId`.
+            fun previous(token: String, synced: Boolean, rejected: Boolean, revoked: Boolean = false) =
                 """"$token":{"purchaseToken":"$token","packageName":"com.example.app","storeProductIds":["pro"],""" +
-                    """"purchaseState":"$state","syncAttributionDistinctId":"requester","ownerDistinctId":"guessed-owner",""" +
+                    """"purchaseState":"PURCHASED","syncAttributionDistinctId":"requester","ownerDistinctId":"guessed-owner",""" +
                     """"acknowledged":true,"consumed":false,"synced":$synced,"permanentlyRejected":$rejected,""" +
-                    """"syncAttempts":3,"completionAttempts":0,"firstSeenMillis":1}"""
-            File(directory, "purchase-evidence.json").writeText(
+                    """"revoked":$revoked,"syncAttempts":3,"completionAttempts":0,"firstSeenMillis":1}"""
+            val file = File(directory, "purchase-evidence.json")
+            file.writeText(
                 "{" + listOf(
                     previous("accepted", synced = true, rejected = false),
                     previous("refused", synced = false, rejected = true),
                     previous("unanswered", synced = false, rejected = false),
-                    previous("pending", synced = false, rejected = false, state = "PENDING"),
+                    previous("refunded", synced = false, rejected = false, revoked = true),
                 ).joinToString(",") + "}",
             )
+            val store = FilePurchaseEvidenceStore(directory)
 
-            val loaded = FilePurchaseEvidenceStore(directory).load()
+            assertTrue("No record in the old format is read", store.load().isEmpty())
 
-            val accepted = loaded.getValue("accepted")
-            assertEquals("The server accepted it for its requester", "requester", accepted.ownerDistinctId)
-            assertEquals(null, accepted.pendingSend)
-            assertFalse(accepted.refused)
-            assertEquals(0, accepted.syncAttempts)
-            val refused = loaded.getValue("refused")
-            assertEquals(null, refused.ownerDistinctId)
-            assertEquals(null, refused.pendingSend)
-            assertTrue("Answered: never sent again on its own", refused.refused)
-            val unanswered = loaded.getValue("unanswered")
-            assertEquals("The SDK's guess is not the server's word", null, unanswered.ownerDistinctId)
-            assertEquals(
-                "Unanswered: an outbox entry, a sync for a signed-in customer",
-                PurchaseSend(PurchaseSyncReason.SYNC, "requester", CustomerKind.IDENTIFIED),
-                unanswered.pendingSend,
+            assertTrue(
+                store.upsert(
+                    PurchaseEvidence(
+                        purchaseToken = "current",
+                        packageName = "com.example.app",
+                        storeProductIds = listOf("pro"),
+                        purchaseState = StoredPurchaseState.PURCHASED,
+                        buyerDistinctId = "requester",
+                        pendingSend = PurchaseSend.admit(PurchaseSyncReason.PURCHASE, "requester", CustomerKind.ANONYMOUS),
+                        acknowledged = false,
+                        firstSeenMillis = 2,
+                    ),
+                ),
             )
-            assertEquals(3, unanswered.syncAttempts)
-            assertEquals("requester", unanswered.buyerDistinctId)
-            assertEquals("Not purchased yet: nothing to send", null, loaded.getValue("pending").pendingSend)
-        } finally {
-            directory.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun aPreviousEntryRevokedBeforeTheServerAnsweredMigratesAsAnOrdinaryUnansweredEntry(): Unit = kotlinx.coroutines.runBlocking {
-        val directory = Files.createTempDirectory("nuxie-purchase-evidence").toFile()
-        try {
-            // Written when Play stopped reporting a purchase the server never answered.
-            File(directory, "purchase-evidence.json").writeText(
-                """{"refunded":{"purchaseToken":"refunded","packageName":"com.example.app",""" +
-                    """"storeProductIds":["pro"],"purchaseState":"PURCHASED",""" +
-                    """"syncAttributionDistinctId":"requester","acknowledged":true,"consumed":false,""" +
-                    """"synced":false,"permanentlyRejected":false,"revoked":true,""" +
-                    """"syncAttempts":1,"completionAttempts":0,"firstSeenMillis":1}}""",
-            )
-
-            val refunded = FilePurchaseEvidenceStore(directory).load().getValue("refunded")
-
-            // Whether it unlocks early depends only on Play's latest report.
-            assertEquals(
-                PurchaseSend(PurchaseSyncReason.SYNC, "requester", CustomerKind.IDENTIFIED),
-                refunded.pendingSend,
-            )
-            assertEquals(null, refunded.ownerDistinctId)
-            assertFalse(refunded.refused)
+            assertEquals(setOf("current"), store.load().keys)
+            assertEquals("The next write drops them", setOf("current"), Json.parseToJsonElement(file.readText()).jsonObject.keys)
         } finally {
             directory.deleteRecursively()
         }
