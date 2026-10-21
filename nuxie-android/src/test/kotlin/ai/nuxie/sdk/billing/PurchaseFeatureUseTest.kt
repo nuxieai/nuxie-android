@@ -175,7 +175,11 @@ class PurchaseFeatureUseTest {
         transport.releaseFirst.countDown()
 
         use.await()
-        restoreA.await()
+        assertEquals(
+            "A's dropped claim is not counted: A's Restore found nothing it could claim",
+            RestoreResult.NoPurchases,
+            restoreA.await(),
+        )
         assertEquals(RestoreResult.Restored, restoreB.await())
         assertEquals(
             "A's claim from before it waited never reaches the server",

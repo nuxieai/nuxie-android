@@ -5277,6 +5277,39 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun anEarlierCheckoutsLateApprovalIsNeverANewerCheckoutsResult() = runTest {
+        val actions = mutableListOf<String>()
+        val fixture = fixture(this, actions = actions)
+        // The first checkout's purchase waits for approval.
+        val first = async { fixture.service.purchase(activity(), product(consumable = true), null) }
+        runCurrent()
+        val pendingFirst = playPurchase("first-token", state = StoredPurchaseState.PENDING).forCheckout(fixture)
+        fixture.service.onPurchasesUpdated(okUpdate(pendingFirst))
+        runCurrent()
+        assertEquals(PurchaseResult.Pending, first.await())
+
+        // A second checkout of the same product begins, and Play's query before it
+        // does not list the first purchase.
+        val second = async { fixture.service.purchase(activity(), product(consumable = true), null) }
+        runCurrent()
+        // The first purchase is approved while the second checkout is in flight.
+        fixture.service.onPurchasesUpdated(okUpdate(pendingFirst.copy(state = StoredPurchaseState.PURCHASED)))
+        runCurrent()
+        assertFalse("An earlier checkout's approval is not the newer checkout's result", second.isCompleted)
+
+        // The second checkout's own purchase is its result.
+        fixture.service.onPurchasesUpdated(okUpdate(playPurchase("second-token").forCheckout(fixture)))
+        runCurrent()
+        assertEquals(PurchaseResult.Purchased, second.await())
+        val firstEntry = fixture.store.load().getValue("first-token")
+        val secondEntry = fixture.store.load().getValue("second-token")
+        assertNotNull(firstEntry.checkoutId)
+        assertNotEquals(firstEntry.checkoutId, secondEntry.checkoutId)
+        assertEquals("Each checkout's completion, once", 2, actions.count { it == SystemEventNames.PURCHASE_COMPLETED })
+        fixture.close()
+    }
+
+    @Test
     fun noTimerSendsWhileTheOutboxIsOff() = runTest {
         val clock = { 1_800_000_000_000L + testScheduler.currentTime }
         val store = RecordingEvidenceStore()
