@@ -4898,6 +4898,32 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun eachAcceptedAdmissionIsReportedOnceForItsCustomer() = runTest {
+        val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
+        val fixture = fixture(this, emissions = emissions)
+        // A's purchase, already accepted for A and reported for A.
+        fixture.store.upsert(retainedRestoreEvidence("customer-a"))
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("refresh-token", obfuscatedAccountId = accountHash("customer-a")).copy(acknowledged = true),
+        )
+        fun syncedFor(customer: String) = emissions.count { (name, properties) ->
+            name == SystemEventNames.PURCHASE_SYNCED && properties["customer_id"] == customer
+        }
+
+        // B restores it and the server accepts B's claim.
+        fixture.core.identity.setDistinctId("customer-b")
+        fixture.synchronizer = { accepted("customer-b", it) }
+        assertEquals(RestoreResult.Restored, fixture.service.restorePurchases())
+        assertEquals("B's accepted Restore is reported for B", 1, syncedFor("customer-b"))
+
+        // Processing the same acceptance again reports nothing more.
+        fixture.service.recover()
+        assertEquals(1, syncedFor("customer-b"))
+        assertEquals(0, syncedFor("customer-a"))
+        fixture.close()
+    }
+
+    @Test
     fun authenticatedRestoreWaitsForBackendVerification() = runTest {
         val fixture = fixture(this)
         val owner = fixture.core.identity.distinctId()

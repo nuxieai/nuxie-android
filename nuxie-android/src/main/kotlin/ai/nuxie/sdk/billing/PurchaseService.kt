@@ -676,7 +676,11 @@ internal class PurchaseService(
                 if (!capturePurchaseSynced(
                         SystemEventNames.PURCHASE_SYNCED,
                         properties,
-                        purchaseSyncedEventId(distinctId, evidence.purchaseToken),
+                        purchaseSyncedEventId(
+                            distinctId,
+                            evidence.purchaseToken,
+                            evidence.pendingSend?.admissionId ?: PurchaseSend.UNRECORDED_ADMISSION_ID,
+                        ),
                         distinctId,
                     )
                 ) {
@@ -843,15 +847,18 @@ internal class PurchaseService(
         ),
     )
 
-    private fun purchaseSyncedEventId(distinctId: String, purchaseToken: String): String = stableEventId(
-        "purchase-synced:",
-        listOf(
-            purchaseStorageScope,
-            SystemEventNames.PURCHASE_SYNCED,
-            distinctId,
-            purchaseToken,
-        ),
-    )
+    /** One `$purchase_synced` per purchase, customer and accepted admission. */
+    private fun purchaseSyncedEventId(distinctId: String, purchaseToken: String, admissionId: String): String =
+        stableEventId(
+            "purchase-synced:",
+            listOf(
+                purchaseStorageScope,
+                SystemEventNames.PURCHASE_SYNCED,
+                distinctId,
+                purchaseToken,
+                admissionId,
+            ),
+        )
 
     private fun stableEventId(prefix: String, components: List<String>): String = prefix + sha256(
         components.joinToString("\u001f"),
@@ -2123,6 +2130,9 @@ internal class PurchaseService(
                     pendingSend = null,
                     syncAttempts = 0,
                     retryDueAtMillis = null,
+                    // Each accepted admission is reported once as purchase_synced,
+                    // for the customer it was accepted for (telemetry only).
+                    syncedEventEmitted = false,
                     syncedCustomerId = response.customerId,
                     backendSyncedAtMillis = nowMillis(),
                 )

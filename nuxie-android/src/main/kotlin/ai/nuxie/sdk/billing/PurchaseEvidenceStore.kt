@@ -208,6 +208,11 @@ internal data class PurchaseEvidence(
     val consumable: Boolean = false,
     val catalogResolved: Boolean = false,
     val completionEmitted: Boolean = false,
+    /**
+     * Whether the purchase's latest accepted admission was reported as
+     * `$purchase_synced` for the customer it was accepted for. Telemetry only:
+     * each accepted admission is reported once.
+     */
     val syncedEventEmitted: Boolean = false,
     val syncedCustomerId: String? = null,
     val nuxieManaged: Boolean = false,
