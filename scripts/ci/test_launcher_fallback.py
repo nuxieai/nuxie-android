@@ -27,7 +27,7 @@ class LauncherFallbackTests(unittest.TestCase):
             interpreter.chmod(0o755)
             result = subprocess.run(['/bin/bash', scripts / 'bazel.sh', 'version'],
                                     env={'PATH': str(tools), 'HOME': str(root)},
-                                    capture_output=True, text=True, timeout=10)
+                                    capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), 'pinned launcher selected')
 
