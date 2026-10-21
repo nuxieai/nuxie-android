@@ -5073,6 +5073,59 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun aDueEntryTheCatalogNowRequiresSignedForCountsAnAttemptAndKeepsItsTimer() = runTest {
+        val clock = { 1_800_000_000_000L + testScheduler.currentTime }
+        val fixture = fixture(
+            this,
+            initialRetryDelayMillis = 1_000,
+            maxRetryDelayMillis = 1_000_000,
+            nowMillis = clock,
+            startService = false,
+        )
+        val customer = fixture.core.identity.distinctId()
+        // An owed, unverified entry that failed once and is due again in a second.
+        fixture.store.upsert(
+            owedRestoreEvidence(customer).copy(
+                signatureVerified = false,
+                syncAttempts = 1,
+                retryDueAtMillis = clock() + 1_000,
+            ),
+        )
+        // Before its retry fires, its product gains a licensing key.
+        fixture.store.upsertProductMapping(
+            StoredProductMapping(
+                storeProductId = "play-pro",
+                nuxieProductId = "nuxie-pro",
+                productType = BillingClient.ProductType.SUBS,
+                consumable = false,
+                licensingPublicKey = "catalog-key",
+            ),
+        )
+        var sends = 0
+        fixture.synchronizer = {
+            sends += 1
+            accepted(it.requester, it)
+        }
+        fixture.service.start()
+        runCurrent()
+
+        // The retry fires; the signature gate keeps it unsent, and it counts an attempt.
+        advanceTimeBy(1_000)
+        runCurrent()
+        val gated = fixture.store.load().getValue("refresh-token")
+        assertEquals(0, sends)
+        assertEquals(2, gated.syncAttempts)
+        assertEquals(clock() + 2_000, gated.retryDueAtMillis)
+
+        // A new timer was set: it fires at the next backoff step.
+        advanceTimeBy(2_000)
+        runCurrent()
+        assertEquals(0, sends)
+        assertEquals(3, fixture.store.load().getValue("refresh-token").syncAttempts)
+        fixture.close()
+    }
+
+    @Test
     fun anEntryNeverSentIsSentAtLaunchWithoutPlay() = runTest {
         // The entry was admitted, then the process died before its first send.
         val store = RecordingEvidenceStore()

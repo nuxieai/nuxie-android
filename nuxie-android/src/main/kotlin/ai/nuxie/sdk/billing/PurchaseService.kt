@@ -2039,6 +2039,11 @@ internal class PurchaseService(
                     throw cancelled
                 } catch (failure: Exception) {
                     Log.w("NuxieBilling", "Could not apply purchase synchronization.", failure)
+                    // An entry still owed after a failure the send path did not handle
+                    // counts a failed attempt and keeps its timer, like any unsent entry.
+                    runCatching {
+                        evidenceStore.load()[purchaseToken]?.pendingSend?.let { recordFailedSend(purchaseToken, it) }
+                    }
                     releaseSending(purchaseToken, operation)
                     operation.complete(SendAnswer(null, SyncResult.UNAVAILABLE))
                 }
@@ -2076,10 +2081,15 @@ internal class PurchaseService(
      */
     private suspend fun sendOnce(purchaseToken: String): SendAnswer {
         val evidence = evidenceStore.load()[purchaseToken] ?: return SendAnswer(null, SyncResult.UNAVAILABLE)
-        // A purchase whose Play signature the current catalog requires and that
-        // never verified is never sent.
-        if (!signatureEligible(evidence)) return SendAnswer(null, SyncResult.UNAVAILABLE)
         val send = evidence.pendingSend ?: return SendAnswer(null, SyncResult.UNAVAILABLE)
+        // A purchase whose Play signature the current catalog requires and that
+        // never verified is never sent. Like any owed entry that cannot be sent,
+        // it counts a failed attempt and waits out its backoff, so its timer
+        // goes on (a later recovery may verify it).
+        if (!signatureEligible(evidence)) {
+            recordFailedSend(purchaseToken, send)
+            return SendAnswer(null, SyncResult.UNAVAILABLE)
+        }
         val outcome = try {
             synchronizer.sync(
                 evidence.copy(pendingSend = send),
