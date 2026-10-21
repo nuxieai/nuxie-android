@@ -587,6 +587,17 @@ internal class PurchaseService(
             }
         }
         initialProjectionRefresh = scope.launch { refreshOptimisticProjection() }
+        scope.launch { scheduleStoredRetries() }
+    }
+
+    /**
+     * At launch, each unanswered entry that has failed gets its timer from its
+     * saved due time. An overdue one, or one stored before due times, is due now.
+     */
+    private suspend fun scheduleStoredRetries() {
+        evidenceStore.load().values
+            .filter { it.pendingSend != null && it.syncAttempts > 0 }
+            .forEach { scheduleSendRetry(it.purchaseToken, it.retryDueAtMillis ?: nowMillis()) }
     }
 
     /** Wait until cold-start evidence has established the initial optimistic projection. */
@@ -688,6 +699,7 @@ internal class PurchaseService(
                             refused = false,
                             pendingSend = null,
                             syncAttempts = 0,
+                            retryDueAtMillis = null,
                             syncedCustomerId = distinctId,
                             syncedEventEmitted = true,
                             backendSyncedAtMillis = nowMillis(),
@@ -1863,7 +1875,9 @@ internal class PurchaseService(
             withContext(NonCancellable) {
                 projectionRefresh.withLock {
                     val current = evidenceStore.load()[purchaseToken] ?: return@withLock false
-                    evidenceStore.upsert(current.copy(pendingSend = claim, syncAttempts = 0)).also { saved ->
+                    evidenceStore.upsert(
+                        current.copy(pendingSend = claim, syncAttempts = 0, retryDueAtMillis = null),
+                    ).also { saved ->
                         // A new entry: earlier answers no longer end its early unlock.
                         if (saved) answeredTokens -= purchaseToken
                     }
@@ -2007,15 +2021,18 @@ internal class PurchaseService(
 
     /** A send without an answer keeps its entry, with one more attempt and a retry after the backoff. */
     private suspend fun recordFailedSend(purchaseToken: String, send: PurchaseSend) {
-        val attempts = withContext(NonCancellable) {
+        val dueAt = withContext(NonCancellable) {
             projectionRefresh.withLock {
                 val current = evidenceStore.load()[purchaseToken] ?: return@withLock null
                 if (current.pendingSend != send) return@withLock null
-                val failed = current.copy(syncAttempts = current.syncAttempts + 1)
-                if (evidenceStore.upsert(failed)) failed.syncAttempts else current.syncAttempts + 1
+                val attempts = current.syncAttempts + 1
+                // The due time is saved with the attempt, so it survives a restart.
+                val dueAt = nowMillis() + outboxRetryDelay(attempts)
+                evidenceStore.upsert(current.copy(syncAttempts = attempts, retryDueAtMillis = dueAt))
+                dueAt
             }
         } ?: return
-        scheduleSendRetry(purchaseToken, attempts)
+        scheduleSendRetry(purchaseToken, dueAt)
     }
 
     /** The server attached the purchase to [send]'s requester: that is now its owner. */
@@ -2055,6 +2072,7 @@ internal class PurchaseService(
                     refused = false,
                     pendingSend = null,
                     syncAttempts = 0,
+                    retryDueAtMillis = null,
                     syncedCustomerId = response.customerId,
                     backendSyncedAtMillis = nowMillis(),
                 )
@@ -2123,6 +2141,7 @@ internal class PurchaseService(
                 val answered = current.copy(
                     pendingSend = null,
                     syncAttempts = 0,
+                    retryDueAtMillis = null,
                     ownerDistinctId = owner,
                     refused = current.refused || owner == null,
                 )
@@ -2288,6 +2307,7 @@ internal class PurchaseService(
             acknowledged = candidate.acknowledged || current.acknowledged,
             consumed = candidate.consumed || current.consumed,
             syncAttempts = maxOf(candidate.syncAttempts, current.syncAttempts),
+            retryDueAtMillis = current.retryDueAtMillis,
             completionAttempts = maxOf(candidate.completionAttempts, current.completionAttempts),
             firstSeenMillis = minOf(candidate.firstSeenMillis, current.firstSeenMillis),
             catalogResolved = candidate.catalogResolved || current.catalogResolved,
@@ -2303,20 +2323,23 @@ internal class PurchaseService(
                 ?: candidate.checkoutCompletionEventId,
             pinnedFeatureAllowances = current.pinnedFeatureAllowances
                 ?: candidate.pinnedFeatureAllowances,
-        )
+        ).let { kept ->
+            // A new admission starts its attempt count and due time again.
+            if (kept.pendingSend != current.pendingSend) kept.copy(syncAttempts = 0, retryDueAtMillis = null) else kept
+        }
         if (!evidenceStore.upsert(merged)) return null
         return merged
     }
 
     /**
-     * Send [token]'s entry again when it is due: the failure time plus the delay
-     * for its attempt count. A later failure replaces an earlier timer, so each
-     * entry keeps its own due time.
+     * Send [token]'s entry again at [dueAtMillis]: its failure time plus the
+     * delay for its attempt count. A later failure replaces an earlier timer,
+     * so each entry keeps its own due time; an overdue one is due now.
      */
-    private fun scheduleSendRetry(token: String, attempts: Int) {
+    private fun scheduleSendRetry(token: String, dueAtMillis: Long) {
         sendRetryJobs.remove(token)?.cancel()
         sendRetryJobs[token] = scope.launch {
-            delay(outboxRetryDelay(attempts))
+            delay((dueAtMillis - nowMillis()).coerceAtLeast(0))
             // ConcurrentMap's own remove(key, value): available on every supported API level.
             (sendRetryJobs as java.util.concurrent.ConcurrentMap<String, Job>).remove(token, coroutineContext[Job])
             // A held-back send counts a failed attempt in sendOwed itself.

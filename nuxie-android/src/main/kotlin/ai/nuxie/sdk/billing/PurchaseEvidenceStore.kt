@@ -198,6 +198,11 @@ internal data class PurchaseEvidence(
     val acknowledged: Boolean,
     val consumed: Boolean = false,
     val syncAttempts: Int = 0,
+    /**
+     * Epoch millis when the owed entry is due again after its last failed send;
+     * null when it has not failed since it was admitted.
+     */
+    val retryDueAtMillis: Long? = null,
     val completionAttempts: Int = 0,
     val firstSeenMillis: Long,
     val consumable: Boolean = false,
@@ -373,6 +378,7 @@ internal class FilePurchaseEvidenceStore(
             put("acknowledged", JsonPrimitive(evidence.acknowledged))
             put("consumed", JsonPrimitive(evidence.consumed))
             put("syncAttempts", JsonPrimitive(evidence.syncAttempts))
+            evidence.retryDueAtMillis?.let { put("retryDueAtMillis", JsonPrimitive(it)) }
             put("completionAttempts", JsonPrimitive(evidence.completionAttempts))
             put("firstSeenMillis", JsonPrimitive(evidence.firstSeenMillis))
             put("consumable", JsonPrimitive(evidence.consumable))
@@ -420,6 +426,8 @@ internal class FilePurchaseEvidenceStore(
             } else {
                 (raw["syncAttempts"] as? JsonPrimitive)?.intOrNull ?: 0
             },
+            // An entry stored before due times reads as due now (see the service).
+            retryDueAtMillis = (raw["retryDueAtMillis"] as? JsonPrimitive)?.longOrNull,
             completionAttempts = (raw["completionAttempts"] as? JsonPrimitive)?.intOrNull ?: 0,
             firstSeenMillis = (raw["firstSeenMillis"] as? JsonPrimitive)?.longOrNull ?: return null,
             consumable = raw.boolean("consumable"),

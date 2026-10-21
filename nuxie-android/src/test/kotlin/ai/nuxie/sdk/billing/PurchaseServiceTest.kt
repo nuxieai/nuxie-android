@@ -2590,6 +2590,7 @@ class PurchaseServiceTest {
                 """"synced":false,"permanentlyRejected":false,"revoked":true,"authorityScope":"test-fixture",""" +
                 """"syncAttempts":1,"completionAttempts":0,"firstSeenMillis":1}}""",
         )
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
         fixture.store.upsert(
             FilePurchaseEvidenceStore(directory, Dispatchers.Unconfined).load().getValue("refunded"),
         )
@@ -2603,10 +2604,10 @@ class PurchaseServiceTest {
         // Play cannot be asked: nothing unlocks, and the unanswered entry is sent
         // for the server to decide.
         fixture.billing.failQueries = true
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
         fixture.service.recover()
         assertFalse(fixture.core.featureInfo.isAllowed("pro"))
-        assertEquals(listOf("refunded"), fixture.requests.map { it.first })
+        assertTrue(fixture.requests.isNotEmpty())
+        assertTrue(fixture.requests.all { it.first == "refunded" })
 
         // Play reports the purchase: the buyer's own unanswered purchase unlocks early.
         fixture.billing.failQueries = false
@@ -4742,6 +4743,56 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun aKeptEntrySavesItsDueTimeAndIsSentThenAfterARestart() = runTest {
+        val clock = { 1_800_000_000_000L + testScheduler.currentTime }
+        val fixture = fixture(this, initialRetryDelayMillis = 30_000, maxRetryDelayMillis = 3_600_000, nowMillis = clock)
+        val customer = fixture.core.identity.distinctId()
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("kept-token", obfuscatedAccountId = accountHash(customer)),
+        )
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
+        fixture.service.recover()
+        val kept = fixture.store.load().getValue("kept-token")
+        assertEquals("The due time is saved with the failed attempt", clock() + 30_000, kept.retryDueAtMillis)
+        fixture.close()
+
+        // Ten seconds later the app starts again. Play is not asked.
+        advanceTimeBy(10_000)
+        val restarted = fixture(
+            this,
+            store = fixture.store,
+            initialRetryDelayMillis = 30_000,
+            maxRetryDelayMillis = 3_600_000,
+            nowMillis = clock,
+        )
+        restarted.synchronizer = { PurchaseSyncOutcome.Rejected() }
+        runCurrent()
+        assertTrue(restarted.requests.isEmpty())
+        advanceTimeBy(19_999)
+        runCurrent()
+        assertTrue("Not before its saved due time", restarted.requests.isEmpty())
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(listOf("kept-token"), restarted.requests.map { it.first })
+        assertTrue(restarted.billing.queries.isEmpty())
+        restarted.close()
+    }
+
+    @Test
+    fun anEntryStoredBeforeDueTimesIsDueAtLaunch() = runTest {
+        // Stored by an earlier version: it failed before, with no due time.
+        val store = RecordingEvidenceStore()
+        store.upsert(owedRestoreEvidence("stored-customer").copy(syncAttempts = 2, retryDueAtMillis = null))
+
+        val launched = fixture(this, store = store)
+        launched.synchronizer = { PurchaseSyncOutcome.Rejected() }
+        runCurrent()
+        assertEquals(listOf("refresh-token"), launched.requests.map { it.first })
+        assertTrue("Play is not asked", launched.billing.queries.isEmpty())
+        launched.close()
+    }
+
+    @Test
     fun authenticatedRestoreWaitsForBackendVerification() = runTest {
         val fixture = fixture(this)
         val owner = fixture.core.identity.distinctId()
@@ -4870,6 +4921,9 @@ class PurchaseServiceTest {
         journeyEvents: MutableList<StoredEvent>? = null,
         testStore: NuxieTestStore? = null,
         ioDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.Unconfined,
+        // The service's clock follows the test's virtual clock, so saved due
+        // times and retry timers agree.
+        nowMillis: () -> Long = { 1_800_000_000_000L + scope.testScheduler.currentTime },
     ): Fixture {
         val storageDirectory = temporaryFolder.newFolder("fixture-${fixtures.size}")
         val core = NuxieCore(
@@ -4929,6 +4983,7 @@ class PurchaseServiceTest {
             maxRetryDelayMillis = maxRetryDelayMillis,
             outboxRetryInitialDelayMillis = initialRetryDelayMillis,
             outboxRetryMaxDelayMillis = maxRetryDelayMillis,
+            nowMillis = nowMillis,
             api = core.api,
             capturePurchaseEvent = { name, properties, eventId, capturedDistinctId ->
                 purchaseEventCaptureAttempts += eventId
