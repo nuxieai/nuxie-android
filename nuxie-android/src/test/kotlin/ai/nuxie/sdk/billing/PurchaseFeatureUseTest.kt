@@ -195,6 +195,37 @@ class PurchaseFeatureUseTest {
     }
 
     @Test
+    fun onlyACatalogChangeResendsKeptEntries() = runBlocking {
+        val core = core(FakeTransport())
+        val store = InMemoryPurchaseEvidenceStore()
+        // A kept entry that failed once and is not due for an hour.
+        store.upsert(evidence().copy(syncAttempts = 1, retryDueAtMillis = 1_784_462_400_000L + 3_600_000L))
+        val sends = java.util.concurrent.atomic.AtomicInteger()
+        service(core, store, synchronizer = PurchaseSynchronizer { _, _ ->
+            sends.incrementAndGet()
+            PurchaseSyncOutcome.Rejected()
+        })
+
+        // Resolving the same product again changes nothing: nothing is sent.
+        store.upsertProductMapping(featureDescriptor())
+        delay(300)
+        assertEquals(0, sends.get())
+
+        // A changed mapping is a catalog change: the kept entry is sent once.
+        store.upsertProductMapping(
+            featureDescriptor().copy(
+                featureAllowances = listOf(
+                    StoredFeatureAllowance("credits", FeatureType.CREDIT_SYSTEM.name, false, allowance = 2.0),
+                ),
+            ),
+        )
+        withTimeoutOrNull(3_000) { while (sends.get() < 1) delay(10) }
+        delay(300)
+        assertEquals(1, sends.get())
+        core.stop()
+    }
+
+    @Test
     fun concurrentSpendWaitsThenReevaluatesAfterTheFirstSucceeds() = runBlocking {
         val fixture = concurrentFixture(firstStatus = 200)
         val first = async(Dispatchers.Default) { fixture.use() }
