@@ -96,8 +96,8 @@ private fun <T> PurchaseEvidence.selectAllowanceSource(
  * Nothing else decides it, Play's queries and in-memory state included: a
  * refund or cancellation before the server answers keeps the early unlock until
  * that answer, seconds online or until the device is back online, the same as
- * the offline case. An answer ends it by being saved on the entry; if saving
- * fails, the entry stays owed and is sent again until an answer is saved.
+ * the offline case. An answer ends it by being saved on the entry. If saving
+ * fails, the outbox is off for the session and nothing unlocks early.
  */
 internal fun PurchaseEvidence.isBuyersOwnUnsyncedPurchase(
     distinctId: String,
