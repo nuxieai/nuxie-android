@@ -725,6 +725,53 @@ class ProfileServiceTest {
     }
 
     @Test
+    fun refreshesThatArriveWhileOneIsInFlightShareOneTrailingFetch() = runBlocking {
+        val plane = planeProfileFixture()
+        val fetches = AtomicInteger()
+        val firstStarted = java.util.concurrent.CountDownLatch(1)
+        val releaseFirst = java.util.concurrent.CountDownLatch(1)
+        val fixture = ProfileFixture(
+            transport = FakeTransport().apply {
+                respond = { request ->
+                    if (request.url.path == "/profile") {
+                        val fetch = fetches.incrementAndGet()
+                        if (fetch == 1) {
+                            firstStarted.countDown()
+                            check(releaseFirst.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                        }
+                        canonicalProfileResponse(plane.first, "\"plane-$fetch\"")
+                    } else {
+                        HttpTransport.Response(200, ByteArray(0))
+                    }
+                }
+            },
+            distinctId = "coalesced-refresh",
+            localeIdentifier = "en_US",
+            journeyProfiles = JourneyProfileCatalog(
+                trustedKeys = JourneyTrustRoots.keys(NuxieEnvironment.DEVELOPMENT),
+                highWater = JourneyReleaseHighWaterStore(RuntimeEnvironment.getApplication()),
+                supportedRuntime = { plane.second },
+            ),
+        )
+
+        try {
+            fixture.service.requestRefresh()
+            assertTrue(firstStarted.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            // Many answers land while that fetch is in flight (a multi-purchase Restore, say).
+            repeat(5) { fixture.service.requestRefresh() }
+            val trailing = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                fixture.service.refreshAndWait()
+            }
+            releaseFirst.countDown()
+
+            assertTrue(withTimeout(5_000L) { trailing.await() })
+            assertEquals("The fetch in flight, then one trailing fetch for all of them", 2, fetches.get())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
     fun failedRefreshCompletesItsWaiterAndTheWorkerProcessesTheNextSignal() = runBlocking {
         val plane = planeProfileFixture()
         val publications = AtomicInteger()

@@ -138,13 +138,22 @@ internal class ProfileService(
             val signal = signals.receiveCatching().getOrNull() ?: break
             when (signal) {
                 is Signal.Refresh -> {
+                    // Refreshes run one at a time. Every request that arrived while
+                    // the last one was in flight shares one trailing fetch, which
+                    // starts after all of them: many answers landing together (a
+                    // multi-purchase Restore, say) cause one fetch, not one each.
+                    val waiters = mutableListOf(signal.done)
+                    while (true) {
+                        val queued = signals.tryReceive().getOrNull() as? Signal.Refresh ?: break
+                        waiters += queued.done
+                    }
                     var refreshed = false
                     try {
                         refreshed = refreshSafely()
                     } finally {
                         // Every accepted waiter completes even when refresh
                         // processing is cancelled or a consumer throws.
-                        signal.done?.complete(refreshed)
+                        waiters.forEach { it?.complete(refreshed) }
                     }
                 }
             }
