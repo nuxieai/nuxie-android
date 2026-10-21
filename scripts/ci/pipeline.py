@@ -21,6 +21,9 @@ def pipeline(environment=None):
     environment = os.environ if environment is None else environment
     version = environment.get('NUXIE_CI_RUNNER_POLICY_VERSION', '1')
     split = environment.get('NUXIE_SDK_SPLIT_LANES', '0')
+    products = environment.get('NUXIE_SDK_PREPARE_PRODUCTS', '0')
+    if products not in ('0', '1') or products == '1' and version != '2':
+        raise ValueError('Native product export requires runner policy v2 and a 0 or 1 setting')
     topology = environment.get('NUXIE_CI_RUNNER_TOPOLOGY', 'final')
     if version not in ('', '1', '2') or split not in ('0', '1') or topology not in ('final', 'fallback'):
         raise ValueError('Unsupported runner policy, SDK split or topology setting')
@@ -31,6 +34,9 @@ def pipeline(environment=None):
     document = json.loads((ROOT / '.buildkite/lanes.json').read_text())
     if split == '1':
         document['steps'] = split_steps()
+    if products == '1':
+        document['steps'][0]['command'] += 'scripts/bazel/sdk.sh prepare --output output/native-products/android --maven-version "0.2.0-$(git rev-parse HEAD)"\n'
+        document['steps'][0]['command'] += 'mkdir -p output/pipeline/native-products\ntar -czf output/pipeline/native-products/android-products.tar.gz -C output/native-products android\n'
     if version == '2':
         for lane in document['steps']:
             apple = lane['agents'].get('nuxie-platform') == 'macos'

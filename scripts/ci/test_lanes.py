@@ -58,6 +58,18 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual([lane['key'] for lane in graph['steps']], ['android'])
                 self.assertTrue(all(not lane.get('depends_on') for lane in graph['steps']))
 
+    def test_requested_wrapper_products_use_the_actual_source_revision(self):
+        for split in ('0', '1'):
+            lane = renderer.pipeline({'NUXIE_CI_RUNNER_POLICY_VERSION': '2',
+                                      'NUXIE_SDK_SPLIT_LANES': split,
+                                      'NUXIE_SDK_PREPARE_PRODUCTS': '1'})['steps'][0]
+            self.assertIn('scripts/bazel/sdk.sh prepare --output output/native-products/android --maven-version "0.2.0-$(git rev-parse HEAD)"', lane['command'].splitlines())
+            self.assertIn('output/pipeline/**/*', lane['artifact_paths'])
+        for environment in ({'NUXIE_SDK_PREPARE_PRODUCTS': '1'},
+                            {'NUXIE_CI_RUNNER_POLICY_VERSION': '2', 'NUXIE_SDK_PREPARE_PRODUCTS': 'yes'}):
+            with self.assertRaises(ValueError):
+                renderer.pipeline(environment)
+
     def test_qualified_read_is_profile_specific_and_never_grants_writer_secret(self):
         environment = {'NUXIE_CI_RUNNER_POLICY_VERSION': '2', 'NUXIE_SDK_SPLIT_LANES': '1',
                        'NUXIE_CI_BAZEL_REMOTE_CACHE_MODE': 'read', 'NUXIE_CI_BAZEL_CACHE_PROFILES': 'linux-native',

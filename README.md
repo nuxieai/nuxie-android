@@ -414,3 +414,12 @@ link steps advance without opening, recording, or dismissing. `$link_opened` and
 public `LinkOpened` include the actual `destination` (`in_app` or `external`) and the
 original optional `target`. Step records use the step identity before completion.
 A link already in flight still opens externally after identity change or current-customer profile clear, but its revoked run records no event.
+
+### Reuse native products in wrapper CI
+
+Set `NUXIE_SDK_PREPARE_PRODUCTS=1` on a policy-v2 Buildkite build to export the
+existing native artifact contract after the SDK checks pass. Download the
+`output/pipeline/native-products/android-products.tar.gz` artifact for wrapper builds.
+The archive preserves the original `sdk-artifacts.json`, file hashes and symlinks;
+wrapper native pins must match its source revision.
+The archive uses the wrappers’ existing source-addressed Maven coordinate.
