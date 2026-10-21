@@ -4669,6 +4669,33 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun aQueryOfOneTypeDoesNotDropAPurchaseOfTheOtherReportedByAnUpdate() = runTest {
+        val fixture = fixture(this)
+        val customer = fixture.core.identity.distinctId()
+        // The catalog knows the product is a one-time purchase.
+        fixture.service.rememberProduct(
+            product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+        )
+        runCurrent()
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
+        // Play delivers the customer's purchase outside any checkout.
+        fixture.service.onPurchasesUpdated(
+            okUpdate(playPurchase("update-only", obfuscatedAccountId = accountHash(customer))),
+        )
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+
+        // The subscription query answers (with nothing), the one-time query fails.
+        fixture.billing.failQueryTypes += BillingClient.ProductType.INAPP
+        fixture.service.recover()
+
+        assertTrue(
+            "A subscription query cannot speak for a one-time purchase",
+            fixture.core.featureInfo.isAllowed("pro"),
+        )
+        fixture.close()
+    }
+
+    @Test
     fun authenticatedRestoreWaitsForBackendVerification() = runTest {
         val fixture = fixture(this)
         val owner = fixture.core.identity.distinctId()
@@ -4981,6 +5008,8 @@ class PurchaseServiceTest {
         val acknowledgeCodes = mutableListOf<Int>()
         var queryFailure: Exception? = null
         var failQueries = false
+        /** Product types whose queries fail while the others answer. */
+        val failQueryTypes = mutableSetOf<String>()
         var queryStarted: CompletableDeferred<Unit>? = null
         var releaseQueries: CompletableDeferred<Unit>? = null
 
@@ -4994,7 +5023,7 @@ class PurchaseServiceTest {
             queryFailure?.let { throw it }
             queryStarted?.complete(Unit)
             releaseQueries?.await()
-            if (failQueries) {
+            if (failQueries || productType in failQueryTypes) {
                 return ActivePurchasesResult.Failed(
                     BillingClient.BillingResponseCode.SERVICE_UNAVAILABLE,
                     "offline",
