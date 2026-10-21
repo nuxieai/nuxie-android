@@ -558,6 +558,8 @@ internal class PurchaseService(
      * them. Guarded by itself, as is [playReportStamp].
      */
     private val playReported = mutableMapOf<String, PlayReported>()
+    /** Purchases a query found absent, with that query's stamp, until a newer report. */
+    private val playAbsent = mutableMapOf<String, Long>()
     private var playReportStamp = 0L
     /**
      * Purchases the server answered in this process. An answer ends the early
@@ -2760,7 +2762,11 @@ internal class PurchaseService(
         try {
             return during().also { completed = true }
         } finally {
-            if (!completed) synchronized(playReported) { added.forEach(playReported::remove) }
+            if (!completed) {
+                synchronized(playReported) {
+                    PlayReportEdit().run { added.forEach { drop(it, nextStamp()) } }
+                }
+            }
             if (removed.isNotEmpty() || (completed && added.isNotEmpty())) {
                 withContext(NonCancellable) { refreshOptimisticProjection() }
             }
@@ -2776,48 +2782,68 @@ internal class PurchaseService(
     private inner class PlayReportEdit {
         val reported: MutableMap<String, PlayReported> get() = playReported
 
-        /** Play reported [token] now: it gets a fresh stamp. */
-        fun report(token: String, type: String?) {
+        fun nextStamp(): Long {
             playReportStamp += 1
-            reported[token] = PlayReported(type, playReportStamp)
+            return playReportStamp
         }
 
-        /** Remove what a query or pass that started at [since] can speak for. */
-        fun removeReportedBefore(since: Long, matches: (String?) -> Boolean) {
-            reported.entries.removeAll { (_, entry) -> entry.stamp <= since && matches(entry.type) }
+        /** The stamp of the newest report about [token], present or absent. */
+        fun newest(token: String): Long =
+            maxOf(reported[token]?.stamp ?: Long.MIN_VALUE, playAbsent[token] ?: Long.MIN_VALUE)
+
+        /** Play reports [token] present as of [stamp]. */
+        fun report(token: String, type: String?, stamp: Long = nextStamp()) {
+            reported[token] = PlayReported(type, stamp)
+            playAbsent.remove(token)
+        }
+
+        /** Play reports [token] absent as of [stamp]: kept as an absence until a newer report. */
+        fun drop(token: String, stamp: Long) {
+            reported.remove(token)
+            playAbsent[token] = stamp
         }
     }
 
-    /** The report's stamp now: a query or pass started at it removes only what was reported by then. */
-    private fun playReportNow(): Long = synchronized(playReported) { playReportStamp }
+    /** A fresh stamp for a query or pass that starts now: every report before it is older. */
+    private fun startPlayReport(): Long = synchronized(playReported) { PlayReportEdit().nextStamp() }
 
     /**
      * Ask Play for its active purchases of [productType], recording what it
-     * reports. A query speaks only for its own type, and only for what was in
-     * the report when it started: a purchase reported after that (by an update
-     * or another query) survives its result. Its own purchases are added.
+     * reports. A query speaks only for its own type, and its answer changes a
+     * purchase, adding or removing it, only if that purchase's newest report
+     * (present or absent) is older than the query's start. A purchase update,
+     * or a newer query, always wins over a query already in flight.
      */
     private suspend fun queryPlay(@BillingClient.ProductType productType: String): ActivePurchasesResult {
-        val since = playReportNow()
+        val start = startPlayReport()
         val result = billing.queryActive(productType)
         if (result is ActivePurchasesResult.Success) {
             updatePlayReport {
-                removeReportedBefore(since) { it == productType }
-                result.purchases.forEach { report(it.purchaseToken, productType) }
+                val answered = result.purchases.mapTo(mutableSetOf()) { it.purchaseToken }
+                reported.filter { (token, entry) ->
+                    entry.type == productType && token !in answered && entry.stamp < start
+                }.keys.toList().forEach { drop(it, start) }
+                result.purchases.forEach { purchase ->
+                    if (newest(purchase.purchaseToken) < start) report(purchase.purchaseToken, productType, start)
+                }
             }
         }
         return result
     }
 
     /** When a pass that queries both types starts. */
-    private fun beginPlayPass(): Long = playReportNow()
+    private fun beginPlayPass(): Long = startPlayReport()
 
     /**
-     * Both types answered in one pass: a token of unknown type reported before
-     * the pass started that neither query reported has left Play's report.
+     * Both types answered in one pass: a token of unknown type whose newest
+     * report is older than the pass, and that neither query reported, has left
+     * Play's report.
      */
     private suspend fun endPlayPass(since: Long) {
-        updatePlayReport { removeReportedBefore(since) { it == null } }
+        updatePlayReport {
+            reported.filter { (_, entry) -> entry.type == null && entry.stamp < since }
+                .keys.toList().forEach { drop(it, since) }
+        }
     }
 
     /**
