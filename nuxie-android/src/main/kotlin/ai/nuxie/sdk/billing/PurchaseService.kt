@@ -575,8 +575,9 @@ internal class PurchaseService(
             projectionRefresh.withLock { deriveOptimisticProjection() }
             scope.launch {
                 refreshOptimisticProjection()
-                // A changed catalog sends every kept entry again, as iOS does.
-                resendKeptEntries()
+                // A changed catalog runs the Play recovery query and sends every
+                // unanswered entry, as launch, identify and reset do.
+                recover()
             }
         }
         initialProjectionRefresh = scope.launch { refreshOptimisticProjection() }
@@ -1370,18 +1371,22 @@ internal class PurchaseService(
             val mappings = evidenceStore.loadProductMappings()
             var normalizedAnyEvidence = false
             val evidenceRecords = evidenceStore.load().values.mapNotNull { storedEvidence ->
-                val normalized = if (!storedEvidence.signatureVerificationRequired &&
+                if (!storedEvidence.signatureVerificationRequired &&
                     hasConfiguredLicensingKey(storedEvidence, bindings, mappings)
                 ) {
-                    storedEvidence.copy(signatureVerificationRequired = true)
+                    normalizedAnyEvidence = true
+                    // Read and written in one step, so the write is never based on
+                    // an admission the entry no longer holds.
+                    projectionRefresh.withLock {
+                        val current = evidenceStore.load()[storedEvidence.purchaseToken] ?: return@withLock null
+                        if (current.signatureVerificationRequired) {
+                            current
+                        } else {
+                            upsertEvidenceLocked(current.copy(signatureVerificationRequired = true))
+                        }
+                    }
                 } else {
                     storedEvidence
-                }
-                if (normalized != storedEvidence) {
-                    normalizedAnyEvidence = true
-                    upsertEvidence(normalized)
-                } else {
-                    normalized
                 }
             }
             if (normalizedAnyEvidence) {
@@ -1656,133 +1661,137 @@ internal class PurchaseService(
         val matchingFlight = purchase.products.firstNotNullOfOrNull(inFlight::get)
         val isCheckoutOutcome = matchingFlight?.matches(purchase) == true
         val checkoutFlight = matchingFlight?.takeIf { isCheckoutOutcome }
-        // Another customer's settled record is only the record of their purchase:
-        // this customer's checkout starts the purchase's entry afresh.
-        val existing = evidenceStore.load()[purchase.purchaseToken]?.takeUnless { it.givesWayTo(checkoutFlight?.owner) }
-        val bindings = evidenceStore.loadBindings()
-        val mappings = evidenceStore.loadProductMappings()
-        val existingProductIdentity = existing?.nuxieProductId?.let { nuxieProductId ->
-            existing.storeProductIds.firstOrNull { it in purchase.products }?.let { storeProductId ->
-                StoredProductIdentity(
-                    storeProductId,
-                    nuxieProductId,
-                    existing.basePlanId,
-                    existing.purchaseOptionId,
-                    existing.offerId,
-                    existing.productType,
-                )
-            }
-        }
-        val product = matchingFlight?.product?.takeIf { isCheckoutOutcome }
-            ?: existingProductIdentity?.let { knownIdentity ->
-                products.entries.filter { (identity) ->
-                    identity.matchesKnownIdentity(knownIdentity)
-                }.singleOrNull()?.value
-            }
-        val knownProductIdentity = existingProductIdentity ?: product?.productIdentity()
-        val accountBindings = bindings.filter { binding ->
-            binding.obfuscatedAccountId == purchase.obfuscatedAccountId &&
-                binding.storeProductId in purchase.products
-        }
-        val exactBinding = selectFullProductMatch(accountBindings, knownProductIdentity) {
-            it.productIdentity
-        }
-        val catalogBinding = exactBinding ?: selectFullProductMatch(
-            bindings.filter { it.storeProductId in purchase.products },
-            knownProductIdentity,
-        ) { it.productIdentity }
-        val catalogMapping = selectFullProductMatch(
-            mappings.filter { it.storeProductId in purchase.products },
-            knownProductIdentity,
-        ) { it.productIdentity }
-        val currentOwner = distinctId()
-        // Checkout correlation only: which customer's checkout made this Play
-        // purchase. Who owns it is only what the server last said.
-        val buyerDistinctId = checkoutFlight?.owner
-            ?: exactBinding?.distinctId
-            ?: currentOwner.takeIf { purchase.obfuscatedAccountId == playAccountId(it) }
-            ?: existing?.buyerDistinctId
-        val licensingPublicKey = product?.licensingPublicKey ?: catalogBinding?.licensingPublicKey
-            ?: catalogMapping?.licensingPublicKey
-        val signatureVerificationRequired = existing?.signatureVerificationRequired == true ||
-            licensingPublicKey != null
-        val signatureVerified = existing?.signatureVerified == true ||
-            (licensingPublicKey != null && verifyPurchaseSignature(
-                licensingPublicKey,
-                purchase.originalJson,
-                purchase.signature,
-            ))
-        val pinnedFeatureAllowances = existing?.pinnedFeatureAllowances
-            ?: matchingFlight?.product?.takeIf { isCheckoutOutcome }
-                ?.featureAllowances?.toStoredAllowances()
-            ?: exactBinding?.featureAllowances
-            ?: catalogMapping?.featureAllowances
-        // The send this observation owes, admitted in the purchase's first durable
-        // write: a crash before the send still sends it with this reason, requester
-        // and kind. The customer's own checkout is a purchase; anything else syncs.
-        val admittedSend = when {
-            !admitsSend -> null
-            purchase.state != StoredPurchaseState.PURCHASED -> null
-            signatureVerificationRequired && !signatureVerified -> null
-            existing?.synced == true || existing?.refused == true -> null
-            checkoutFlight != null -> PurchaseSend.admit(
-                PurchaseSyncReason.PURCHASE,
-                checkoutFlight.owner,
-                checkoutFlight.ownerKind,
-            )
-            else -> (buyerDistinctId ?: currentOwner).let { requester ->
-                PurchaseSend.admit(PurchaseSyncReason.SYNC, requester, customerKind(requester))
-            }
-        }
-        val evidenceCandidate = PurchaseEvidence(
-            purchaseToken = purchase.purchaseToken,
-            packageName = purchase.packageName,
-            storeProductIds = purchase.products,
-            nuxieProductId = existing?.nuxieProductId ?: product?.productId
-                ?: catalogBinding?.nuxieProductId ?: catalogMapping?.nuxieProductId,
-            basePlanId = existing?.basePlanId ?: product?.basePlanId
-                ?: catalogBinding?.basePlanId ?: catalogMapping?.basePlanId,
-            purchaseOptionId = existing?.purchaseOptionId ?: product?.purchaseOptionId
-                ?: catalogBinding?.purchaseOptionId ?: catalogMapping?.purchaseOptionId,
-            offerId = existing?.offerId ?: product?.offerId
-                ?: catalogBinding?.offerId ?: catalogMapping?.offerId,
-            productType = existing?.productType ?: product?.productType
-                ?: catalogBinding?.productType ?: catalogMapping?.productType,
-            purchaseState = purchase.state,
-            // Only Play names the account; a missing one stays missing.
-            obfuscatedAccountId = purchase.obfuscatedAccountId ?: existing?.obfuscatedAccountId,
-            buyerDistinctId = buyerDistinctId,
-            ownerDistinctId = existing?.ownerDistinctId,
-            refused = existing?.refused == true,
-            pendingSend = admittedSend,
-            context = existing?.context ?: product?.toStoredContext()
-                ?: catalogBinding?.context ?: catalogMapping?.context,
-            pinnedFeatureAllowances = pinnedFeatureAllowances,
-            acknowledged = purchase.acknowledged || existing?.acknowledged == true,
-            consumed = existing?.consumed == true,
-            syncAttempts = existing?.syncAttempts ?: 0,
-            completionAttempts = existing?.completionAttempts ?: 0,
-            firstSeenMillis = existing?.firstSeenMillis ?: nowMillis(),
-            consumable = existing?.consumable ?: product?.consumable
-                ?: catalogBinding?.consumable ?: catalogMapping?.consumable ?: false,
-            catalogResolved = existing?.catalogResolved == true || product != null ||
-                catalogBinding != null || catalogMapping != null,
-            completionEmitted = existing?.completionEmitted == true,
-            syncedEventEmitted = existing?.syncedEventEmitted == true,
-            syncedCustomerId = existing?.syncedCustomerId,
-            nuxieManaged = existing?.nuxieManaged
-                ?: matchingFlight?.nuxieManaged?.takeIf { isCheckoutOutcome }
-                ?: (settings.handlingMode == PurchaseHandlingMode.NUXIE_MANAGED),
-            signatureVerificationRequired = signatureVerificationRequired,
-            signatureVerified = signatureVerified,
-            authorityScope = purchaseStorageScope,
-            backendSyncedAtMillis = existing?.backendSyncedAtMillis,
-            checkoutCompletionEventId = existing?.checkoutCompletionEventId
-                ?: checkoutFlight?.outcomeEventId
-                ?: exactBinding?.outcomeEventId,
-        )
         // D2: evidence is durable before projection, facts, sync, acknowledge, or consume.
-        val evidence = upsertEvidence(evidenceCandidate, givesWayTo = checkoutFlight?.owner)
+        // The observation is built over the entry as it stands and written in the
+        // same step, so it is never based on an admission the entry no longer holds.
+        val evidence = projectionRefresh.withLock {
+            // Another customer's settled record is only the record of their purchase:
+            // this customer's checkout starts the purchase's entry afresh.
+            val existing = evidenceStore.load()[purchase.purchaseToken]?.takeUnless { it.givesWayTo(checkoutFlight?.owner) }
+            val bindings = evidenceStore.loadBindings()
+            val mappings = evidenceStore.loadProductMappings()
+            val existingProductIdentity = existing?.nuxieProductId?.let { nuxieProductId ->
+                existing.storeProductIds.firstOrNull { it in purchase.products }?.let { storeProductId ->
+                    StoredProductIdentity(
+                        storeProductId,
+                        nuxieProductId,
+                        existing.basePlanId,
+                        existing.purchaseOptionId,
+                        existing.offerId,
+                        existing.productType,
+                    )
+                }
+            }
+            val product = matchingFlight?.product?.takeIf { isCheckoutOutcome }
+                ?: existingProductIdentity?.let { knownIdentity ->
+                    products.entries.filter { (identity) ->
+                        identity.matchesKnownIdentity(knownIdentity)
+                    }.singleOrNull()?.value
+                }
+            val knownProductIdentity = existingProductIdentity ?: product?.productIdentity()
+            val accountBindings = bindings.filter { binding ->
+                binding.obfuscatedAccountId == purchase.obfuscatedAccountId &&
+                    binding.storeProductId in purchase.products
+            }
+            val exactBinding = selectFullProductMatch(accountBindings, knownProductIdentity) {
+                it.productIdentity
+            }
+            val catalogBinding = exactBinding ?: selectFullProductMatch(
+                bindings.filter { it.storeProductId in purchase.products },
+                knownProductIdentity,
+            ) { it.productIdentity }
+            val catalogMapping = selectFullProductMatch(
+                mappings.filter { it.storeProductId in purchase.products },
+                knownProductIdentity,
+            ) { it.productIdentity }
+            val currentOwner = distinctId()
+            // Checkout correlation only: which customer's checkout made this Play
+            // purchase. Who owns it is only what the server last said.
+            val buyerDistinctId = checkoutFlight?.owner
+                ?: exactBinding?.distinctId
+                ?: currentOwner.takeIf { purchase.obfuscatedAccountId == playAccountId(it) }
+                ?: existing?.buyerDistinctId
+            val licensingPublicKey = product?.licensingPublicKey ?: catalogBinding?.licensingPublicKey
+                ?: catalogMapping?.licensingPublicKey
+            val signatureVerificationRequired = existing?.signatureVerificationRequired == true ||
+                licensingPublicKey != null
+            val signatureVerified = existing?.signatureVerified == true ||
+                (licensingPublicKey != null && verifyPurchaseSignature(
+                    licensingPublicKey,
+                    purchase.originalJson,
+                    purchase.signature,
+                ))
+            val pinnedFeatureAllowances = existing?.pinnedFeatureAllowances
+                ?: matchingFlight?.product?.takeIf { isCheckoutOutcome }
+                    ?.featureAllowances?.toStoredAllowances()
+                ?: exactBinding?.featureAllowances
+                ?: catalogMapping?.featureAllowances
+            // The send this observation owes, admitted in the purchase's first durable
+            // write: a crash before the send still sends it with this reason, requester
+            // and kind. The customer's own checkout is a purchase; anything else syncs.
+            val admittedSend = when {
+                !admitsSend -> null
+                purchase.state != StoredPurchaseState.PURCHASED -> null
+                signatureVerificationRequired && !signatureVerified -> null
+                existing?.synced == true || existing?.refused == true -> null
+                checkoutFlight != null -> PurchaseSend.admit(
+                    PurchaseSyncReason.PURCHASE,
+                    checkoutFlight.owner,
+                    checkoutFlight.ownerKind,
+                )
+                else -> (buyerDistinctId ?: currentOwner).let { requester ->
+                    PurchaseSend.admit(PurchaseSyncReason.SYNC, requester, customerKind(requester))
+                }
+            }
+            val evidenceCandidate = PurchaseEvidence(
+                purchaseToken = purchase.purchaseToken,
+                packageName = purchase.packageName,
+                storeProductIds = purchase.products,
+                nuxieProductId = existing?.nuxieProductId ?: product?.productId
+                    ?: catalogBinding?.nuxieProductId ?: catalogMapping?.nuxieProductId,
+                basePlanId = existing?.basePlanId ?: product?.basePlanId
+                    ?: catalogBinding?.basePlanId ?: catalogMapping?.basePlanId,
+                purchaseOptionId = existing?.purchaseOptionId ?: product?.purchaseOptionId
+                    ?: catalogBinding?.purchaseOptionId ?: catalogMapping?.purchaseOptionId,
+                offerId = existing?.offerId ?: product?.offerId
+                    ?: catalogBinding?.offerId ?: catalogMapping?.offerId,
+                productType = existing?.productType ?: product?.productType
+                    ?: catalogBinding?.productType ?: catalogMapping?.productType,
+                purchaseState = purchase.state,
+                // Only Play names the account; a missing one stays missing.
+                obfuscatedAccountId = purchase.obfuscatedAccountId ?: existing?.obfuscatedAccountId,
+                buyerDistinctId = buyerDistinctId,
+                ownerDistinctId = existing?.ownerDistinctId,
+                refused = existing?.refused == true,
+                pendingSend = admittedSend,
+                context = existing?.context ?: product?.toStoredContext()
+                    ?: catalogBinding?.context ?: catalogMapping?.context,
+                pinnedFeatureAllowances = pinnedFeatureAllowances,
+                acknowledged = purchase.acknowledged || existing?.acknowledged == true,
+                consumed = existing?.consumed == true,
+                syncAttempts = existing?.syncAttempts ?: 0,
+                completionAttempts = existing?.completionAttempts ?: 0,
+                firstSeenMillis = existing?.firstSeenMillis ?: nowMillis(),
+                consumable = existing?.consumable ?: product?.consumable
+                    ?: catalogBinding?.consumable ?: catalogMapping?.consumable ?: false,
+                catalogResolved = existing?.catalogResolved == true || product != null ||
+                    catalogBinding != null || catalogMapping != null,
+                completionEmitted = existing?.completionEmitted == true,
+                syncedEventEmitted = existing?.syncedEventEmitted == true,
+                syncedCustomerId = existing?.syncedCustomerId,
+                nuxieManaged = existing?.nuxieManaged
+                    ?: matchingFlight?.nuxieManaged?.takeIf { isCheckoutOutcome }
+                    ?: (settings.handlingMode == PurchaseHandlingMode.NUXIE_MANAGED),
+                signatureVerificationRequired = signatureVerificationRequired,
+                signatureVerified = signatureVerified,
+                authorityScope = purchaseStorageScope,
+                backendSyncedAtMillis = existing?.backendSyncedAtMillis,
+                checkoutCompletionEventId = existing?.checkoutCompletionEventId
+                    ?: checkoutFlight?.outcomeEventId
+                    ?: exactBinding?.outcomeEventId,
+            )
+            upsertEvidenceLocked(evidenceCandidate, givesWayTo = checkoutFlight?.owner)
+        }
         if (evidence == null) {
             val failedOutcome = PurchaseOutcome.Failed(
                 IllegalStateException("Could not persist purchase evidence."),
@@ -2002,13 +2011,6 @@ internal class PurchaseService(
     private suspend fun heldBack(purchaseToken: String): SyncResult {
         evidenceStore.load()[purchaseToken]?.pendingSend?.let { recordFailedSend(purchaseToken, it) }
         return SyncResult.UNAVAILABLE
-    }
-
-    /** Send every entry kept after a failed send again now. */
-    private suspend fun resendKeptEntries() {
-        evidenceStore.load().values
-            .filter { it.pendingSend != null && it.syncAttempts > 0 }
-            .forEach { sendOwed(it.purchaseToken) }
     }
 
     /**
@@ -2299,9 +2301,6 @@ internal class PurchaseService(
     } else {
         candidates.filter { identity(it).matchesKnownIdentity(knownIdentity) }.singleOrNull()
     }
-
-    private suspend fun upsertEvidence(candidate: PurchaseEvidence, givesWayTo: String? = null): PurchaseEvidence? =
-        projectionRefresh.withLock { upsertEvidenceLocked(candidate, givesWayTo) }
 
     /**
      * Merge an observation's monotonic Play facts; called only while

@@ -101,6 +101,18 @@ class PurchaseConformanceTest {
             originalJson = "{}",
             signature = "",
         )
+        // The catalog is known before the SDK starts: a catalog change would run
+        // the Play recovery, which is not what this vector drives.
+        assertTrue(
+            store.upsertProductMapping(
+                StoredProductMapping(
+                    storeProductId = storeProductId,
+                    nuxieProductId = "fixture-product",
+                    productType = BillingClient.ProductType.INAPP,
+                    consumable = false,
+                ),
+            ),
+        )
         val billing = FixtureBilling(purchase)
         val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
         var evidenceAtCapture: PurchaseEvidence? = null
@@ -131,21 +143,6 @@ class PurchaseConformanceTest {
             outboxRetryInitialDelayMillis = 10,
             outboxRetryMaxDelayMillis = 10,
         )
-        service.rememberProduct(
-            StoreProduct(
-                productId = "fixture-product",
-                storeProductId = storeProductId,
-                basePlanId = null,
-                offerId = null,
-                placementId = null,
-                rawProduct = null,
-                offerToken = null,
-                isOfferPersonalized = false,
-                productType = BillingClient.ProductType.INAPP,
-                consumable = false,
-            ),
-        )
-
         service.onPurchasesUpdated(okUpdate(purchase))
 
         if (!retry.getValue("emit_on_failure").jsonPrimitive.boolean) {
