@@ -182,6 +182,26 @@ class NuxieTestStoreTest {
     }
 
     @Test
+    fun `a purchase that overlaps one in flight is a purchase of its own`() = runTest {
+        val transactionIds = mutableListOf<String>()
+        val firstAnswer = CompletableDeferred<Unit>()
+        val store = NuxieTestStore(Choices()) { _, transactionId, _ ->
+            transactionIds += transactionId
+            if (transactionIds.size == 1) firstAnswer.await()
+            kotlinx.serialization.json.buildJsonObject { put("success", kotlinx.serialization.json.JsonPrimitive(true)) }
+        }
+
+        val first = async { store.purchase(product("prd_credits"), "alice") }
+        runCurrent()
+        val second = store.purchase(product("prd_credits"), "alice")
+        firstAnswer.complete(Unit)
+
+        assertEquals(PurchaseResult.Purchased, second.result)
+        assertEquals(PurchaseResult.Purchased, first.await().result)
+        assertEquals(2, transactionIds.toSet().size)
+    }
+
+    @Test
     fun `an unanswered grant is kept for its own customer and product`() = runTest {
         val transactionIds = mutableListOf<String>()
         val store = NuxieTestStore(Choices()) { _, transactionId, distinctId ->

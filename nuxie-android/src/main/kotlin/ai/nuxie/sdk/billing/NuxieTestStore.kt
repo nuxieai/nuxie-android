@@ -3,8 +3,10 @@ package ai.nuxie.sdk.billing
 import ai.nuxie.sdk.network.NuxieApi
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 
 internal enum class TestStorePurchaseChoice { PURCHASED, PENDING, CANCELLED, FAILED }
@@ -49,7 +51,8 @@ internal class NuxieTestStore(
     /**
      * A grant whose outcome is unknown (the server may have committed it) keeps
      * its transaction ID, so the customer's next Purchased of the same Product
-     * replays that grant instead of granting again.
+     * replays that grant instead of granting again. A purchase takes the ID
+     * while it runs, so one that overlaps it is a purchase of its own.
      */
     private val unsettledTransactionIds = mutableMapOf<Pair<String, String>, String>()
 
@@ -59,21 +62,22 @@ internal class NuxieTestStore(
         return when (if (activity == null) choices.purchase(product) else choices.purchase(product, activity)) {
             TestStorePurchaseChoice.PURCHASED -> {
                 val attempt = distinctId to product.productId
-                val transactionId = mutex.withLock {
-                    unsettledTransactionIds.getOrPut(attempt) { "nuxie-test-${UUID.randomUUID()}" }
-                }
+                val transactionId = mutex.withLock { unsettledTransactionIds.remove(attempt) }
+                    ?: "nuxie-test-${UUID.randomUUID()}"
                 val access = try {
                     granting.grant(product.productId, transactionId, distinctId)
                 } catch (cancellation: CancellationException) {
+                    withContext(NonCancellable) {
+                        mutex.withLock { unsettledTransactionIds[attempt] = transactionId }
+                    }
                     throw cancellation
                 } catch (failure: Exception) {
-                    if (failure is NuxieApi.TestStoreGrantRefusedException) {
-                        mutex.withLock { unsettledTransactionIds.remove(attempt) }
+                    if (failure !is NuxieApi.TestStoreGrantRefusedException) {
+                        mutex.withLock { unsettledTransactionIds[attempt] = transactionId }
                     }
                     return TestStorePurchaseResponse(PurchaseResult.Failed(failure))
                 }
                 mutex.withLock {
-                    unsettledTransactionIds.remove(attempt)
                     purchases.getOrPut(distinctId) { linkedMapOf() }[product.productId] = product
                 }
                 TestStorePurchaseResponse(PurchaseResult.Purchased, transactionId, access)
