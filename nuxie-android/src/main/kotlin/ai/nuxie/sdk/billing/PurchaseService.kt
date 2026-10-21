@@ -584,15 +584,25 @@ internal class PurchaseService(
         scope.launch { refreshOptimisticProjection() }
     }
 
-    /** Every evidence write goes through these: one that fails turns the outbox off. */
-    private suspend fun saveEntry(evidence: PurchaseEvidence): Boolean =
-        !outboxOff && (evidenceStore.upsert(evidence) || false.also { switchOutboxOff() })
+    /**
+     * Every evidence write goes through these: one that fails turns the outbox
+     * off. Each waits for the launch's store open first.
+     */
+    private suspend fun saveEntry(evidence: PurchaseEvidence): Boolean {
+        launchOpen?.join()
+        return !outboxOff && (evidenceStore.upsert(evidence) || false.also { switchOutboxOff() })
+    }
 
-    private suspend fun saveBinding(binding: StoredPurchaseBinding): Boolean =
-        !outboxOff && (evidenceStore.upsertBinding(binding) || false.also { switchOutboxOff() })
+    private suspend fun saveBinding(binding: StoredPurchaseBinding): Boolean {
+        launchOpen?.join()
+        return !outboxOff && (evidenceStore.upsertBinding(binding) || false.also { switchOutboxOff() })
+    }
 
-    private suspend fun saveMapping(mapping: StoredProductMapping, catalogChange: Boolean = true): Boolean =
-        !outboxOff && (evidenceStore.upsertProductMapping(mapping, catalogChange) || false.also { switchOutboxOff() })
+    private suspend fun saveMapping(mapping: StoredProductMapping, catalogChange: Boolean = true): Boolean {
+        launchOpen?.join()
+        return !outboxOff &&
+            (evidenceStore.upsertProductMapping(mapping, catalogChange) || false.also { switchOutboxOff() })
+    }
     private val usageCoordinationLock = Any()
     /** The one send in flight per purchase token; guarded by [usageCoordinationLock]. */
     private val sending = mutableMapOf<String, CompletableDeferred<SendAnswer>>()
@@ -630,12 +640,18 @@ internal class PurchaseService(
     fun start() {
         if (started) return
         started = true
+        // A corrupt store file is moved aside and an empty one takes its place. A
+        // file that cannot be read right now cannot save either: the outbox is off.
+        val open = scope.launch { if (!evidenceStore.openAtLaunch()) switchOutboxOff() }
+        launchOpen = open
         scope.launch {
-            // A store that cannot be read cannot save either: the outbox is off.
-            if (!evidenceStore.isReadable()) switchOutboxOff()
+            open.join()
             scheduleStoredRetries()
         }
     }
+
+    /** The launch's store open: no write goes before it, so none lands on a file it moves aside. */
+    @Volatile private var launchOpen: Job? = null
 
     /**
      * At launch, every unanswered entry gets its timer from its saved due time.
