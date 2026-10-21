@@ -4793,6 +4793,62 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun anAlreadyOwnedAnswerInAPurchaseUpdateIsReconciledLikeALaunchResult() = runTest {
+        val fixture = fixture(this)
+        fixture.core.identity.setDistinctId("buyer")
+        fixture.synchronizer = { accepted("buyer", it) }
+        val checkout = async { fixture.service.purchase(activity(), product(), null) }
+        runCurrent()
+        // Play accepted the launch, then reports through its callback that this
+        // account already owns the product.
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("owned-token", obfuscatedAccountId = accountHash("buyer")),
+        )
+        fixture.service.onPurchasesUpdated(
+            PurchaseUpdate(result(BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED), purchases = null),
+        )
+
+        val result = checkout.await()
+        assertTrue("$result", (result as PurchaseResult.Failed).cause is PurchaseAlreadyOwnedException)
+        assertEquals(
+            listOf("owned-token" to PurchaseSyncRequest(PurchaseSyncReason.PURCHASE, "buyer", CustomerKind.IDENTIFIED)),
+            fixture.requests.toList(),
+        )
+        fixture.close()
+    }
+
+    @Test
+    fun aRestoreAdmitsWhatItFindsAsItsClaimWithoutUnlockingEarly() = runTest {
+        val fixture = fixture(this)
+        val customer = fixture.core.identity.distinctId()
+        fixture.service.rememberProduct(
+            product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+        )
+        runCurrent()
+        // A purchase of this customer's Play account that this device never stored.
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("found-token", obfuscatedAccountId = accountHash(customer)),
+        )
+        val written = mutableListOf<PurchaseSyncReason?>()
+        fixture.store.rejectEvidenceUpsert = { evidence ->
+            if (evidence.purchaseToken == "found-token") written += evidence.pendingSend?.reason
+            false
+        }
+        var unlockedEarly = false
+        fixture.core.featureInfo.onFeatureChange = { featureId, _, newAccess, _ ->
+            if (featureId == "pro" && newAccess.allowed) unlockedEarly = true
+        }
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
+
+        assertTrue(fixture.service.restorePurchases() is RestoreResult.Failed)
+
+        assertFalse("No sync entry is written first", PurchaseSyncReason.SYNC in written)
+        assertEquals(PurchaseSyncReason.RESTORE, fixture.store.load().getValue("found-token").pendingSend?.reason)
+        assertFalse("Nothing a Restore finds unlocks early", unlockedEarly)
+        fixture.close()
+    }
+
+    @Test
     fun authenticatedRestoreWaitsForBackendVerification() = runTest {
         val fixture = fixture(this)
         val owner = fixture.core.identity.distinctId()

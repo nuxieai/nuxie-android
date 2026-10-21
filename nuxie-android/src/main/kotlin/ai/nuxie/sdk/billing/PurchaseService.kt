@@ -1052,10 +1052,8 @@ internal class PurchaseService(
         }
         if (launch.responseCode != BillingClient.BillingResponseCode.OK) {
             inFlight.remove(product.storeProductId, pending)
-            val owned = if (launch.responseCode == BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED) {
-                // Play says this account already owns the product: find that purchase.
-                (runCatching { queryPlay(product.productType) }.getOrNull() as? ActivePurchasesResult.Success)
-                    ?.purchases?.ownedPurchaseOf(product)
+            val reconciled = if (launch.responseCode == BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED) {
+                reconcileAlreadyOwned(product, owner, initiatingKind, outcomeCorrelation?.eventId)
             } else {
                 null
             }
@@ -1066,8 +1064,8 @@ internal class PurchaseService(
                     PurchaseOutcome.Cancelled(PurchaseOutcomeSource.CHECKOUT),
                     outcomeCorrelation?.eventId,
                 )
-            } else if (owned != null) {
-                alreadyOwned(product, owned, owner, initiatingKind, outcomeCorrelation?.eventId)
+            } else if (reconciled != null) {
+                reconciled
             } else {
                 failed(
                     product,
@@ -1095,6 +1093,23 @@ internal class PurchaseService(
      * purchase is sent as their purchase, so the server may move it to them,
      * and the checkout reports the product already owned.
      */
+    /**
+     * Play answered a checkout of [product] with ITEM_ALREADY_OWNED, from the
+     * launch result or a purchase update. Ask Play which purchase owns it and
+     * send that as the customer's purchase. Null when Play reports none.
+     */
+    private suspend fun reconcileAlreadyOwned(
+        product: StoreProduct,
+        owner: String,
+        ownerKind: CustomerKind,
+        outcomeEventId: String?,
+    ): PurchaseResult? {
+        val owned = (runCatching { queryPlay(product.productType) }.getOrNull() as? ActivePurchasesResult.Success)
+            ?.purchases?.ownedPurchaseOf(product)
+            ?: return null
+        return alreadyOwned(product, owned, owner, ownerKind, outcomeEventId)
+    }
+
     private suspend fun alreadyOwned(
         product: StoreProduct,
         owned: PlayPurchase,
@@ -1106,6 +1121,7 @@ internal class PurchaseService(
             commitPurchaseOutcome(
                 classifyPurchaseObservation(owned, PurchaseOutcomeSource.STARTUP_RECOVERY),
                 effects,
+                admitsSend = false,
             )
         }
         if (distinctId() == owner && evidenceStore.load().containsKey(owned.purchaseToken)) {
@@ -1185,10 +1201,12 @@ internal class PurchaseService(
             when {
                 found.isEmpty() -> RestoreResult.NoPurchases
                 else -> {
+                    // Everything this Restore finds is admitted as its claim below.
                     found.distinctBy { it.purchaseToken }.forEach { purchase ->
                         commitPurchaseOutcome(
                             classifyPurchaseObservation(purchase, PurchaseOutcomeSource.STARTUP_RECOVERY),
                             effects,
+                            admitsSend = false,
                         )
                     }
                     null
@@ -1302,6 +1320,30 @@ internal class PurchaseService(
                 )
             }
             return
+        }
+        if (update.billingResult.responseCode == BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED) {
+            // The same already-owned reconciliation as a launch result gives.
+            val checkout = inFlight.values.firstOrNull()
+            if (checkout != null && inFlight.remove(checkout.product.storeProductId, checkout)) {
+                val result = try {
+                    reconcileAlreadyOwned(checkout.product, checkout.owner, checkout.ownerKind, checkout.outcomeEventId)
+                        ?: failed(
+                            checkout.product,
+                            BillingUnavailableException(
+                                update.billingResult.responseCode,
+                                update.billingResult.debugMessage,
+                            ),
+                            checkout.owner,
+                            PurchaseOutcomeSource.CHECKOUT,
+                            checkout.outcomeEventId,
+                        )
+                } catch (failure: Throwable) {
+                    checkout.result.completeExceptionally(failure)
+                    throw failure
+                }
+                checkout.result.complete(result)
+                return
+            }
         }
         if (update.billingResult.responseCode != BillingClient.BillingResponseCode.OK) {
             withProcessingDecision { effects ->
@@ -1454,6 +1496,7 @@ internal class PurchaseService(
     private suspend fun commitPurchaseOutcome(
         observation: PlayPurchaseObservation,
         effects: ProcessingEffects,
+        admitsSend: Boolean = true,
     ): PurchaseEvidence? {
         val identity = PurchaseCommitIdentity.Evidence(observation.purchase.purchaseToken)
         if (completedPurchaseCommits.containsKey(identity)) return null
@@ -1461,7 +1504,7 @@ internal class PurchaseService(
             effects.purchaseCommitWaits += ongoing
             return null
         }
-        return commitStoreOutcome(observation.purchase, observation.source, effects)
+        return commitStoreOutcome(observation.purchase, observation.source, effects, admitsSend)
     }
 
     /** The sole interpreter for conclusions from every purchase source. */
@@ -1617,10 +1660,16 @@ internal class PurchaseService(
     }
 
     /** Persist and stage local facts while [processing] is held; return any I/O follow-up. */
+    /**
+     * [admitsSend] is false for a purchase a claim (Restore or already owned)
+     * observes: the claim is admitted as its entry, so the observation writes
+     * no send of its own and nothing it finds unlocks early first.
+     */
     private suspend fun commitStoreOutcome(
         purchase: PlayPurchase,
         source: PurchaseOutcomeSource,
         effects: ProcessingEffects,
+        admitsSend: Boolean = true,
     ): PurchaseEvidence? {
         val existing = evidenceStore.load()[purchase.purchaseToken]
         val bindings = evidenceStore.loadBindings()
@@ -1688,6 +1737,7 @@ internal class PurchaseService(
         // write: a crash before the send still sends it with this reason, requester
         // and kind. The customer's own checkout is a purchase; anything else syncs.
         val admittedSend = when {
+            !admitsSend -> null
             purchase.state != StoredPurchaseState.PURCHASED -> null
             signatureVerificationRequired && !signatureVerified -> null
             existing?.synced == true || existing?.refused == true -> null
