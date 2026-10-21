@@ -568,6 +568,15 @@ internal class PurchaseService(
      * the backoff its attempt count gives. Guarded by [projectionRefresh].
      */
     private val unsavedAttempts = mutableMapOf<String, UnsavedAttempts>()
+    /**
+     * Server answers the store could not save, by purchase token, for the
+     * admission they answered. For this session such an entry gives no early
+     * unlock and is not sent again before its backoff; the hold ends when a
+     * later answer is saved or a new admission replaces the entry. After a
+     * relaunch the entry is sent and answered again. Written while
+     * [projectionRefresh] is held.
+     */
+    private val unsavedAnswers = ConcurrentHashMap<String, UnsavedAnswer>()
     private val usageCoordinationLock = Any()
     /** The one send in flight per purchase token; guarded by [usageCoordinationLock]. */
     private val sending = mutableMapOf<String, CompletableDeferred<SendAnswer>>()
@@ -780,6 +789,7 @@ internal class PurchaseService(
         return evidenceStore.load().values.filter { evidence ->
             evidence.authorityScope == purchaseStorageScope &&
                 evidence.isBuyersOwnUnsyncedPurchase(distinctId, bindings, descriptors) &&
+                !evidence.hasUnsavedAnswer() &&
                 evidence.purchaseToken.isNotBlank() &&
                 evidence.packageName.isNotBlank() &&
                 evidence.storeProductIds.firstOrNull()?.isNotBlank() == true &&
@@ -2082,6 +2092,11 @@ internal class PurchaseService(
     private suspend fun sendOnce(purchaseToken: String): SendAnswer {
         val evidence = evidenceStore.load()[purchaseToken] ?: return SendAnswer(null, SyncResult.UNAVAILABLE)
         val send = evidence.pendingSend ?: return SendAnswer(null, SyncResult.UNAVAILABLE)
+        // An answer this session could not save is not sent again before its backoff;
+        // its timer sends it then.
+        unsavedAnswers[purchaseToken]
+            ?.takeIf { it.admissionId == send.admissionId && nowMillis() < it.dueAtMillis }
+            ?.let { return SendAnswer(null, SyncResult.UNAVAILABLE) }
         // A purchase whose Play signature the current catalog requires and that
         // never verified is never sent. Like any owed entry that cannot be sent,
         // it counts a failed attempt and waits out its backoff, so its timer
@@ -2207,10 +2222,11 @@ internal class PurchaseService(
         }?.copy(pendingSend = null, syncAttempts = 0, retryDueAtMillis = null)
         if (answered != null && evidenceStore.upsert(answered)) {
             unsavedAttempts.remove(purchaseToken)
+            unsavedAnswers.remove(purchaseToken)
             return EntryAnswer.Answered(answered)
         }
-        // No answer, or one that could not be saved: it changes nothing but the
-        // attempt count, so the entry stays owed and unlocking until an answer is saved.
+        // No answer, or one that could not be saved: on disk it changes nothing but
+        // the attempt count, so the entry stays owed and is sent again after its backoff.
         // An attempt count whose write failed is held here, so the backoff still grows.
         val held = unsavedAttempts[purchaseToken]?.takeIf { it.admissionId == send.admissionId }?.attempts ?: 0
         val attempts = maxOf(current.syncAttempts, held) + 1
@@ -2221,11 +2237,24 @@ internal class PurchaseService(
         } else {
             unsavedAttempts[purchaseToken] = UnsavedAttempts(send.admissionId, attempts)
         }
+        // The server did answer: for this session the entry gives no early unlock and
+        // is not sent again before its backoff. A later failure keeps the hold, due later.
+        val heldAnswer = unsavedAnswers[purchaseToken]?.takeIf { it.admissionId == send.admissionId }
+        if (answered != null || heldAnswer != null) {
+            unsavedAnswers[purchaseToken] = UnsavedAnswer(send.admissionId, dueAt)
+        }
         return EntryAnswer.Kept(dueAt)
     }
 
     /** An attempt count the store could not save, for the admission it counts. */
     private data class UnsavedAttempts(val admissionId: String, val attempts: Int)
+
+    /** A server answer the store could not save, for the admission it answered, due again at [dueAtMillis]. */
+    private data class UnsavedAnswer(val admissionId: String, val dueAtMillis: Long)
+
+    /** The server answered [evidence]'s current admission in this session, but the answer is not saved. */
+    private fun PurchaseEvidence.hasUnsavedAnswer(): Boolean =
+        pendingSend?.let { send -> unsavedAnswers[purchaseToken]?.admissionId == send.admissionId } == true
 
     /**
      * Apply the server's answer to a send of [purchaseToken]'s entry. After any
@@ -2243,6 +2272,8 @@ internal class PurchaseService(
                 val entry = answerEntryLocked(purchaseToken, send, answer)
                 val currentDistinctId = distinctId()
                 entry to when {
+                    // An answer that could not be saved still withdraws the early unlock.
+                    entry is EntryAnswer.Kept && answer != PurchaseAnswer.Failed -> stageOptimisticProjectionLocked()
                     entry !is EntryAnswer.Answered -> null
                     // The 200's Features bridge until the profile refresh lands; nobody
                     // else keeps the early unlock this acceptance ends.
@@ -2878,8 +2909,9 @@ internal class PurchaseService(
         return optimisticFeatureProjection(
             distinctId = currentDistinctId,
             authorityScope = purchaseStorageScope,
-            // The entry alone decides the early unlock: see [isBuyersOwnUnsyncedPurchase].
-            evidence = evidence,
+            // The entry decides the early unlock (see [isBuyersOwnUnsyncedPurchase]),
+            // except that an answer this session could not save already ended it.
+            evidence = evidence.filterNot { it.hasUnsavedAnswer() },
             descriptors = descriptors,
             bindings = bindings,
         )

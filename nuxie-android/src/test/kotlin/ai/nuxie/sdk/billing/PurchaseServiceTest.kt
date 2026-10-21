@@ -3474,12 +3474,14 @@ class PurchaseServiceTest {
         assertFalse("A refusal ends the early unlock at once", fixture.core.featureInfo.isAllowed("pro"))
         assertNotNull("The unwritten answer leaves the entry owed", fixture.store.load().getValue("refresh-token").pendingSend)
 
-        // Once the store accepts writes again, recovery sends it and writes the answer.
+        // Once the store accepts writes again, the entry is sent after its backoff (not
+        // before: the server answered it) and the answer is written. The recovery
+        // waits for a send already going out.
         fixture.store.rejectEvidenceUpsert = null
+        advanceTimeBy(60_000)
+        runCurrent()
         fixture.service.recover()
         val answered = fixture.store.load().getValue("refresh-token")
-        assertNull(answered.pendingSend)
-        assertTrue(answered.refused)
         assertNull(answered.pendingSend)
         assertTrue(answered.refused)
 
@@ -4746,8 +4748,8 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun aRefusalThatCannotBeSavedKeepsTheEntryOwedAndUnlockedUntilItIsSaved() = runTest {
-        val fixture = fixture(this, initialRetryDelayMillis = 10, maxRetryDelayMillis = 10)
+    fun aRefusalThatCannotBeSavedEndsTheEarlyUnlockForTheSessionAndWaitsOutItsBackoff() = runTest {
+        val fixture = fixture(this, initialRetryDelayMillis = 1_000, maxRetryDelayMillis = 1_000)
         // The buyer's own checkout: no answer yet, so it unlocks early.
         fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
         val checkout = async {
@@ -4767,24 +4769,51 @@ class PurchaseServiceTest {
         fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(bought)
         fixture.synchronizer = { PurchaseSyncOutcome.Rejected(refused = true) }
         fixture.store.rejectEvidenceUpsert = { it.purchaseToken == "unsaved-refusal" && it.pendingSend == null }
+        val refreshes = fixture.authorityRefreshes
         fixture.service.recover()
 
         assertNotNull("Unsaved, the entry stays owed", fixture.store.load().getValue("unsaved-refusal").pendingSend)
-        assertTrue(
-            "An answer ends the early unlock only once it is saved on the entry",
-            fixture.core.featureInfo.isAllowed("pro"),
-        )
+        assertFalse("The refusal ends the early unlock for this session", fixture.core.featureInfo.isAllowed("pro"))
+        assertEquals("The requester's profile is still fetched", refreshes + 1, fixture.authorityRefreshes)
+        // It is not sent again before its backoff, even by another recovery.
+        val sent = fixture.requests.size
+        fixture.service.recover()
+        assertEquals(sent, fixture.requests.size)
 
-        // Once saving works, the entry is sent again and its answer saved, which
-        // ends the early unlock.
+        // Once saving works, the retry at its due time saves the answer.
         fixture.store.rejectEvidenceUpsert = null
-        advanceTimeBy(100)
+        advanceTimeBy(1_000)
         runCurrent()
+        assertEquals(sent + 1, fixture.requests.size)
         val answered = fixture.store.load().getValue("unsaved-refusal")
         assertNull(answered.pendingSend)
         assertTrue(answered.refused)
         assertFalse(fixture.core.featureInfo.isAllowed("pro"))
         fixture.close()
+    }
+
+    @Test
+    fun anUnsavedAnswerIsSentAndAnsweredAgainAfterARelaunch() = runTest {
+        val fixture = fixture(this, initialRetryDelayMillis = 1_000, maxRetryDelayMillis = 1_000)
+        val customer = fixture.core.identity.distinctId()
+        val purchase = playPurchase("relaunch-token", obfuscatedAccountId = accountHash(customer))
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(purchase)
+        // The server refuses it, and saving that answer fails.
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(refused = true) }
+        fixture.store.rejectEvidenceUpsert = { it.purchaseToken == "relaunch-token" && it.pendingSend == null }
+        fixture.service.recover()
+        assertNotNull(fixture.store.load().getValue("relaunch-token").pendingSend)
+        fixture.close()
+
+        // After a relaunch the hold is gone: the entry is sent and its answer saved.
+        fixture.store.rejectEvidenceUpsert = null
+        val relaunched = fixture(this, store = fixture.store, initialRetryDelayMillis = 1_000, maxRetryDelayMillis = 1_000)
+        relaunched.synchronizer = { PurchaseSyncOutcome.Rejected(refused = true) }
+        relaunched.billing.active[BillingClient.ProductType.INAPP] = listOf(purchase)
+        relaunched.service.recover()
+        assertEquals(listOf("relaunch-token"), relaunched.requests.map { it.first }.distinct())
+        assertNull(relaunched.store.load().getValue("relaunch-token").pendingSend)
+        relaunched.close()
     }
 
     @Test
