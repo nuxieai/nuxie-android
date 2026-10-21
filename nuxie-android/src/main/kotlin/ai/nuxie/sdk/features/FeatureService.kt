@@ -81,6 +81,8 @@ internal class FeatureService(
     private val featureMutationRevisions = mutableMapOf<String, Long>()
     private val committedMutationRevisions = mutableMapOf<CacheKey, Long>()
     private val usageInvalidationRevisions = mutableMapOf<String, Long>()
+    /** The revision at which each Feature's latest 200 hold was retired by a profile. */
+    private val retiredHoldRevisions = mutableMapOf<String, Long>()
 
     suspend fun getCached(featureId: String, entityId: String?): FeatureAccess? =
         getCached(featureId, requiredBalance = null, entityId = entityId)
@@ -349,6 +351,7 @@ internal class FeatureService(
         featureMutationRevisions.clear()
         committedMutationRevisions.clear()
         usageInvalidationRevisions.clear()
+        retiredHoldRevisions.clear()
         scopeGeneration += 1
         featureInfo.stageIdentityChange(
             features = mergeOptimisticOverlay(emptyMap()),
@@ -455,7 +458,9 @@ internal class FeatureService(
             // revision, so a check that began before it cannot publish its
             // answer over this profile.
             retired.flatMapTo(linkedSetOf()) { it.access.keys }.forEach { featureId ->
-                committedMutationRevisions[CacheKey(featureId, null)] = advanceFeatureMutationRevision(featureId)
+                val revision = advanceFeatureMutationRevision(featureId)
+                committedMutationRevisions[CacheKey(featureId, null)] = revision
+                retiredHoldRevisions[featureId] = revision
             }
             stageCurrentLocked(
                 expectedGeneration = hydrationGeneration,
@@ -734,6 +739,14 @@ internal class FeatureService(
                 ?: entityAccess(featureId, entityId)
                     ?.forRequiredBalance(requiredBalance)
                     ?.takeIf { directAnswer }
+                // A profile that retired a 200 hold after this check began and
+                // does not grant the Feature has the last word: the check's older
+                // answer is not returned.
+                ?: FeatureAccess(allowed = false, unlimited = false, balance = null, type = serverAccess.type)
+                    .takeIf {
+                        directAnswer && entityId == null &&
+                            (retiredHoldRevisions[featureId] ?: Long.MIN_VALUE) > requestMutationRevision
+                    }
                 ?: serverAccess
         } else {
             requestedAccess
@@ -769,6 +782,7 @@ internal class FeatureService(
         featureMutationRevisions.clear()
         committedMutationRevisions.clear()
         usageInvalidationRevisions.clear()
+        retiredHoldRevisions.clear()
         scopeGeneration += 1
         return true
     }

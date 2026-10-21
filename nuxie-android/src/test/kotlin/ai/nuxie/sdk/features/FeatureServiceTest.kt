@@ -847,11 +847,70 @@ class FeatureServiceTest {
         )
         assertFalse(core.featureInfo.isAllowed("pro"))
 
-        // The check began before that retirement: its answer cannot publish over the profile.
+        // The check began before that retirement: its answer cannot publish over
+        // the profile, nor reach the caller.
         releaseCheck.countDown()
-        check.await()
+        assertTrue(check.await().exceptionOrNull() is CancellationException)
         assertFalse(core.featureInfo.isAllowed("pro"))
         assertEquals(null, core.features.getCached("pro", null))
+        core.stop()
+    }
+
+    @Test
+    fun aCachedCheckThatBeganBeforeA200HoldRetiredReturnsTheProfilesAnswer() = runBlocking {
+        val checkStarted = CountDownLatch(1)
+        val releaseCheck = CountDownLatch(1)
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    checkStarted.countDown()
+                    assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "pro",
+                            requiredBalance = 1.0,
+                            allowed = true,
+                            balance = "null",
+                            type = "boolean",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    profileResponse("[]")
+                }
+            }
+        }
+        core = core(transport)
+        val customer = core.identity.distinctId()
+        core.features.hydrateProfile(customer, Json.parseToJsonElement("""{"features":[]}""").jsonObject)
+        core.features.publishStaged(
+            core.features.stagePurchaseAnswer(
+                customer,
+                Json.parseToJsonElement(
+                    """{"success":true,"features":[{"id":"pro","type":"boolean","allowed":true,"unlimited":false,"balance":null}]}""",
+                ).jsonObject,
+                emptyMap(),
+            ),
+        )
+
+        // A profile is requested after the 200, then a refreshing check of "pro" begins.
+        val purchaseRevision = core.features.capturePurchaseRevision()
+        val profileRevision = core.features.reserveAuthoritativeRevision()
+        val check = async(Dispatchers.Default) { core.features.checkWithCache("pro", forceRefresh = true) }
+        assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
+        // The profile lands without "pro" and retires the hold.
+        core.features.hydrateProfile(
+            customer,
+            Json.parseToJsonElement("""{"features":[]}""").jsonObject,
+            snapshotPurchaseRevision = purchaseRevision,
+            snapshotAuthoritativeRevision = profileRevision,
+        )
+
+        releaseCheck.countDown()
+        assertFalse("The caller gets the profile's answer, not the older check's", check.await().allowed)
+        assertFalse(core.featureInfo.isAllowed("pro"))
         core.stop()
     }
 
