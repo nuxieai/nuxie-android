@@ -458,6 +458,7 @@ internal class NuxieCore(
         presenter = journeyPresenter,
         nowMillis = nowMillis,
         replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
+        awaitEventsDrained = eventLog::awaitBarrier,
         artifactManager = releaseArtifactAcquirer,
         prepareNativeValues = { values, release, delivery ->
             if (release.descriptor["render"] is kotlinx.serialization.json.JsonObject) releaseArtifactAcquirer.acquire(release, delivery).use { acquired ->

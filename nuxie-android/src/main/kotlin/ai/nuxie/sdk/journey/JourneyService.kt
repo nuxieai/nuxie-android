@@ -214,6 +214,8 @@ internal class JourneyService(
     private val beforeAdmission: suspend () -> Unit = {},
     private val beforeParkedResume: suspend () -> Unit = {},
     private val replayPendingLocalRoutes: suspend (String) -> Boolean = { true },
+    /** Returns once every event accepted before the call has been committed and routed. */
+    private val awaitEventsDrained: suspend () -> Unit = {},
     private val artifactManager: JourneyArtifactManager? = null,
     private val prepareNativeValues: suspend (ai.nuxie.sdk.presentation.ExperienceRunValues,
         AuthenticatedJourneyRelease, ai.nuxie.sdk.experiences.JourneyReleaseDelivery) -> Unit = { _, _, _ -> },
@@ -345,6 +347,10 @@ internal class JourneyService(
             val distinctId: String,
             override val done: CompletableDeferred<Unit>,
         ) : Command
+        data class HoldDrained(
+            val distinctId: String,
+            override val done: CompletableDeferred<Unit>? = null,
+        ) : Command
         data class Wake(
             val generation: Long,
             val deadlineMillis: Long,
@@ -378,6 +384,11 @@ internal class JourneyService(
     private val profileRefetchesInFlight = mutableMapOf<String, Int>()
     /** An event left a due timeout for a pass at the current time. */
     private var timeoutPassDue = false
+    /**
+     * Customers whose hold just ended: their waits stay unresolved until the
+     * events sent during the hold, still on their way through EventLog, are in.
+     */
+    private val holdsDraining = mutableSetOf<String>()
     // Setup can run from a receiver, worker, or service before any Activity is
     // visible. Keep screen-bearing admission closed until the lifecycle
     // coordinator observes the first Activity entering the foreground.
@@ -476,6 +487,7 @@ internal class JourneyService(
                     is Command.UserChange -> userDidChangeNow(command.from, command.to)
                     is Command.RefetchBegin -> refetchWillBeginNow(command.distinctId)
                     is Command.RefetchSettle -> refetchDidSettleNow(command.distinctId)
+                    is Command.HoldDrained -> holdDrainedNow(command.distinctId)
                     is Command.Wake -> wakeNow(command.generation, command.deadlineMillis)
                     is Command.PresentationEnded -> presentationEndedNow(command)
                 }
@@ -755,8 +767,12 @@ internal class JourneyService(
     override suspend fun profileRefetchWillBegin(distinctId: String) =
         submit { done -> Command.RefetchBegin(distinctId, done) }
 
-    override suspend fun profileRefetchDidSettle(distinctId: String) =
+    override suspend fun profileRefetchDidSettle(distinctId: String) {
+        // Events sent during the hold reach Journey first, still held, so the
+        // settle replays all of them before it resolves any wait.
+        runCatching { awaitEventsDrained() }.onFailure { if (it is CancellationException) throw it }
         submit { done -> Command.RefetchSettle(distinctId, done) }
+    }
 
     private suspend fun submit(factory: (CompletableDeferred<Unit>) -> Command) {
         val done = CompletableDeferred<Unit>()
@@ -813,6 +829,7 @@ internal class JourneyService(
         var adoptedArtifacts = false
         try {
             if (identity.distinctId() != distinctId) return
+            val heldBefore = initialized && holdsEvents(distinctId)
             if (acceptsAuthorityScope) {
                 val authenticated = JourneyStorageScope(authority)
                 if (storageScope != null && storageScope != authenticated) {
@@ -839,6 +856,8 @@ internal class JourneyService(
             adoptedArtifacts = true
             previousArtifacts?.close()
             if (!initialized) return
+            // The copy ends the hold; events sent during it may still be in EventLog.
+            if (heldBefore) drainAfterHold(distinctId)
             if (!ensureJournal(distinctId)) return
             resetForegroundReceiptsIfNeeded()
             journal?.takeIf { it.distinctId == distinctId }?.let { current ->
@@ -1106,6 +1125,25 @@ internal class JourneyService(
     }
 
     /**
+     * The copy ended a hold. Events sent during it may still be in EventLog's
+     * queues; once they have reached Journey, the waits that ran out resolve.
+     */
+    private fun drainAfterHold(distinctId: String) {
+        if (!holdsDraining.add(distinctId)) return
+        scope.launch {
+            runCatching { awaitEventsDrained() }
+                .onFailure { if (it is CancellationException) throw it }
+            commands.trySend(Command.HoldDrained(distinctId))
+        }
+    }
+
+    private suspend fun holdDrainedNow(distinctId: String) {
+        if (!holdsDraining.remove(distinctId) || identity.distinctId() != distinctId) return
+        val state = currentState()
+        if (state != null) reconcileNow(state.generation) else reconcileWithoutCopyNow()
+    }
+
+    /**
      * Without a copy: replay what is pending, then resolve the waits that
      * ran out, so no wait times out ahead of an event sent in time.
      */
@@ -1125,6 +1163,10 @@ internal class JourneyService(
     /** A fetch of the customer's copy is running and they have no usable copy. */
     private fun holdsEvents(distinctId: String): Boolean =
         (profileRefetchesInFlight[distinctId] ?: 0) > 0 && currentState()?.distinctId != distinctId
+
+    /** The customer's events are held, or their hold ended and they are still on their way. */
+    private fun waitsHeld(distinctId: String): Boolean =
+        holdsEvents(distinctId) || distinctId in holdsDraining
 
     private fun currentState(): ProfileState? = profileState?.takeIf {
         it.distinctId == identity.distinctId()
@@ -1561,7 +1603,7 @@ internal class JourneyService(
         if (event == null && !foreground.get()) return
         // While the customer's events are held for a fetch, waits resolve only
         // once those events have replayed.
-        if (event == null && holdsEvents(identityScope.distinctId)) return
+        if (event == null && waitsHeld(identityScope.distinctId)) return
         val currentJournal = journal?.takeIf { it.distinctId == identityScope.distinctId } ?: return
         // This pass resolves every timeout due now.
         if (event == null) timeoutPassDue = false
@@ -3177,7 +3219,7 @@ internal class JourneyService(
         val distinctId = identity.distinctId()
         // While a fetch holds the customer's events their waits do not
         // resolve; the copy landing or the last fetch settling reschedules.
-        if (!foreground.get() || journal?.distinctId != distinctId || holdsEvents(distinctId)) return
+        if (!foreground.get() || journal?.distinctId != distinctId || waitsHeld(distinctId)) return
         val upcoming = journal?.runs()?.asSequence()
             ?.filter { it.completion == null }
             ?.mapNotNull { run -> run.park?.let { park ->
