@@ -754,8 +754,8 @@ internal class PurchaseService(
                         EntryAnswer.Superseded
                     }
                     val currentDistinctId = this.distinctId()
-                    if (currentDistinctId != distinctId) {
-                        StagedAtomicUse(
+                    when {
+                        currentDistinctId != distinctId -> StagedAtomicUse(
                             entry = entry,
                             access = null,
                             publication = features.stageOptimisticPurchaseProjection(
@@ -763,21 +763,36 @@ internal class PurchaseService(
                                 deriveOptimisticProjection(currentDistinctId),
                             ),
                         )
-                    } else {
-                        val staged = features.stageAuthoritativeUse(
-                            result = response,
-                            requestedFeatureId = featureId,
-                            distinctId = distinctId,
-                            entityId = entityId,
-                            expectedScope = featureScope,
-                            reconciledOptimisticProjection = deriveOptimisticProjection(),
-                            reconcileOptimisticProjection = true,
+                        // Only an answer that answered its entry changes Feature authority.
+                        // A superseded one (a newer admission holds the entry) or one the
+                        // outbox could not save changes no authority, cache, entry or
+                        // hold: it only asks for the profile again. The server consumed
+                        // the Feature, so the caller still gets the result.
+                        entry !is EntryAnswer.Answered -> StagedAtomicUse(
+                            entry = entry,
+                            access = features.authoritativeUseResultAccess(
+                                result = response,
+                                requestedFeatureId = featureId,
+                                distinctId = distinctId,
+                                expectedScope = featureScope,
+                            ),
+                            publication = null,
                         )
-                        StagedAtomicUse(entry, staged.access, staged.publication)
+                        else -> {
+                            val staged = features.stageAuthoritativeUse(
+                                result = response,
+                                requestedFeatureId = featureId,
+                                distinctId = distinctId,
+                                entityId = entityId,
+                                expectedScope = featureScope,
+                                reconciledOptimisticProjection = deriveOptimisticProjection(),
+                                reconcileOptimisticProjection = true,
+                            )
+                            StagedAtomicUse(entry, staged.access, staged.publication)
+                        }
                     }
                 }
                 features.publishStaged(stagedUse.publication)
-                (stagedUse.entry as? EntryAnswer.Kept)?.let { scheduleSendRetry(evidence.purchaseToken, it.dueAtMillis) }
                 // The customer changed during the command: its result is not theirs.
                 val access = stagedUse.access ?: throw kotlinx.coroutines.CancellationException()
                 releasePurchaseUsageClaim(evidence.purchaseToken)
