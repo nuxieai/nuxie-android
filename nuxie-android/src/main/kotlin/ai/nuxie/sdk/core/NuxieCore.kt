@@ -10,6 +10,7 @@ import ai.nuxie.sdk.events.EventLog
 import ai.nuxie.sdk.events.EventStore
 import ai.nuxie.sdk.events.NuxieContextBuilder
 import ai.nuxie.sdk.events.SQLiteEventStore
+import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.events.EventDeliveryWorker
 import ai.nuxie.sdk.features.FeatureInfo
 import ai.nuxie.sdk.features.FeatureService
@@ -135,6 +136,7 @@ internal class NuxieCore(
     private val preparationStarted = AtomicBoolean(false)
     private val preparationCompletion = CompletableDeferred<Result<Unit>>()
     private val requestInitialProfileRefresh = overrides.requestInitialProfileRefresh
+    private val journeyEventObserver = overrides.journeyEventObserver
 
     internal fun interface PresentationFactory {
         fun create(): ExperiencePresentationService
@@ -162,6 +164,8 @@ internal class NuxieCore(
          *  evidence-derived projection would clear a test's display overlay
          *  mid-assertion. */
         val billingClientFactory: BillingClientAdapterFactory? = null,
+        /** Unit suites observe each committed event the Journey subscriber receives. */
+        val journeyEventObserver: ((StoredEvent) -> Unit)? = null,
     )
 
     private val appContext = context.applicationContext ?: context
@@ -533,12 +537,11 @@ internal class NuxieCore(
     /** Called once from Nuxie.setup after construction. */
     fun start(initialActivity: android.app.Activity? = null) {
         featureUsage.startRecovery()
-        // Outbox work begins only now that the whole core is built.
-        purchases.start()
         val activityForwarder = ActivityForwarder(deliver = forwardActivity)
         eventLog.subscribeCommittedWithAdmission(
             sampleGeneration = journeys::eventAdmissionGeneration,
         ) { event, admittedGeneration ->
+            journeyEventObserver?.invoke(event)
             journeys.handleEvent(event, admittedGeneration)
         }
         eventLog.subscribeForwarding(
@@ -587,6 +590,12 @@ internal class NuxieCore(
         // Subscriber registration precedes recovery, while the synchronous
         // enqueue keeps every later capture behind initialization in its FIFO.
         journeys.enqueueInitialization()
+        // Outbox work begins only once everything that consumes its events is
+        // ready: the event subscribers are registered and Journey routing is
+        // queued, since the event log samples its subscribers at capture and
+        // never replays. The steps below (the lifecycle's foreground and the
+        // Billing connection both run purchase recovery) come after it.
+        purchases.start()
         if (registerLifecycle) {
             (appContext as? Application)?.registerActivityLifecycleCallbacks(lifecycleCoordinator)
             initialActivity?.let(lifecycleCoordinator::admitVisibleActivity)
