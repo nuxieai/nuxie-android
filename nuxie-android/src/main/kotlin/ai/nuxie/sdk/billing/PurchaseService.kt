@@ -673,24 +673,28 @@ internal class PurchaseService(
                 }
                 val stagedUse = projectionRefresh.withLock {
                     val current = evidenceStore.load()[evidence.purchaseToken]
-                    // The server accepted the claimed spend: its answer stands even if
-                    // Play's report changed meanwhile.
-                    if (current == null ||
-                        !current.isBuyersOwnUnsyncedPurchase(distinctId) ||
-                        !current.matchesAtomicUsePayload(evidence)
-                    ) {
-                        throw IllegalStateException("Could not persist accepted purchase evidence.")
+                    // The command carried the admission of the entry it used. The
+                    // server consumed the Feature, so its result always reaches the
+                    // caller; the admission decides only whether this answer clears
+                    // the entry. A newer admission stays owed and is sent itself.
+                    val answersEntry = current != null &&
+                        current.pendingSend == evidence.pendingSend &&
+                        current.matchesAtomicUsePayload(evidence)
+                    val persistedAccepted = if (answersEntry) {
+                        answeredTokens += evidence.purchaseToken
+                        // The server's receipt attached the purchase to this customer.
+                        checkNotNull(current).copy(
+                            ownerDistinctId = distinctId,
+                            refused = false,
+                            pendingSend = null,
+                            syncAttempts = 0,
+                            syncedCustomerId = distinctId,
+                            syncedEventEmitted = true,
+                            backendSyncedAtMillis = nowMillis(),
+                        ).takeIf { evidenceStore.upsert(it) }
+                    } else {
+                        null
                     }
-                    // The server's receipt attached the purchase to this customer.
-                    val persistedAccepted = current.copy(
-                        ownerDistinctId = distinctId,
-                        refused = false,
-                        pendingSend = null,
-                        syncedCustomerId = distinctId,
-                        syncedEventEmitted = true,
-                        backendSyncedAtMillis = nowMillis(),
-                    ).takeIf { evidenceStore.upsert(it) }
-                        ?: throw IllegalStateException("Could not persist accepted purchase evidence.")
                     val currentDistinctId = this.distinctId()
                     if (currentDistinctId != distinctId) {
                         StagedAtomicUse(
@@ -715,10 +719,20 @@ internal class PurchaseService(
                     }
                 }
                 features.publishStaged(stagedUse.publication)
-                val accepted = stagedUse.evidence ?: throw kotlinx.coroutines.CancellationException()
-                val access = checkNotNull(stagedUse.access)
+                // The customer changed during the command: its result is not theirs.
+                val access = stagedUse.access ?: throw kotlinx.coroutines.CancellationException()
                 releasePurchaseUsageClaim(evidence.purchaseToken)
-                completeManaged(accepted)
+                // Saved: the purchase completes with Play. Not saved, or a newer
+                // admission: the profile decides, and the entry is sent again.
+                val saved = stagedUse.evidence
+                if (saved != null) {
+                    completeManaged(saved)
+                } else {
+                    refreshFeatureAuthority()
+                    evidenceStore.load()[evidence.purchaseToken]?.pendingSend
+                        ?.takeIf { it == evidence.pendingSend }
+                        ?.let { recordFailedSend(evidence.purchaseToken, it) }
+                }
                 return FeatureUsageResult(
                     success = true,
                     featureId = featureId,
