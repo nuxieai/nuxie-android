@@ -5078,6 +5078,49 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun aStaleRetryTimerNeverSendsBeforeTheStoredDueTime() = runTest {
+        val clock = { 1_800_000_000_000L + testScheduler.currentTime }
+        val store = RecordingEvidenceStore()
+        // An owed entry stored as due in 1 s.
+        store.upsert(owedRestoreEvidence("stored-customer").copy(syncAttempts = 1, retryDueAtMillis = clock() + 1_000))
+        val fixture = fixture(
+            this,
+            store = store,
+            initialRetryDelayMillis = 10_000,
+            maxRetryDelayMillis = 10_000,
+            nowMillis = clock,
+            startService = false,
+        )
+        val sentAt = mutableListOf<Long>()
+        fixture.synchronizer = {
+            sentAt += testScheduler.currentTime
+            PurchaseSyncOutcome.Rejected()
+        }
+        runCurrent()
+
+        // Launch scheduling reads the entry (due in 1 s) and is held there.
+        val releaseLaunch = CompletableDeferred<Unit>()
+        store.holdNextLoad = { releaseLaunch.await() }
+        fixture.service.start()
+        runCurrent()
+        // Meanwhile recovery sends the entry, gets no answer and saves a later due time.
+        fixture.service.recover()
+        assertEquals(listOf(0L), sentAt)
+        assertEquals(clock() + 10_000, store.load().getValue("refresh-token").retryDueAtMillis)
+        // Then launch scheduling goes on with its older read of the entry.
+        releaseLaunch.complete(Unit)
+        runCurrent()
+
+        advanceTimeBy(9_999)
+        runCurrent()
+        assertEquals("Nothing is sent before the stored due time", listOf(0L), sentAt)
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals("It is sent at the stored due time", listOf(0L, 10_000L), sentAt)
+        fixture.close()
+    }
+
+    @Test
     fun noTimerSendsWhileTheOutboxIsOff() = runTest {
         val clock = { 1_800_000_000_000L + testScheduler.currentTime }
         val store = RecordingEvidenceStore()
@@ -5963,6 +6006,8 @@ class PurchaseServiceTest {
         /** Rejects only the evidence writes it matches. */
         var rejectEvidenceUpsert: ((PurchaseEvidence) -> Boolean)? = null
         var afterNextLoad: ((Map<String, PurchaseEvidence>) -> Unit)? = null
+        /** Runs once, after the next load took its snapshot, and may hold that load. */
+        var holdNextLoad: (suspend () -> Unit)? = null
         var afterNextMappingsLoad: (suspend (List<StoredProductMapping>) -> Unit)? = null
         /** Runs before each evidence write, and may hold it. */
         var beforeUpsert: (suspend (PurchaseEvidence) -> Unit)? = null
@@ -5973,6 +6018,9 @@ class PurchaseServiceTest {
             val callback = afterNextLoad
             afterNextLoad = null
             callback?.invoke(snapshot)
+            val hold = holdNextLoad
+            holdNextLoad = null
+            hold?.invoke()
             return snapshot
         }
         override suspend fun upsert(evidence: PurchaseEvidence): Boolean {
