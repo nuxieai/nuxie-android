@@ -614,7 +614,7 @@ class PurchaseFeatureUseTest {
             capturePurchaseSynced = capture,
             outboxRetryInitialDelayMillis = outboxRetryMillis,
             outboxRetryMaxDelayMillis = outboxRetryMillis * 4,
-        )
+        ).also { it.start() }
     }
 
     private fun evidence(
@@ -798,7 +798,7 @@ class PurchaseFeatureUseTest {
 
         override suspend fun loadProductMappings(): List<StoredProductMapping> = listOfNotNull(mapping)
 
-        override suspend fun upsertProductMapping(mapping: StoredProductMapping): Boolean {
+        override suspend fun upsertProductMapping(mapping: StoredProductMapping, catalogChange: Boolean): Boolean {
             this.mapping = mapping
             return true
         }

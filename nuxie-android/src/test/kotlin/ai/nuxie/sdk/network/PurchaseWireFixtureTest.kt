@@ -587,7 +587,7 @@ private object PurchaseWireFixtures {
             api = core.api,
             purchaseStorageScope = FULL_PURCHASE_SCOPE,
             capturePurchaseSynced = { _, _, _, _ -> true },
-        )
+        ).also { it.start() }
 
         try {
             runBlocking {

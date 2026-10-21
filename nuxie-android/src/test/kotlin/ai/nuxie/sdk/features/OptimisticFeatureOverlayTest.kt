@@ -670,10 +670,10 @@ class OptimisticFeatureOverlayTest {
         override suspend fun loadProductMappings(): List<StoredProductMapping> =
             delegate.loadProductMappings()
 
-        override suspend fun upsertProductMapping(mapping: StoredProductMapping): Boolean =
+        override suspend fun upsertProductMapping(mapping: StoredProductMapping, catalogChange: Boolean): Boolean =
             mappingInstallationLock.withLock {
-                delegate.upsertProductMapping(mapping).also { persisted ->
-                    if (persisted) productMappingsChangedListener?.invoke()
+                delegate.upsertProductMapping(mapping, catalogChange).also { persisted ->
+                    if (persisted && catalogChange) productMappingsChangedListener?.invoke()
                 }
             }
 
