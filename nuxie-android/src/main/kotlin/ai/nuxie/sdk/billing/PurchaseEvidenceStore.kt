@@ -412,8 +412,12 @@ internal class FilePurchaseEvidenceStore(
         },
     )
 
+    /**
+     * A row written before the outbox (it has no `refused`; its answer was in
+     * `synced` and `permanentlyRejected`) is not migrated: it is ignored, and
+     * the next write drops it.
+     */
     private fun decodeEvidence(raw: JsonObject): PurchaseEvidence? = runCatching {
-        val legacy = decodeLegacyAnswer(raw)
         PurchaseEvidence(
             purchaseToken = raw.string("purchaseToken") ?: return null,
             packageName = raw.string("packageName") ?: return null,
@@ -426,22 +430,16 @@ internal class FilePurchaseEvidenceStore(
             productType = raw.string("productType"),
             purchaseState = StoredPurchaseState.valueOf(raw.string("purchaseState") ?: return null),
             obfuscatedAccountId = raw.string("obfuscatedAccountId"),
-            buyerDistinctId = if (legacy != null) legacy.requester else raw.string("buyerDistinctId"),
-            ownerDistinctId = if (legacy != null) legacy.owner else raw.string("ownerDistinctId"),
-            refused = legacy?.refused ?: raw.boolean("refused"),
-            pendingSend = if (legacy != null) legacy.pendingSend else (raw["pendingSend"] as? JsonObject)?.let(::decodeSend),
+            buyerDistinctId = raw.string("buyerDistinctId"),
+            ownerDistinctId = raw.string("ownerDistinctId"),
+            refused = (raw["refused"] as? JsonPrimitive)?.booleanOrNull ?: return null,
+            pendingSend = (raw["pendingSend"] as? JsonObject)?.let(::decodeSend),
             context = (raw["context"] as? JsonObject)?.let(::decodeContext),
             pinnedFeatureAllowances = (raw["pinnedFeatureAllowances"] as? JsonArray)
                 ?.mapNotNull(::decodeAllowance),
             acknowledged = raw.boolean("acknowledged"),
             consumed = raw.boolean("consumed"),
-            // An answered entry has no failed sends left to count.
-            syncAttempts = if (legacy != null && legacy.pendingSend == null) {
-                0
-            } else {
-                (raw["syncAttempts"] as? JsonPrimitive)?.intOrNull ?: 0
-            },
-            // An entry stored before due times reads as due now (see the service).
+            syncAttempts = (raw["syncAttempts"] as? JsonPrimitive)?.intOrNull ?: 0,
             retryDueAtMillis = (raw["retryDueAtMillis"] as? JsonPrimitive)?.longOrNull,
             completionAttempts = (raw["completionAttempts"] as? JsonPrimitive)?.intOrNull ?: 0,
             firstSeenMillis = (raw["firstSeenMillis"] as? JsonPrimitive)?.longOrNull ?: return null,
@@ -458,40 +456,6 @@ internal class FilePurchaseEvidenceStore(
             checkoutCompletionEventId = raw.string("checkoutCompletionEventId"),
         )
     }.getOrNull()
-
-    private class LegacyAnswer(
-        val requester: String?,
-        val owner: String?,
-        val refused: Boolean,
-        val pendingSend: PurchaseSend?,
-    )
-
-    /**
-     * An entry written before the outbox kept the server's answer in `synced`
-     * (accepted) and `permanentlyRejected` (refused, or a signature that never
-     * verified: either way never sent again on its own), and the customer it was
-     * sent for in `syncAttributionDistinctId`. Its `ownerDistinctId` was the
-     * SDK's own guess, never the server's word, so it is not read. An entry
-     * the server never answered becomes an outbox entry that reads as a sync
-     * for a signed-in customer; whether it unlocks early depends only on
-     * Play's latest report. Null for an entry written by the outbox.
-     */
-    private fun decodeLegacyAnswer(raw: JsonObject): LegacyAnswer? {
-        if ("refused" in raw || "synced" !in raw) return null
-        val requester = raw.string("syncAttributionDistinctId")
-        val accepted = raw.boolean("synced")
-        val refused = !accepted && raw.boolean("permanentlyRejected")
-        val unanswered = !accepted && !refused &&
-            raw.string("purchaseState") == StoredPurchaseState.PURCHASED.name
-        return LegacyAnswer(
-            requester = requester,
-            owner = requester.takeIf { accepted },
-            refused = refused,
-            pendingSend = requester?.takeIf { unanswered }?.let {
-                PurchaseSend(PurchaseSyncReason.SYNC, it, CustomerKind.IDENTIFIED)
-            },
-        )
-    }
 
     /**
      * An entry stored before its reason and kind were recorded reads as a sync
