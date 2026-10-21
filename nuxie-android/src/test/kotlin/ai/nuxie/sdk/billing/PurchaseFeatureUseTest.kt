@@ -209,6 +209,29 @@ class PurchaseFeatureUseTest {
     }
 
     @Test
+    fun whileTheOutboxIsOffAPurchaseBackedUseTakesTheOrdinaryFeatureCommand() = runBlocking {
+        val transport = FakeTransport()
+        val core = core(transport)
+        // The buyer's own owed entry is readable, but no entry can be saved (a full disk, say).
+        val store = EntryWritesFailStore(evidence())
+        val service = service(core, store)
+        // The first entry write the outbox tries fails, so it is off for the session.
+        withTimeout(5_000) { while (store.refusedWrites.get() < 1) delay(10) }
+
+        val result = service.useFeatureWithPendingPurchase(
+            distinctId = "customer-a",
+            featureId = "credits",
+            amount = 1.0,
+            entityId = null,
+            metadata = null,
+        )
+
+        assertNull("No early unlock: the use takes the ordinary Feature command", result)
+        assertTrue(transport.requests.none { it.url.path == "/feature/consume" })
+        core.stop()
+    }
+
+    @Test
     fun aSendHeldBackByAFeatureCommandCountsAFailedAttemptAndIsRetried() = runBlocking {
         // The launch sent the entry once without an answer; it is due again in a second.
         val fixture = concurrentFixture(firstStatus = 503, outboxRetryMillis = 1_000)
@@ -795,6 +818,32 @@ class PurchaseFeatureUseTest {
             entityId = null,
             metadata = null,
         )
+    }
+
+    /** Reads its entries and installs the catalog, but cannot save an entry. */
+    private class EntryWritesFailStore(initial: PurchaseEvidence) : PurchaseEvidenceStore {
+        private val delegate = InMemoryPurchaseEvidenceStore()
+        val refusedWrites = java.util.concurrent.atomic.AtomicInteger()
+
+        init {
+            runBlocking { delegate.upsert(initial) }
+        }
+
+        override suspend fun load(): Map<String, PurchaseEvidence> = delegate.load()
+
+        override suspend fun upsert(evidence: PurchaseEvidence): Boolean {
+            refusedWrites.incrementAndGet()
+            return false
+        }
+
+        override suspend fun loadBindings(): List<StoredPurchaseBinding> = delegate.loadBindings()
+
+        override suspend fun upsertBinding(binding: StoredPurchaseBinding): Boolean = delegate.upsertBinding(binding)
+
+        override suspend fun loadProductMappings(): List<StoredProductMapping> = delegate.loadProductMappings()
+
+        override suspend fun upsertProductMapping(mapping: StoredProductMapping, catalogChange: Boolean): Boolean =
+            delegate.upsertProductMapping(mapping, catalogChange)
     }
 
     private class ObservingEvidenceStore(initial: PurchaseEvidence) : PurchaseEvidenceStore {
