@@ -1268,9 +1268,11 @@ internal class PurchaseService(
                 RestoreReconciliationException("A restored purchase could not be verified."),
             )
             restorable.isEmpty() -> RestoreResult.NoPurchases
+            // Owned by another account only when every claim was refused; any claim
+            // still unanswered leaves the Restore unconfirmed, whatever the others said.
             results.values.none { it == SyncResult.ACCEPTED } -> RestoreResult.Failed(
                 RestoreClaimException(
-                    if (results.values.any { it == SyncResult.REFUSED }) {
+                    if (results.values.all { it == SyncResult.REFUSED }) {
                         RestoreClaimError.OWNED_BY_ANOTHER_ACCOUNT
                     } else {
                         RestoreClaimError.UNCONFIRMED

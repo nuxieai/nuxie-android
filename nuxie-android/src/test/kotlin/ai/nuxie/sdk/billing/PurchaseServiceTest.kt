@@ -3802,6 +3802,36 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun aRestoreWithARefusedAndAnUnansweredClaimIsUnconfirmed() = runTest {
+        for (authenticated in listOf(false, true)) {
+            val fixture = fixture(this)
+            val customer = fixture.core.identity.distinctId()
+            fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+                playPurchase("refused-token", obfuscatedAccountId = accountHash(customer)),
+                playPurchase("unanswered-token", obfuscatedAccountId = accountHash(customer)),
+            )
+            fixture.synchronizer = { evidence ->
+                if (evidence.purchaseToken == "refused-token") {
+                    PurchaseSyncOutcome.Rejected(refused = true)
+                } else {
+                    PurchaseSyncOutcome.Rejected()
+                }
+            }
+
+            val result = fixture.service.restorePurchases(expectedOwnerDistinctId = customer.takeIf { authenticated })
+
+            assertEquals(
+                "One claim is still unanswered, so the Restore is unconfirmed",
+                RestoreClaimError.UNCONFIRMED,
+                ((result as RestoreResult.Failed).cause as RestoreClaimException).error,
+            )
+            assertEquals(PurchaseSyncReason.RESTORE, fixture.store.load().getValue("unanswered-token").pendingSend?.reason)
+            assertNull(fixture.store.load().getValue("refused-token").pendingSend)
+            fixture.close()
+        }
+    }
+
+    @Test
     fun outboxContractReportsARestoreOnlyWhenTheServerGrantsOne() = runTest {
         for (case in outboxContract.getValue("restore").jsonArray.map { it.jsonObject }) {
             val name = case.getValue("name").jsonPrimitive.content
