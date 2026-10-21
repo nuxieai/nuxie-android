@@ -518,6 +518,13 @@ internal class PurchaseService(
             val current = evidenceStore.load()[purchaseToken] ?: return@withLock false
             val marked = current.completionEmitted ||
                 evidenceStore.upsert(current.copy(completionEmitted = true))
+            // The checkout's completion is delivered: its binding stands for no other purchase.
+            evidenceStore.loadBindings()
+                .filter {
+                    it.awaitingCheckout && it.obfuscatedAccountId == current.obfuscatedAccountId &&
+                        current.matchesProductIdentity(it.productIdentity)
+                }
+                .forEach { evidenceStore.upsertBinding(it.copy(awaitingCheckout = false)) }
             marked && clearOutcomeCorrelation(current.checkoutCompletionEventId)
         }
 
@@ -968,106 +975,120 @@ internal class PurchaseService(
                 outcomeCorrelation?.eventId,
             )
         }
-        val queried = try {
-            billing.queryActive(product.productType)
-        } catch (failure: Throwable) {
-            ensureCheckoutIntakeOpen()
-            throw failure
-        }
-        ensureCheckoutIntakeOpen()
-        val active = when (queried) {
-            is ActivePurchasesResult.Failed -> return failed(
-                product,
-                BillingUnavailableException(queried.responseCode, queried.debugMessage),
-                owner,
-                PurchaseOutcomeSource.CHECKOUT,
-                outcomeCorrelation?.eventId,
-            )
-            is ActivePurchasesResult.Success -> queried.purchases
-        }
-        if (product.productType == BillingClient.ProductType.SUBS && replacement == null && active.isNotEmpty()) {
-            return failed(
-                product,
-                SubscriptionReplacementRequiredException(),
-                owner,
-                PurchaseOutcomeSource.CHECKOUT,
-                outcomeCorrelation?.eventId,
-            )
-        }
-        val priorTokens = active.mapTo(mutableSetOf()) { it.purchaseToken }
-
-        val result = CompletableDeferred<PurchaseResult>()
-        val pending = InFlightPurchase(
-            result,
-            owner,
-            initiatingKind,
-            accountId,
-            priorTokens,
-            product,
-            settings.handlingMode == PurchaseHandlingMode.NUXIE_MANAGED,
-            outcomeCorrelation?.eventId,
-        )
-        val registered = synchronized(inFlight) {
-            ensureCheckoutIntakeOpen()
-            if (inFlight.isNotEmpty()) false else {
-                inFlight[product.storeProductId] = pending
-                true
+        val outcome: PurchaseResult = run checkout@{
+            val queried = try {
+                billing.queryActive(product.productType)
+            } catch (failure: Throwable) {
+                ensureCheckoutIntakeOpen()
+                throw failure
             }
-        }
-        if (!registered) {
-            return failed(
-                product,
-                IllegalStateException("Another Play purchase is already in flight."),
-                owner,
-                PurchaseOutcomeSource.CHECKOUT,
-                outcomeCorrelation?.eventId,
-            )
-        }
-        val launch = runCatching {
             ensureCheckoutIntakeOpen()
-            billing.launch(
-                activity,
-                CheckoutRequest(product, accountId, replacement),
-            )
-        }.getOrElse {
-            inFlight.remove(product.storeProductId, pending)
-            ensureCheckoutIntakeOpen()
-            if (it is CancellationException) throw it
-            return failed(
-                product,
-                it,
-                owner,
-                PurchaseOutcomeSource.CHECKOUT,
-                outcomeCorrelation?.eventId,
-            )
-        }
-        if (launch.responseCode != BillingClient.BillingResponseCode.OK) {
-            inFlight.remove(product.storeProductId, pending)
-            val reconciled = if (launch.responseCode == BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED) {
-                reconcileAlreadyOwned(product, owner, initiatingKind, outcomeCorrelation?.eventId)
-            } else {
-                null
-            }
-            return if (launch.responseCode == BillingClient.BillingResponseCode.USER_CANCELED) {
-                commitStandaloneOutcome(
+            val active = when (queried) {
+                is ActivePurchasesResult.Failed -> return@checkout failed(
                     product,
+                    BillingUnavailableException(queried.responseCode, queried.debugMessage),
                     owner,
-                    PurchaseOutcome.Cancelled(PurchaseOutcomeSource.CHECKOUT),
+                    PurchaseOutcomeSource.CHECKOUT,
                     outcomeCorrelation?.eventId,
                 )
-            } else if (reconciled != null) {
-                reconciled
-            } else {
-                failed(
+                is ActivePurchasesResult.Success -> queried.purchases
+            }
+            if (product.productType == BillingClient.ProductType.SUBS && replacement == null && active.isNotEmpty()) {
+                return@checkout failed(
                     product,
-                    BillingUnavailableException(launch.responseCode, launch.debugMessage),
+                    SubscriptionReplacementRequiredException(),
                     owner,
                     PurchaseOutcomeSource.CHECKOUT,
                     outcomeCorrelation?.eventId,
                 )
             }
+            val priorTokens = active.mapTo(mutableSetOf()) { it.purchaseToken }
+
+            val result = CompletableDeferred<PurchaseResult>()
+            val pending = InFlightPurchase(
+                result,
+                owner,
+                initiatingKind,
+                accountId,
+                priorTokens,
+                product,
+                settings.handlingMode == PurchaseHandlingMode.NUXIE_MANAGED,
+                outcomeCorrelation?.eventId,
+            )
+            val registered = synchronized(inFlight) {
+                ensureCheckoutIntakeOpen()
+                if (inFlight.isNotEmpty()) false else {
+                    inFlight[product.storeProductId] = pending
+                    true
+                }
+            }
+            if (!registered) {
+                return@checkout failed(
+                    product,
+                    IllegalStateException("Another Play purchase is already in flight."),
+                    owner,
+                    PurchaseOutcomeSource.CHECKOUT,
+                    outcomeCorrelation?.eventId,
+                )
+            }
+            val launch = runCatching {
+                ensureCheckoutIntakeOpen()
+                billing.launch(
+                    activity,
+                    CheckoutRequest(product, accountId, replacement),
+                )
+            }.getOrElse {
+                inFlight.remove(product.storeProductId, pending)
+                ensureCheckoutIntakeOpen()
+                if (it is CancellationException) throw it
+                return@checkout failed(
+                    product,
+                    it,
+                    owner,
+                    PurchaseOutcomeSource.CHECKOUT,
+                    outcomeCorrelation?.eventId,
+                )
+            }
+            if (launch.responseCode != BillingClient.BillingResponseCode.OK) {
+                inFlight.remove(product.storeProductId, pending)
+                val reconciled = if (launch.responseCode == BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED) {
+                    reconcileAlreadyOwned(product, owner, initiatingKind, outcomeCorrelation?.eventId)
+                } else {
+                    null
+                }
+                return@checkout if (launch.responseCode == BillingClient.BillingResponseCode.USER_CANCELED) {
+                    commitStandaloneOutcome(
+                        product,
+                        owner,
+                        PurchaseOutcome.Cancelled(PurchaseOutcomeSource.CHECKOUT),
+                        outcomeCorrelation?.eventId,
+                    )
+                } else if (reconciled != null) {
+                    reconciled
+                } else {
+                    failed(
+                        product,
+                        BillingUnavailableException(launch.responseCode, launch.debugMessage),
+                        owner,
+                        PurchaseOutcomeSource.CHECKOUT,
+                        outcomeCorrelation?.eventId,
+                    )
+                }
+            }
+            result.await()
         }
-        return result.await()
+        // The checkout has its outcome, so its binding no longer stands for a
+        // purchase to come; a purchase still pending approval keeps it.
+        if (outcome !is PurchaseResult.Pending) endCheckoutBinding(accountId, product)
+        return outcome
+    }
+
+    /** The checkout of [product] for [accountId] ended: its binding keeps only catalog facts. */
+    private suspend fun endCheckoutBinding(accountId: String, product: StoreProduct) {
+        val identity = product.productIdentity()
+        evidenceStore.loadBindings()
+            .filter { it.awaitingCheckout && it.obfuscatedAccountId == accountId && it.productIdentity == identity }
+            .forEach { evidenceStore.upsertBinding(it.copy(awaitingCheckout = false)) }
     }
 
     /**
@@ -1108,9 +1129,10 @@ internal class PurchaseService(
         ownerKind: CustomerKind,
         outcomeEventId: String?,
     ): PurchaseResult {
-        // As on iOS: the failed checkout's correlation goes first, so reconciling the
+        // As on iOS: the failed checkout's binding goes first, so reconciling the
         // owned purchase carries no checkout context and captures no completion; the
         // checkout's only outcome is the already-owned failure below.
+        endCheckoutBinding(playAccountId(owner), product)
         clearOutcomeCorrelation(outcomeEventId)
         withProcessingDecision { effects ->
             commitPurchaseOutcome(
@@ -1679,8 +1701,9 @@ internal class PurchaseService(
                     }.singleOrNull()?.value
                 }
             val knownProductIdentity = existingProductIdentity ?: product?.productIdentity()
-            // Checkout bindings correlate a delivery with the checkout that made it.
-            val checkoutBindings = if (correlatesCheckout) bindings else emptyList()
+            // Only a binding whose checkout still awaits its outcome correlates a
+            // delivery with that checkout; any other binding gives catalog facts only.
+            val checkoutBindings = if (correlatesCheckout) bindings.filter { it.awaitingCheckout } else emptyList()
             val accountBindings = checkoutBindings.filter { binding ->
                 binding.obfuscatedAccountId == purchase.obfuscatedAccountId &&
                     binding.storeProductId in purchase.products
@@ -1689,7 +1712,7 @@ internal class PurchaseService(
                 it.productIdentity
             }
             val catalogBinding = exactBinding ?: selectFullProductMatch(
-                checkoutBindings.filter { it.storeProductId in purchase.products },
+                (if (correlatesCheckout) bindings else emptyList()).filter { it.storeProductId in purchase.products },
                 knownProductIdentity,
             ) { it.productIdentity }
             val catalogMapping = selectFullProductMatch(
@@ -1698,10 +1721,12 @@ internal class PurchaseService(
             ) { it.productIdentity }
             val currentOwner = distinctId()
             // Checkout correlation only: which customer's checkout made this Play
-            // purchase. Who owns it is only what the server last said.
+            // purchase, from the checkout itself or its binding. A purchase a scan,
+            // a Restore or an already-owned checkout finds carries no checkout
+            // context, so it never gets a checkout completion. Who owns it is only
+            // what the server last said.
             val buyerDistinctId = checkoutFlight?.owner
                 ?: exactBinding?.distinctId
-                ?: currentOwner.takeIf { purchase.obfuscatedAccountId == playAccountId(it) }
                 ?: existing?.buyerDistinctId
             // What the current catalog asks for, never a flag stored on the entry: any
             // licensing key for this store product requires Play's signature.

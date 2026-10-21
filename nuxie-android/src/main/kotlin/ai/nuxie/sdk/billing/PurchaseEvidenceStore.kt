@@ -79,6 +79,13 @@ internal data class StoredPurchaseBinding(
     val licensingPublicKey: String? = null,
     val nuxieManaged: Boolean,
     val outcomeEventId: String? = null,
+    /**
+     * The checkout this binding was written for has not had its outcome yet.
+     * Only such a binding correlates a Play delivery with a checkout (its
+     * customer, outcome event and completion); once the checkout ends, or its
+     * completion is delivered, the binding keeps only catalog facts.
+     */
+    val awaitingCheckout: Boolean = true,
 )
 
 internal data class StoredProductMapping(
@@ -204,7 +211,12 @@ internal data class PurchaseEvidence(
     val productType: String? = null,
     val purchaseState: StoredPurchaseState,
     val obfuscatedAccountId: String? = null,
-    /** The customer whose checkout made this purchase; checkout correlation for events only. */
+    /**
+     * The customer whose checkout made this purchase: checkout correlation for
+     * events only. Null when no checkout's context came with it (a purchase a
+     * scan, a Restore or an already-owned checkout found), and then no
+     * `$purchase_completed` is ever emitted for it.
+     */
     val buyerDistinctId: String? = null,
     /** The customer the server last attached this purchase to. Only the server's 200 sets it. */
     val ownerDistinctId: String? = null,
@@ -561,6 +573,7 @@ internal class FilePurchaseEvidenceStore(
             binding.licensingPublicKey?.let { put("licensingPublicKey", JsonPrimitive(it)) }
             put("nuxieManaged", JsonPrimitive(binding.nuxieManaged))
             binding.outcomeEventId?.let { put("outcomeEventId", JsonPrimitive(it)) }
+            put("awaitingCheckout", JsonPrimitive(binding.awaitingCheckout))
         },
     )
 
@@ -581,6 +594,8 @@ internal class FilePurchaseEvidenceStore(
             licensingPublicKey = raw.string("licensingPublicKey"),
             nuxieManaged = raw.boolean("nuxieManaged"),
             outcomeEventId = raw.string("outcomeEventId"),
+            // A binding stored without it awaits no checkout.
+            awaitingCheckout = raw.boolean("awaitingCheckout"),
         )
     }.getOrNull()
 
