@@ -709,7 +709,10 @@ internal class PurchaseService(
                 ) {
                     return null
                 }
-                val eventId = purchaseUsageEventId(evidence, featureId, amount, entityId)
+                // The command is built from the entry as it is now that it holds the
+                // purchase, never from the read before it waited for the purchase.
+                val claimed = claimedCandidates.single()
+                val eventId = purchaseUsageEventId(claimed, featureId, amount, entityId)
                 val featureScope = features.captureAuthoritativeUseScope(distinctId)
                 val response = usageApi.useFeatureWithPurchase(
                     NuxieApi.PurchaseBackedFeatureUseReport(
@@ -719,12 +722,12 @@ internal class PurchaseService(
                         eventData = NuxieApi.FeatureUseEventData(amount, metadata),
                         entityId = entityId,
                         purchase = NuxieApi.PlayPurchaseUseReport(
-                            packageName = evidence.packageName,
-                            productId = evidence.storeProductIds.first(),
-                            purchaseToken = evidence.purchaseToken,
-                            basePlanId = evidence.basePlanId,
-                            offerId = evidence.offerId,
-                            obfuscatedAccountId = evidence.obfuscatedAccountId,
+                            packageName = claimed.packageName,
+                            productId = claimed.storeProductIds.first(),
+                            purchaseToken = claimed.purchaseToken,
+                            basePlanId = claimed.basePlanId,
+                            offerId = claimed.offerId,
+                            obfuscatedAccountId = claimed.obfuscatedAccountId,
                             eventId = eventId,
                         ),
                     ),
@@ -732,7 +735,7 @@ internal class PurchaseService(
                 if (response.customerId != distinctId) {
                     throw IllegalStateException("Atomic Feature-use response customer did not match the purchase owner.")
                 }
-                val send = checkNotNull(evidence.pendingSend)
+                val send = checkNotNull(claimed.pendingSend)
                 // The command's answer passes the same admission check as every
                 // answer: only one for the admission (and payload) its entry still
                 // holds answers the entry, and only once that answer is saved is it
@@ -741,10 +744,10 @@ internal class PurchaseService(
                 // refreshes the profile.
                 val stagedUse = projectionRefresh.withLock {
                     val entry = answerEntryLocked(
-                        evidence.purchaseToken,
+                        claimed.purchaseToken,
                         send,
                         PurchaseAnswer.AcceptedFeatureUse(distinctId),
-                    ) { it.matchesAtomicUsePayload(evidence) }
+                    ) { it.matchesAtomicUsePayload(claimed) }
                     val currentDistinctId = this.distinctId()
                     when {
                         currentDistinctId != distinctId -> StagedAtomicUse(
@@ -2058,10 +2061,15 @@ internal class PurchaseService(
             withContext(NonCancellable) {
                 projectionRefresh.withLock {
                     val current = evidenceStore.load()[purchaseToken] ?: return@withLock false
+                    // The claim is built from the entry as it is now, in the purchase's
+                    // serialized step, never from what was true before it waited: a claim
+                    // whose customer is no longer the current one is dropped, so it can
+                    // never move the purchase back after another customer's Restore.
+                    if (requested.distinctId != distinctId()) return@withLock null
                     saveEntry(current.copy(pendingSend = claim, syncAttempts = 0, retryDueAtMillis = null))
                 }
             }
-        }
+        } ?: return SyncResult.UNAVAILABLE
         if (!admitted) return if (outboxOff) sendUnsaved(evidence, claim) else SyncResult.UNAVAILABLE
         // A claim of the buyer's own purchase replaces an entry that unlocked early.
         refreshOptimisticProjection()
