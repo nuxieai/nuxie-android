@@ -63,11 +63,12 @@ internal class FeatureService(
     private var durableEntities: Map<String, Map<String, FeatureAccess>> = emptyMap()
     private val realTimeCache = mutableMapOf<CacheKey, TimedAccess>()
     /**
-     * The Features the latest `/purchase` 200 granted, kept in memory only
-     * until a profile requested after that answer lands. The profile is the
-     * authority; this only bridges the moment between the answer and the refresh.
+     * The Features each `/purchase` 200 granted, oldest first, each with its
+     * own revision and kept in memory only until a profile requested after
+     * that answer lands. The profile is the authority; these only bridge the
+     * moment between an answer and the refresh it asks for.
      */
-    private var purchaseAnswer: PurchaseProjection? = null
+    private var purchaseAnswers: List<PurchaseProjection> = emptyList()
     private var optimisticOverlay: Map<String, OptimisticFeatureOverlay> = emptyMap()
     private var profileAdmitted = false
     private var purchaseMutationRevision = 0L
@@ -294,7 +295,7 @@ internal class FeatureService(
         realTimeCache.keys.removeAll { it.featureId == featureId }
         durableAccess = durableAccess - featureId
         durableEntities = durableEntities - featureId
-        purchaseAnswer = purchaseAnswer?.let { it.copy(access = it.access - featureId) }
+        purchaseAnswers = purchaseAnswers.map { it.copy(access = it.access - featureId) }
         return revision
     }
 
@@ -342,7 +343,7 @@ internal class FeatureService(
         durableAccess = emptyMap()
         durableEntities = emptyMap()
         realTimeCache.clear()
-        purchaseAnswer = null
+        purchaseAnswers = emptyList()
         optimisticOverlay = destinationProjection.orEmpty()
         profileAdmitted = false
         featureMutationRevisions.clear()
@@ -446,9 +447,9 @@ internal class FeatureService(
                     snapshotAuthoritativeRevision,
                 )
             }
-            if ((purchaseAnswer?.committedRevision ?: Long.MAX_VALUE) <= snapshotPurchaseRevision) {
-                purchaseAnswer = null
-            }
+            // A profile requested after an answer retires that answer's grants
+            // only; later answers keep theirs until a profile requested after them.
+            purchaseAnswers = purchaseAnswers.filter { it.committedRevision > snapshotPurchaseRevision }
             stageCurrentLocked(
                 expectedGeneration = hydrationGeneration,
                 publicationGuard = {
@@ -502,12 +503,11 @@ internal class FeatureService(
                 return@synchronized if (scopeChanged) stageCurrentLocked() else null
             }
             optimisticOverlay = projection.orEmpty()
-            val merged = purchaseAnswer?.access.orEmpty() + updates
-            val revision = advancePurchaseMutationRevision(merged.keys)
+            val revision = advancePurchaseMutationRevision(updates.keys)
             updates.keys.forEach { featureId ->
                 realTimeCache.keys.removeAll { it.featureId == featureId }
             }
-            purchaseAnswer = PurchaseProjection(merged, revision)
+            purchaseAnswers = purchaseAnswers + PurchaseProjection(updates, revision)
             stageCurrentLocked()
         }
     }
@@ -567,7 +567,7 @@ internal class FeatureService(
                 )
             }
         if (entityId == null) {
-            purchaseAnswer?.access?.get(featureId)
+            purchaseAnswerAccess()[featureId]
                 ?.forRequiredBalance(requiredBalance)
                 ?.let { return it }
         }
@@ -756,7 +756,7 @@ internal class FeatureService(
         durableAccess = emptyMap()
         durableEntities = emptyMap()
         realTimeCache.clear()
-        purchaseAnswer = null
+        purchaseAnswers = emptyList()
         optimisticOverlay = emptyMap()
         profileAdmitted = false
         featureMutationRevisions.clear()
@@ -818,8 +818,12 @@ internal class FeatureService(
     }
 
     private fun durableGlobalAccess(): Map<String, FeatureAccess> {
-        return durableAccess + purchaseAnswer?.access.orEmpty()
+        return durableAccess + purchaseAnswerAccess()
     }
+
+    /** Every held answer's Features, a later answer's over an earlier one's. */
+    private fun purchaseAnswerAccess(): Map<String, FeatureAccess> =
+        purchaseAnswers.fold(emptyMap()) { merged, answer -> merged + answer.access }
 
     private fun mergeOptimisticOverlay(base: Map<String, FeatureAccess>): Map<String, FeatureAccess> {
         var merged = base
