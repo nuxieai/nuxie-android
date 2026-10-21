@@ -1464,6 +1464,51 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun eachRestoreAndAlreadyOwnedClaimIsItsOwnAdmission() = runTest {
+        val fixture = fixture(this)
+        val customer = fixture.core.identity.distinctId()
+        val kind = fixture.core.identity.customerKind(customer)
+        val purchase = playPurchase("refresh-token", obfuscatedAccountId = accountHash(customer))
+        // An earlier Restore's claim is still owed, with the same reason and payload:
+        // it failed three times and is not due for an hour.
+        val earlier = PurchaseSend.admit(PurchaseSyncReason.RESTORE, customer, kind)
+        fixture.store.upsert(
+            owedRestoreEvidence(customer).copy(
+                productType = BillingClient.ProductType.INAPP,
+                obfuscatedAccountId = accountHash(customer),
+                pendingSend = earlier,
+                syncAttempts = 3,
+                retryDueAtMillis = Long.MAX_VALUE / 2,
+            ),
+        )
+        val sent = mutableListOf<PurchaseEvidence>()
+        fixture.synchronizer = { evidence ->
+            sent += evidence
+            accepted(evidence.requester, evidence)
+        }
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(purchase)
+
+        // A new Restore admits its own claim and sends it now; only its answer counts.
+        assertEquals(RestoreResult.Restored, fixture.service.restorePurchases())
+        val restoreSend = checkNotNull(sent.single().pendingSend)
+        assertEquals(PurchaseSyncReason.RESTORE, restoreSend.reason)
+        assertNotEquals("A fresh admission, not the earlier claim", earlier.admissionId, restoreSend.admissionId)
+        assertEquals(0, sent.single().syncAttempts)
+        assertNull(sent.single().retryDueAtMillis)
+
+        // A checkout that finds the product already owned admits its own claim too.
+        fixture.billing.launchCode = BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED
+        val owned = fixture.service.purchase(activity(), product(licensingPublicKey = null), null)
+        assertTrue("$owned", (owned as PurchaseResult.Failed).cause is PurchaseAlreadyOwnedException)
+        assertEquals(2, sent.size)
+        val ownedSend = checkNotNull(sent.last().pendingSend)
+        assertEquals(PurchaseSyncReason.PURCHASE, ownedSend.reason)
+        assertNotEquals(restoreSend.admissionId, ownedSend.admissionId)
+        assertEquals(0, sent.last().syncAttempts)
+        fixture.close()
+    }
+
+    @Test
     fun aLaterDeliveryReadsTheEntryNotAnEarlierCommit() = runTest {
         val actions = mutableListOf<String>()
         val fixture = fixture(this, actions = actions)
