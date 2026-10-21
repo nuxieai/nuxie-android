@@ -2110,7 +2110,9 @@ class PurchaseServiceTest {
                 allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)),
             ),
         )
-        // The buyer's own unanswered purchase unlocks early.
+        // The buyer's own unanswered purchase unlocks early; its send at launch
+        // gets no answer.
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
         runCurrent()
         assertTrue(
             "legacy evidence must project before normalization demands verification",
@@ -2119,7 +2121,6 @@ class PurchaseServiceTest {
         // Play is unreachable, so recovery cannot verify the signature; only
         // the normalization republish can retract the projected legacy grant.
         fixture.billing.failQueries = true
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
 
         fixture.service.recover()
 
@@ -4787,8 +4788,8 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun anEntryStoredBeforeDueTimesIsDueAtLaunch() = runTest {
-        // Stored by an earlier version: it failed before, with no due time.
+    fun aFailedEntryWithNoSavedDueTimeIsDueAtLaunch() = runTest {
+        // It failed before, but its due time was never saved.
         val store = RecordingEvidenceStore()
         store.upsert(owedRestoreEvidence("stored-customer").copy(syncAttempts = 2, retryDueAtMillis = null))
 
@@ -4797,6 +4798,24 @@ class PurchaseServiceTest {
         runCurrent()
         assertEquals(listOf("refresh-token"), launched.requests.map { it.first })
         assertTrue("Play is not asked", launched.billing.queries.isEmpty())
+        launched.close()
+    }
+
+    @Test
+    fun anEntryNeverSentIsSentAtLaunchWithoutPlay() = runTest {
+        // The entry was admitted, then the process died before its first send.
+        val store = RecordingEvidenceStore()
+        store.upsert(owedRestoreEvidence("stored-customer").copy(syncAttempts = 0, retryDueAtMillis = null))
+
+        // The app starts again and Billing cannot connect.
+        val launched = fixture(this, store = store)
+        launched.billing.failQueries = true
+        launched.synchronizer = { accepted(it.requester, it) }
+        runCurrent()
+
+        assertEquals("The outbox sends it without Play", listOf("refresh-token"), launched.requests.map { it.first })
+        assertTrue(launched.billing.queries.isEmpty())
+        assertNull(store.load().getValue("refresh-token").pendingSend)
         launched.close()
     }
 

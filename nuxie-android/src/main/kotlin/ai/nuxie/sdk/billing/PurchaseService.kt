@@ -585,12 +585,16 @@ internal class PurchaseService(
     }
 
     /**
-     * At launch, each unanswered entry that has failed gets its timer from its
-     * saved due time. An overdue one, or one with no saved due time, is due now.
+     * At launch, every unanswered entry gets its timer from its saved due time.
+     * An overdue one, or one with no saved due time (saved but never sent, say,
+     * when the process died before its first send), is due now. The outbox
+     * sends without Play, so this holds even when Billing cannot connect.
      */
     private suspend fun scheduleStoredRetries() {
+        // The Test Store never sends native evidence.
+        if (testStore != null) return
         evidenceStore.load().values
-            .filter { it.pendingSend != null && it.syncAttempts > 0 }
+            .filter { it.pendingSend != null }
             .forEach { scheduleSendRetry(it.purchaseToken, it.retryDueAtMillis ?: nowMillis()) }
     }
 

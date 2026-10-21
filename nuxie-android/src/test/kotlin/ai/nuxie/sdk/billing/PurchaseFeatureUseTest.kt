@@ -23,6 +23,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runCurrent
@@ -140,8 +141,7 @@ class PurchaseFeatureUseTest {
     @Test
     fun aDueEntryASpendHoldsCountsAFailedAttemptAndMovesOn() = runBlocking {
         val fixture = concurrentFixture(firstStatus = 200, outboxRetryMillis = 500)
-        // The entry gets no answer, so it is due again in 500 ms.
-        fixture.service.recover()
+        // The launch sent the entry and it got no answer, so it is due again in 500 ms.
         assertEquals(1, fixture.store.load().getValue("token-1").syncAttempts)
 
         val use = async(Dispatchers.Default) { runCatching { fixture.use() } }
@@ -178,19 +178,20 @@ class PurchaseFeatureUseTest {
 
     @Test
     fun aSendHeldBackByAFeatureCommandCountsAFailedAttemptAndIsRetried() = runBlocking {
-        val fixture = concurrentFixture(firstStatus = 503, outboxRetryMillis = 300)
+        // The launch sent the entry once without an answer; it is due again in a second.
+        val fixture = concurrentFixture(firstStatus = 503, outboxRetryMillis = 1_000)
         val use = async(Dispatchers.Default) { runCatching { fixture.use() } }
         assertTrue(fixture.transport.firstRequestStarted.await(5, TimeUnit.SECONDS))
 
-        // A launch while the command holds the purchase cannot send its entry.
+        // A recovery while the command holds the purchase cannot send its entry.
         fixture.service.recover()
-        assertEquals("Held back, it counts a failed attempt", 1, fixture.store.load().getValue("token-1").syncAttempts)
+        assertEquals("Held back, it counts a failed attempt", 2, fixture.store.load().getValue("token-1").syncAttempts)
 
         // The command fails, so it does not settle the entry: the retry sends it.
         fixture.transport.releaseFirst.countDown()
         assertTrue(use.await().isFailure)
-        val retried = withTimeoutOrNull(3_000) {
-            while (fixture.store.load().getValue("token-1").syncAttempts < 2) delay(10)
+        val retried = withTimeoutOrNull(6_000) {
+            while (fixture.store.load().getValue("token-1").syncAttempts < 3) delay(10)
         }
         assertNotNull("Its retry was scheduled by its own due time", retried)
         fixture.core.stop()
@@ -706,13 +707,12 @@ class PurchaseFeatureUseTest {
         val transport = ControlledAtomicTransport(firstStatus)
         val core = core(transport)
         val store = ObservingEvidenceStore(evidence())
-        return ConcurrentFixture(
-            core,
-            transport,
-            store,
-            service(core, store, capture = capture, ownedOnPlay = ownedOnPlay, outboxRetryMillis = outboxRetryMillis),
-            ownedOnPlay,
-        )
+        val service = service(core, store, capture = capture, ownedOnPlay = ownedOnPlay, outboxRetryMillis = outboxRetryMillis)
+        // The launch sends the stored entry; it gets no answer. Settle that first.
+        kotlinx.coroutines.runBlocking {
+            withTimeout(5_000) { while ((store.load()["token-1"]?.syncAttempts ?: 0) < 1) delay(10) }
+        }
+        return ConcurrentFixture(core, transport, store, service, ownedOnPlay)
     }
 
     private data class FallbackFixture(
