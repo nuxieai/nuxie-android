@@ -18,6 +18,8 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -49,6 +51,9 @@ class PurchaseEvidenceStoreTest {
                     it.contains("Could not read purchase $description")
                 })
             }
+            // The unreadable evidence file fails closed: it is never written over.
+            assertFalse(store.upsert(owed("new-token")))
+            assertEquals("{bad-json", File(directory, "purchase-evidence.json").readText())
         } finally {
             directory.deleteRecursively()
         }
@@ -242,7 +247,7 @@ class PurchaseEvidenceStoreTest {
                     """"purchaseState":"PURCHASED","syncAttributionDistinctId":"requester","ownerDistinctId":"guessed-owner",""" +
                     """"acknowledged":true,"consumed":false,"synced":$synced,"permanentlyRejected":$rejected,""" +
                     """"revoked":$revoked,"syncAttempts":3,"completionAttempts":0,"firstSeenMillis":1}"""
-            // An owed send in a previous format: no reason, kind or admission.
+            // An owed send stored before admission ids.
             fun unrecorded(token: String, missing: String) =
                 """"$token":{"purchaseToken":"$token","packageName":"com.example.app","storeProductIds":["pro"],""" +
                     """"purchaseState":"PURCHASED","refused":false,"acknowledged":true,"consumed":false,""" +
@@ -260,8 +265,6 @@ class PurchaseEvidenceStoreTest {
                     previous("refused", synced = false, rejected = true),
                     previous("unanswered", synced = false, rejected = false),
                     previous("refunded", synced = false, rejected = false, revoked = true),
-                    unrecorded("no-reason", "reason"),
-                    unrecorded("no-kind", "customerKind"),
                     unrecorded("no-admission", "admissionId"),
                 ).joinToString(",") + "}",
             )
@@ -289,6 +292,58 @@ class PurchaseEvidenceStoreTest {
             directory.deleteRecursively()
         }
     }
+
+    @Test
+    fun aCurrentRowThatCannotBeReadClosesTheStoreAndLeavesItsFileUntouched(): Unit = kotlinx.coroutines.runBlocking {
+        ai.nuxie.sdk.logging.NuxieLog.configure(ai.nuxie.sdk.LogLevel.WARN)
+        // Current-format rows (they have `refused` and an admission id), each with one invalid field.
+        val breakages = mapOf<String, (JsonObject) -> JsonObject>(
+            "an owed send without its reason" to { row ->
+                JsonObject(row + ("pendingSend" to JsonObject(row.getValue("pendingSend").jsonObject - "reason")))
+            },
+            "an unknown customer kind" to { row ->
+                JsonObject(row + ("pendingSend" to JsonObject(row.getValue("pendingSend").jsonObject + ("customerKind" to JsonPrimitive("robot")))))
+            },
+            "an unknown purchase state" to { row -> JsonObject(row + ("purchaseState" to JsonPrimitive("REFUNDED"))) },
+            "no first-seen time" to { row -> JsonObject(row - "firstSeenMillis") },
+        )
+        for ((name, break_) in breakages) {
+            val directory = Files.createTempDirectory("nuxie-purchase-evidence").toFile()
+            org.robolectric.shadows.ShadowLog.clear()
+            try {
+                val writer = FilePurchaseEvidenceStore(directory)
+                assertTrue(writer.upsert(owed("good-token")))
+                assertTrue(writer.upsert(owed("broken-token")))
+                val file = File(directory, "purchase-evidence.json")
+                val rows = Json.parseToJsonElement(file.readText()).jsonObject
+                file.writeText(JsonObject(rows + ("broken-token" to break_(rows.getValue("broken-token").jsonObject))).toString())
+                val stored = file.readBytes()
+
+                val store = FilePurchaseEvidenceStore(directory)
+                assertTrue("$name: nothing is read while the store is unreadable", store.load().isEmpty())
+                assertFalse("$name: nothing is written while it is unreadable", store.upsert(owed("new-token")))
+                assertTrue("$name: the file is left byte for byte as it was", stored.contentEquals(file.readBytes()))
+                val warnings = org.robolectric.shadows.ShadowLog.getLogsForTag("NuxieBilling").map { it.msg }
+                assertTrue("$name: the log names the row by its position", warnings.any {
+                    it.contains("Could not read a purchase evidence row") && it.contains("row=1")
+                })
+                assertFalse(warnings.any { it.contains("broken-token") || it.contains("good-token") })
+            } finally {
+                directory.deleteRecursively()
+            }
+        }
+    }
+
+    private fun owed(token: String) = PurchaseEvidence(
+        purchaseToken = token,
+        packageName = "com.example.app",
+        storeProductIds = listOf("pro"),
+        purchaseState = StoredPurchaseState.PURCHASED,
+        buyerDistinctId = "requester",
+        pendingSend = PurchaseSend.admit(PurchaseSyncReason.PURCHASE, "requester", CustomerKind.ANONYMOUS),
+        acknowledged = false,
+        firstSeenMillis = 2,
+    )
 
     @Test
     fun bothStoresReportACatalogChangeOnlyWhenAMappingChanges(): Unit = kotlinx.coroutines.runBlocking {

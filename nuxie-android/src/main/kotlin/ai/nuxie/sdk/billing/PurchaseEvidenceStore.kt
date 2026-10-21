@@ -308,11 +308,13 @@ internal class FilePurchaseEvidenceStore(
     private val json = Json { ignoreUnknownKeys = true }
     @Volatile private var productMappingsChangedListener: (suspend () -> Unit)? = null
 
-    override suspend fun load(): Map<String, PurchaseEvidence> = onIo { synchronized(lock) { loadUnlocked() } }
+    /** An unreadable store reads as empty: nothing unlocks early and nothing is sent. */
+    override suspend fun load(): Map<String, PurchaseEvidence> = onIo { synchronized(lock) { readUnlocked().orEmpty() } }
 
+    /** An unreadable store is never written: its file stays exactly as it is. */
     override suspend fun upsert(evidence: PurchaseEvidence): Boolean = onIo {
         synchronized(lock) {
-            val entries = loadUnlocked().toMutableMap()
+            val entries = readUnlocked()?.toMutableMap() ?: return@synchronized false
             entries[evidence.purchaseToken] = evidence
             saveUnlocked(entries)
         }
@@ -397,15 +399,41 @@ internal class FilePurchaseEvidenceStore(
     }.onFailure { Log.w("NuxieBilling", "Could not persist purchase evidence", it, Log.sensitive("description", description)) }
         .getOrDefault(false)
 
-    private fun loadUnlocked(): Map<String, PurchaseEvidence> = runCatching {
-        if (!file.exists()) emptyMap() else json.parseToJsonElement(file.readText()).jsonObject
-            .mapNotNull { (token, raw) ->
-                val decoded = decodeEvidence(raw.jsonObject)
-                if (decoded == null) Log.w("NuxieBilling", "Invalid purchase evidence row was ignored.")
-                decoded?.let { token to it }
+    /**
+     * The stored entries, or null when the store is unreadable: a file that
+     * does not parse, or a row in the current format that does not decode.
+     * Either fails closed, and nothing is written until it reads again. A row
+     * in a previous SDK's format is recognised by what it lacks (no `refused`,
+     * or an owed send with no admission id) and only that row is dropped; the
+     * next write leaves it out. Play redelivers what it still owns, which then
+     * goes through the outbox normally. Rows are named by their position,
+     * never their purchase token.
+     */
+    private fun readUnlocked(): Map<String, PurchaseEvidence>? {
+        if (!file.exists()) return emptyMap()
+        val rows = runCatching { json.parseToJsonElement(file.readText()).jsonObject }
+            .onFailure { Log.w("NuxieBilling", "Could not read purchase evidence.", it) }
+            .getOrNull() ?: return null
+        val entries = linkedMapOf<String, PurchaseEvidence>()
+        rows.entries.forEachIndexed { index, (token, raw) ->
+            val row = raw as? JsonObject
+            if (row != null && isPreviousFormat(row)) {
+                Log.w("NuxieBilling", "Invalid purchase evidence row was dropped: it is in a previous format.", null, Log.status("row", index))
+                return@forEachIndexed
             }
-            .toMap()
-    }.onFailure { Log.w("NuxieBilling", "Could not read purchase evidence.", it) }.getOrDefault(emptyMap())
+            val decoded = row?.let(::decodeEvidence)
+            if (decoded == null) {
+                Log.w("NuxieBilling", "Could not read a purchase evidence row; the store stays closed until it reads.", null, Log.status("row", index))
+                return null
+            }
+            entries[token] = decoded
+        }
+        return entries
+    }
+
+    /** A row written before the outbox (no `refused`), or before admission ids (an owed send without one). */
+    private fun isPreviousFormat(row: JsonObject): Boolean =
+        "refused" !in row || (row["pendingSend"] as? JsonObject)?.let { "admissionId" !in it } == true
 
     private fun saveUnlocked(entries: Map<String, PurchaseEvidence>): Boolean = runCatching {
         directory.mkdirs()
@@ -466,13 +494,7 @@ internal class FilePurchaseEvidenceStore(
         },
     )
 
-    /**
-     * Only the current format is read. A row in a previous SDK's format (one
-     * written before the outbox has no `refused`; one whose owed send lacks its
-     * reason, kind or admission) is not migrated: it is ignored, and the next
-     * write drops it. Play redelivers what it still owns, which then goes
-     * through the outbox normally.
-     */
+    /** A row in the current format; null when any of its fields does not decode. */
     private fun decodeEvidence(raw: JsonObject): PurchaseEvidence? = runCatching {
         PurchaseEvidence(
             purchaseToken = raw.string("purchaseToken") ?: return null,
