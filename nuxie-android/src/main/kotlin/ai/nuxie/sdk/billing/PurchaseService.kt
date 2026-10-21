@@ -187,6 +187,8 @@ internal class PurchaseService(
         val product: StoreProduct,
         val nuxieManaged: Boolean,
         val outcomeEventId: String?,
+        /** This checkout's own id, made when it began; its binding carries it. */
+        val checkoutId: String,
     )
 
     /** What the server answered one submission, as far as this purchase's local state goes. */
@@ -511,13 +513,10 @@ internal class PurchaseService(
             val current = evidenceStore.load()[purchaseToken] ?: return@withLock false
             val marked = current.completionEmitted ||
                 saveEntry(current.copy(completionEmitted = true)) || outboxOff
-            // The checkout's completion is delivered: its binding stands for no other purchase.
-            evidenceStore.loadBindings()
-                .filter {
-                    it.awaitingCheckout && it.obfuscatedAccountId == current.obfuscatedAccountId &&
-                        current.matchesProductIdentity(it.productIdentity)
-                }
-                .forEach { saveBinding(it.copy(awaitingCheckout = false)) }
+            // The checkout's completion is delivered: the binding this purchase matched
+            // stands for no other purchase. It is retired by name, never another
+            // checkout's binding for the same customer and product.
+            current.checkoutId?.let { retireBinding(it) }
             marked && clearOutcomeCorrelation(current.checkoutCompletionEventId)
         }
 
@@ -596,6 +595,12 @@ internal class PurchaseService(
     private suspend fun saveBinding(binding: StoredPurchaseBinding): Boolean {
         launchOpen?.join()
         return !outboxOff && (evidenceStore.upsertBinding(binding) || false.also { switchOutboxOff() })
+    }
+
+    /** End checkout [checkoutId]'s binding by name; a failed write turns the outbox off. */
+    private suspend fun retireBinding(checkoutId: String): Boolean {
+        launchOpen?.join()
+        return !outboxOff && (evidenceStore.retireCheckoutBinding(checkoutId) || false.also { switchOutboxOff() })
     }
 
     private suspend fun saveMapping(mapping: StoredProductMapping, catalogChange: Boolean = true): Boolean {
@@ -1065,6 +1070,8 @@ internal class PurchaseService(
         // mapping that cannot be saved turns the outbox off, and the checkout goes on
         // with the product it holds.
         saveMapping(product.toMapping(), catalogChange = false)
+        // This checkout's own id: its binding is retired only by name.
+        val checkoutId = java.util.UUID.randomUUID().toString()
         val outcome: PurchaseResult = run checkout@{
             val queried = try {
                 billing.queryActive(product.productType)
@@ -1096,7 +1103,7 @@ internal class PurchaseService(
             // The checkout's binding names what Play already owned when it began, so
             // none of that is ever taken for the checkout's own purchase. Without it
             // (the outbox is off) the checkout in flight is the only context.
-            saveBinding(product.toBinding(accountId, owner, outcomeCorrelation?.eventId, priorTokens))
+            saveBinding(product.toBinding(accountId, owner, outcomeCorrelation?.eventId, priorTokens, checkoutId))
 
             val result = CompletableDeferred<PurchaseResult>()
             val pending = InFlightPurchase(
@@ -1108,6 +1115,7 @@ internal class PurchaseService(
                 product,
                 settings.handlingMode == PurchaseHandlingMode.NUXIE_MANAGED,
                 outcomeCorrelation?.eventId,
+                checkoutId,
             )
             val registered = synchronized(inFlight) {
                 ensureCheckoutIntakeOpen()
@@ -1146,7 +1154,7 @@ internal class PurchaseService(
             if (launch.responseCode != BillingClient.BillingResponseCode.OK) {
                 inFlight.remove(product.storeProductId, pending)
                 val reconciled = if (launch.responseCode == BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED) {
-                    reconcileAlreadyOwned(product, owner, initiatingKind, outcomeCorrelation?.eventId)
+                    reconcileAlreadyOwned(product, owner, initiatingKind, outcomeCorrelation?.eventId, checkoutId)
                 } else {
                     null
                 }
@@ -1173,16 +1181,17 @@ internal class PurchaseService(
         }
         // The checkout has its outcome, so its binding no longer stands for a
         // purchase to come; a purchase still pending approval keeps it.
-        if (outcome !is PurchaseResult.Pending) endCheckoutBinding(accountId, product)
+        if (outcome !is PurchaseResult.Pending) endCheckoutBinding(checkoutId)
         return outcome
     }
 
-    /** The checkout of [product] for [accountId] ended: its binding keeps only catalog facts. */
-    private suspend fun endCheckoutBinding(accountId: String, product: StoreProduct) {
-        val identity = product.productIdentity()
-        evidenceStore.loadBindings()
-            .filter { it.awaitingCheckout && it.obfuscatedAccountId == accountId && it.productIdentity == identity }
-            .forEach { saveBinding(it.copy(awaitingCheckout = false)) }
+    /**
+     * Checkout [checkoutId] ended: its binding keeps only catalog facts. Only
+     * that checkout's binding is ended, never another checkout's for the same
+     * customer and product, and the check and the write are one step.
+     */
+    private suspend fun endCheckoutBinding(checkoutId: String) {
+        retireBinding(checkoutId)
     }
 
     /**
@@ -1209,11 +1218,12 @@ internal class PurchaseService(
         owner: String,
         ownerKind: CustomerKind,
         outcomeEventId: String?,
+        checkoutId: String,
     ): PurchaseResult? {
         val owned = (runCatching { billing.queryActive(product.productType) }.getOrNull() as? ActivePurchasesResult.Success)
             ?.purchases?.ownedPurchaseOf(product)
             ?: return null
-        return alreadyOwned(product, owned, owner, ownerKind, outcomeEventId)
+        return alreadyOwned(product, owned, owner, ownerKind, outcomeEventId, checkoutId)
     }
 
     private suspend fun alreadyOwned(
@@ -1222,11 +1232,12 @@ internal class PurchaseService(
         owner: String,
         ownerKind: CustomerKind,
         outcomeEventId: String?,
+        checkoutId: String,
     ): PurchaseResult {
         // As on iOS: the failed checkout's binding goes first, so reconciling the
         // owned purchase carries no checkout context and captures no completion; the
         // checkout's only outcome is the already-owned failure below.
-        endCheckoutBinding(playAccountId(owner), product)
+        endCheckoutBinding(checkoutId)
         clearOutcomeCorrelation(outcomeEventId)
         val unsaved = withProcessingDecision { effects ->
             commitPurchaseOutcome(
@@ -1444,7 +1455,13 @@ internal class PurchaseService(
             val checkout = inFlight.values.firstOrNull()
             if (checkout != null && inFlight.remove(checkout.product.storeProductId, checkout)) {
                 val result = try {
-                    reconcileAlreadyOwned(checkout.product, checkout.owner, checkout.ownerKind, checkout.outcomeEventId)
+                    reconcileAlreadyOwned(
+                        checkout.product,
+                        checkout.owner,
+                        checkout.ownerKind,
+                        checkout.outcomeEventId,
+                        checkout.checkoutId,
+                    )
                         ?: failed(
                             checkout.product,
                             BillingUnavailableException(
@@ -1812,7 +1829,7 @@ internal class PurchaseService(
             // Only a binding whose checkout still awaits its outcome correlates a
             // delivery with that checkout; any other binding gives catalog facts only.
             val checkoutBindings = if (correlatesCheckout) {
-                bindings.filter { it.awaitingCheckout && purchase.purchaseToken !in it.priorTokens }
+                bindings.filter { it.awaitingCheckout && it.checkoutId != null && purchase.purchaseToken !in it.priorTokens }
             } else {
                 emptyList()
             }
@@ -1922,17 +1939,19 @@ internal class PurchaseService(
                 checkoutCompletionEventId = existing?.checkoutCompletionEventId
                     ?: checkoutFlight?.outcomeEventId
                     ?: exactBinding?.outcomeEventId,
+                checkoutId = existing?.checkoutId ?: checkoutFlight?.checkoutId ?: exactBinding?.checkoutId,
             )
             val stored = upsertEvidenceLocked(evidenceCandidate, givesWayTo = checkoutFlight?.owner)
             // A completion whose buyer is not the current customer waits on the buyer's
             // saved entry, which now holds it, so the checkout binding is retired. While
             // the outbox is off nothing is saved, and the binding keeps it until the
             // completion is captured.
-            if (!outboxOff && exactBinding != null && checkoutFlight == null &&
-                stored.buyerDistinctId == exactBinding.distinctId && stored.buyerDistinctId != currentOwner &&
+            val matchedCheckout = exactBinding?.checkoutId
+            if (!outboxOff && matchedCheckout != null && checkoutFlight == null &&
+                stored.checkoutId == matchedCheckout && stored.buyerDistinctId != currentOwner &&
                 stored.purchaseState == StoredPurchaseState.PURCHASED && !stored.completionEmitted
             ) {
-                saveBinding(exactBinding.copy(awaitingCheckout = false))
+                retireBinding(matchedCheckout)
             }
             stored to (stored.signatureVerified || !signatureVerificationRequired)
         }
@@ -2564,6 +2583,7 @@ internal class PurchaseService(
             backendSyncedAtMillis = current.backendSyncedAtMillis,
             checkoutCompletionEventId = current.checkoutCompletionEventId
                 ?: candidate.checkoutCompletionEventId,
+            checkoutId = current.checkoutId ?: candidate.checkoutId,
             pinnedFeatureAllowances = current.pinnedFeatureAllowances
                 ?: candidate.pinnedFeatureAllowances,
         ).let { kept ->
@@ -2902,6 +2922,7 @@ internal class PurchaseService(
         owner: String,
         outcomeEventId: String? = null,
         priorTokens: Set<String> = emptySet(),
+        checkoutId: String? = null,
     ) = StoredPurchaseBinding(
         obfuscatedAccountId = accountId,
         distinctId = owner,
@@ -2918,6 +2939,7 @@ internal class PurchaseService(
         nuxieManaged = settings.handlingMode == PurchaseHandlingMode.NUXIE_MANAGED,
         outcomeEventId = outcomeEventId,
         priorTokens = priorTokens,
+        checkoutId = checkoutId,
     )
 
     internal suspend fun rememberProduct(product: StoreProduct): Boolean =

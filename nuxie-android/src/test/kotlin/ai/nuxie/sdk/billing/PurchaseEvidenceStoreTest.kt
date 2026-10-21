@@ -406,6 +406,40 @@ class PurchaseEvidenceStoreTest {
             ai.nuxie.sdk.logging.NuxieLog.configure(ai.nuxie.sdk.LogLevel.WARN)
         }
 
+    @Test
+    fun aCheckoutBindingIsEndedOnlyByItsOwnCheckoutId(): Unit = kotlinx.coroutines.runBlocking {
+        val directory = Files.createTempDirectory("nuxie-checkout-bindings").toFile()
+        try {
+            fun binding(product: String, checkoutId: String) = StoredPurchaseBinding(
+                obfuscatedAccountId = "account-hash",
+                distinctId = "customer-1",
+                storeProductId = product,
+                nuxieProductId = product,
+                productType = "inapp",
+                consumable = false,
+                nuxieManaged = true,
+                checkoutId = checkoutId,
+            )
+            for (store in listOf(FilePurchaseEvidenceStore(directory), InMemoryPurchaseEvidenceStore())) {
+                assertTrue(store.upsertBinding(binding("play-pro", "checkout-1")))
+                assertTrue(store.upsertBinding(binding("play-plus", "checkout-2")))
+
+                assertTrue(store.retireCheckoutBinding("checkout-1"))
+                assertTrue("Nothing awaits an unknown checkout", store.retireCheckoutBinding("checkout-3"))
+
+                val byCheckout = store.loadBindings().associate { it.checkoutId to it.awaitingCheckout }
+                assertEquals(mapOf("checkout-1" to false, "checkout-2" to true), byCheckout)
+            }
+            assertEquals(
+                "The id survives a reload",
+                setOf("checkout-1", "checkout-2"),
+                FilePurchaseEvidenceStore(directory).loadBindings().mapTo(mutableSetOf()) { it.checkoutId },
+            )
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
     private fun owed(token: String) = PurchaseEvidence(
         purchaseToken = token,
         packageName = "com.example.app",
