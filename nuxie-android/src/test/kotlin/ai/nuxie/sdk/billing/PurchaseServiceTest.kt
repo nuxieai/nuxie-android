@@ -695,28 +695,6 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun recoveredAbsenceFromPlayRevokesAnUnsyncedManagedOptimisticOverlay() = runTest {
-        val fixture = fixture(this)
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
-        val checkout = async {
-            fixture.service.purchase(
-                activity(),
-                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
-                null,
-            )
-        }
-        runCurrent()
-        fixture.service.onPurchasesUpdated(okUpdate(playPurchase("refunded-token").forCheckout(fixture)))
-        assertEquals(PurchaseResult.Purchased, checkout.await())
-        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
-
-        fixture.service.recover()
-
-        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
-        fixture.close()
-    }
-
-    @Test
     fun mixedPendingAndVerifiedUpdatePublishesInReservationOrder() = runTest {
         val fixture = fixture(this)
         fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
@@ -751,9 +729,8 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun aPurchasePlayStopsReportingStopsUnlockingEarlyButStaysOwed() = runTest {
+    fun aPurchasePlayStopsReturningKeepsItsEarlyUnlockUntilTheServerAnswers() = runTest {
         val fixture = fixture(this)
-        val owner = fixture.core.identity.distinctId()
         fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
         val checkout = async {
             fixture.service.purchase(
@@ -769,79 +746,21 @@ class PurchaseServiceTest {
         assertEquals(PurchaseResult.Purchased, checkout.await())
         assertTrue(fixture.core.featureInfo.isAllowed("pro"))
 
-        // Play's query no longer reports the purchase (a refund, say).
-        val result = fixture.service.restorePurchases()
+        // Play's queries no longer return the purchase (a refund, say).
+        assertEquals(RestoreResult.NoPurchases, fixture.service.restorePurchases())
+        fixture.service.recover()
 
-        assertEquals(RestoreResult.NoPurchases, result)
-        assertNotNull("Every unanswered entry is sent until the server answers", fixture.store.load().getValue("failed-revocation").pendingSend)
-        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
-        fixture.service.rememberProduct(
-            product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+        assertNotNull(
+            "Every unanswered entry is sent until the server answers",
+            fixture.store.load().getValue("failed-revocation").pendingSend,
         )
-        runCurrent()
+        assertTrue("Only the server's answer ends the early unlock", fixture.core.featureInfo.isAllowed("pro"))
+
+        // The server refuses it: the early unlock ends at once.
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(refused = true) }
+        fixture.service.recover()
+        assertNull(fixture.store.load().getValue("failed-revocation").pendingSend)
         assertFalse(fixture.core.featureInfo.isAllowed("pro"))
-        assertEquals(
-            null,
-            fixture.service.useFeatureWithPendingPurchase(
-                distinctId = owner,
-                featureId = "pro",
-                amount = 1.0,
-                entityId = null,
-                metadata = null,
-            ),
-        )
-        fixture.close()
-    }
-
-    @Test
-    fun cancelledRevocationCannotLeaveAnOlderRefreshVisible() = runTest {
-        val fixture = fixture(this)
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
-        val checkout = async {
-            fixture.service.purchase(
-                activity(),
-                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
-                null,
-            )
-        }
-        runCurrent()
-        fixture.service.onPurchasesUpdated(okUpdate(playPurchase("revoked-token").forCheckout(fixture)))
-        assertEquals(PurchaseResult.Purchased, checkout.await())
-        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
-
-        val staleRefreshStartedPublishing = CompletableDeferred<Unit>()
-        val releaseStaleRefresh = CompletableDeferred<Unit>()
-        fixture.core.featureInfo.onFeatureChange = { featureId, _, _, _ ->
-            if (featureId == "refresh-blocker") {
-                staleRefreshStartedPublishing.complete(Unit)
-                releaseStaleRefresh.await()
-            }
-        }
-        // Purchase-time pinning means a late descriptor cannot introduce a new
-        // Feature on retained evidence, so the stale refresh is modeled as an
-        // older projection application parked mid-publication; the revocation
-        // staged behind it must still win once the chain drains.
-        val staleRefresh = launch {
-            fixture.core.features.applyOptimisticPurchaseProjection(
-                fixture.core.identity.distinctId(),
-                mapOf(
-                    "pro" to OptimisticFeatureOverlay(FeatureType.BOOLEAN, false, null),
-                    "refresh-blocker" to OptimisticFeatureOverlay(FeatureType.BOOLEAN, false, null),
-                ),
-            )
-        }
-        runCurrent()
-        staleRefreshStartedPublishing.await()
-
-        val restore = async { fixture.service.restorePurchases() }
-        runCurrent()
-        restore.cancel()
-        releaseStaleRefresh.complete(Unit)
-        staleRefresh.join()
-        runCurrent()
-
-        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
-        assertNotNull("The entry stays owed", fixture.store.load().getValue("revoked-token").pendingSend)
         fixture.close()
     }
 
@@ -930,11 +849,12 @@ class PurchaseServiceTest {
     @Test
     fun destinationProjectionInstallationOwnsTheRefreshMutexUntilInstallReturns() = runTest {
         val fixture = fixture(this)
-        // Play reported a purchase earlier; the Restore's query no longer does,
-        // so the Restore must republish the early unlock.
-        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(playPurchase("reported-before"))
-        fixture.service.refreshPlayReport()
-        fixture.billing.active[BillingClient.ProductType.INAPP] = emptyList()
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
+        // Play returns a purchase of this customer's account: the Restore commits it,
+        // which republishes the projection.
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("restored", obfuscatedAccountId = accountHash(fixture.core.identity.distinctId())),
+        )
         val installStarted = CountDownLatch(1)
         val releaseInstall = CountDownLatch(1)
         val installing = async(Dispatchers.Default) {
@@ -956,7 +876,7 @@ class PurchaseServiceTest {
         assertFalse(restore.isCompleted)
         releaseInstall.countDown()
         installing.await()
-        assertEquals(RestoreResult.NoPurchases, restore.await())
+        assertTrue("No answer yet", restore.await() is RestoreResult.Failed)
         assertEquals(queryCountBeforeRestore + 2, fixture.billing.queries.size)
         fixture.close()
     }
@@ -2032,19 +1952,14 @@ class PurchaseServiceTest {
                 allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)),
             ),
         )
-        // Play reports it, so the buyer's own unanswered purchase unlocks early.
-        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
-            playPurchase("legacy-projected", obfuscatedAccountId = accountHash(owner)),
-        )
-        fixture.service.refreshPlayReport()
+        // The buyer's own unanswered purchase unlocks early.
         runCurrent()
         assertTrue(
             "legacy evidence must project before normalization demands verification",
             fixture.core.featureInfo.isAllowed("pro"),
         )
-        // Play is unreachable, so its last report stands and recovery cannot
-        // verify the signature; only the normalization republish can retract
-        // the projected legacy grant.
+        // Play is unreachable, so recovery cannot verify the signature; only
+        // the normalization republish can retract the projected legacy grant.
         fixture.billing.failQueries = true
         fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
 
@@ -2576,51 +2491,7 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun aPreviousEntryRevokedBeforeTheServerAnsweredUnlocksOnlyWhilePlayReportsIt() = runTest {
-        val fixture = fixture(this)
-        val customer = fixture.core.identity.distinctId()
-        // Written before the outbox, when Play stopped reporting the customer's
-        // own purchase before the server answered it (a refund, say).
-        val directory = temporaryFolder.newFolder()
-        File(directory, "purchase-evidence.json").writeText(
-            """{"refunded":{"purchaseToken":"refunded","packageName":"com.example.app",""" +
-                """"storeProductIds":["play-pro"],"nuxieProductId":"nuxie-pro","productType":"inapp",""" +
-                """"purchaseState":"PURCHASED","obfuscatedAccountId":"${accountHash(customer)}",""" +
-                """"syncAttributionDistinctId":"$customer","acknowledged":true,"consumed":false,""" +
-                """"synced":false,"permanentlyRejected":false,"revoked":true,"authorityScope":"test-fixture",""" +
-                """"syncAttempts":1,"completionAttempts":0,"firstSeenMillis":1}}""",
-        )
-        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
-        fixture.store.upsert(
-            FilePurchaseEvidenceStore(directory, Dispatchers.Unconfined).load().getValue("refunded"),
-        )
-        // No licensing key: the stored record needs no signature check to be sent.
-        fixture.service.rememberProduct(
-            product(licensingPublicKey = null, allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
-        )
-        runCurrent()
-        assertFalse("Nothing unlocks early before Play has reported it", fixture.core.featureInfo.isAllowed("pro"))
-
-        // Play cannot be asked: nothing unlocks, and the unanswered entry is sent
-        // for the server to decide.
-        fixture.billing.failQueries = true
-        fixture.service.recover()
-        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
-        assertTrue(fixture.requests.isNotEmpty())
-        assertTrue(fixture.requests.all { it.first == "refunded" })
-
-        // Play reports the purchase: the buyer's own unanswered purchase unlocks early.
-        fixture.billing.failQueries = false
-        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
-            playPurchase("refunded", obfuscatedAccountId = accountHash(customer)).copy(acknowledged = true),
-        )
-        fixture.service.recover()
-        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
-        fixture.close()
-    }
-
-    @Test
-    fun aPurchasePlayStopsReportingIsStillSentAndUnlocksAgainWhenPlayReportsItAgain() = runTest {
+    fun aPurchasePlayStopsReturningIsStillSentAndUnlockedUntilTheServerAnswers() = runTest {
         val fixture = fixture(this, initialRetryDelayMillis = 1_000, maxRetryDelayMillis = 1_000)
         val customer = fixture.core.identity.distinctId()
         fixture.service.rememberProduct(
@@ -2634,28 +2505,29 @@ class PurchaseServiceTest {
         assertTrue(fixture.core.featureInfo.isAllowed("pro"))
         assertEquals(1, fixture.requests.size)
 
-        // Play stops reporting it: no early unlock, but the server still decides.
+        // Play stops returning it (a refund, say): the server still decides, and
+        // until it answers the early unlock holds.
         fixture.billing.active[BillingClient.ProductType.INAPP] = emptyList()
         fixture.service.recover()
-        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
         assertNotNull(fixture.store.load().getValue("returning-token").pendingSend)
         val sentBeforeTheRetry = fixture.requests.size
         advanceTimeBy(5_000)
         runCurrent()
         assertTrue("A scheduled retry still sends it", fixture.requests.size > sentBeforeTheRetry)
-
-        // Play reports it again in the same process: it unlocks again at once and
-        // is still sent until the server answers.
-        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(purchase)
-        val sentBeforeItReturned = fixture.requests.size
-        fixture.service.recover()
         assertTrue(fixture.core.featureInfo.isAllowed("pro"))
-        assertTrue(fixture.requests.size > sentBeforeItReturned)
+
+        // The server answers: a refusal ends the early unlock.
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(refused = true) }
+        advanceTimeBy(5_000)
+        runCurrent()
+        assertNull(fixture.store.load().getValue("returning-token").pendingSend)
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
         fixture.close()
     }
 
     @Test
-    fun storedEntriesUnlockNothingEarlyBeforePlaysFirstReportAfterLaunch() = runTest {
+    fun aStoredEntryUnlocksEarlyAtLaunchBeforePlayIsAsked() = runTest {
         val fixture = fixture(this)
         val customer = fixture.core.identity.distinctId()
         fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
@@ -2667,8 +2539,7 @@ class PurchaseServiceTest {
             )
         }
         runCurrent()
-        val bought = playPurchase("stored-token").forCheckout(fixture)
-        fixture.service.onPurchasesUpdated(okUpdate(bought))
+        fixture.service.onPurchasesUpdated(okUpdate(playPurchase("stored-token").forCheckout(fixture)))
         assertEquals(PurchaseResult.Purchased, checkout.await())
         assertTrue("Play delivered it, so the buyer's own purchase unlocks early", fixture.core.featureInfo.isAllowed("pro"))
 
@@ -2678,11 +2549,8 @@ class PurchaseServiceTest {
             product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
         )
         runCurrent()
-        assertFalse("Not before Play has reported it after launch", relaunched.core.featureInfo.isAllowed("pro"))
-
-        relaunched.billing.active[BillingClient.ProductType.INAPP] = listOf(bought)
-        relaunched.service.recover()
-        assertTrue(relaunched.core.featureInfo.isAllowed("pro"))
+        assertTrue("The stored entry alone unlocks it", relaunched.core.featureInfo.isAllowed("pro"))
+        assertTrue("Play is not asked", relaunched.billing.queries.isEmpty())
         assertEquals(customer, relaunched.store.load().getValue("stored-token").pendingSend?.distinctId)
         relaunched.close()
         fixture.close()
@@ -4299,7 +4167,7 @@ class PurchaseServiceTest {
         val afterRestore = fixture.store.load().getValue("app-managed-consumable")
         assertNotNull("Its send is still owed", afterRestore.pendingSend)
         assertFalse(afterRestore.synced)
-        assertFalse("Play no longer reports it, so it no longer unlocks early", fixture.core.featureInfo.isAllowed("pro"))
+        assertTrue("Only the server's answer ends the early unlock", fixture.core.featureInfo.isAllowed("pro"))
 
         fixture.synchronizer = { accepted(it.requester, it) }
         fixture.service.recover()
@@ -4698,11 +4566,16 @@ class PurchaseServiceTest {
             "A subscription query cannot speak for a one-time purchase",
             fixture.core.featureInfo.isAllowed("pro"),
         )
+
+        // Nor can both types answering without it: only the server's answer ends it.
+        fixture.billing.failQueryTypes -= BillingClient.ProductType.INAPP
+        fixture.service.recover()
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
         fixture.close()
     }
 
     @Test
-    fun aRestoreWhoseSecondQueryFailsStillPublishesWhatTheFirstReported() = runTest {
+    fun aRestoreWhoseQueriesNoLongerReturnAPurchaseLeavesItsEarlyUnlock() = runTest {
         val fixture = fixture(this)
         fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
         val subscription = product(subscription = true, allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)))
@@ -4712,17 +4585,21 @@ class PurchaseServiceTest {
         assertEquals(PurchaseResult.Purchased, checkout.await())
         assertTrue(fixture.core.featureInfo.isAllowed("pro"))
 
-        // The subscription query no longer reports it; the one-time query fails.
+        // The subscription query no longer returns it; the one-time query fails.
         fixture.billing.active[BillingClient.ProductType.SUBS] = emptyList()
         fixture.billing.failQueryTypes += BillingClient.ProductType.INAPP
         assertTrue(fixture.service.restorePurchases() is RestoreResult.Failed)
+        assertTrue("A Restore's queries never end the early unlock", fixture.core.featureInfo.isAllowed("pro"))
 
-        assertFalse("Play's changed report is published at once", fixture.core.featureInfo.isAllowed("pro"))
+        // Both queries answer without it: still only the server's answer ends it.
+        fixture.billing.failQueryTypes -= BillingClient.ProductType.INAPP
+        assertEquals(RestoreResult.NoPurchases, fixture.service.restorePurchases())
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
         fixture.close()
     }
 
     @Test
-    fun aCancelledCheckoutStillPublishesWhatItsPreflightQueryReported() = runTest {
+    fun aCancelledCheckoutsPreflightQueryLeavesAnEarlierEarlyUnlock() = runTest {
         val fixture = fixture(this)
         fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
         val pro = product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)))
@@ -4732,13 +4609,13 @@ class PurchaseServiceTest {
         assertEquals(PurchaseResult.Purchased, first.await())
         assertTrue(fixture.core.featureInfo.isAllowed("pro"))
 
-        // Play no longer reports the first purchase when the next checkout asks,
+        // Play no longer returns the first purchase when the next checkout asks,
         // and the customer cancels that checkout.
         fixture.billing.active[BillingClient.ProductType.INAPP] = emptyList()
         fixture.billing.launchCode = BillingClient.BillingResponseCode.USER_CANCELED
         assertEquals(PurchaseResult.Cancelled, fixture.service.purchase(activity(), pro, null))
 
-        assertFalse("Play's changed report is published at once", fixture.core.featureInfo.isAllowed("pro"))
+        assertTrue("A checkout's query never ends the early unlock", fixture.core.featureInfo.isAllowed("pro"))
         fixture.close()
     }
 
@@ -4950,14 +4827,14 @@ class PurchaseServiceTest {
         answerTheQuery.complete(Unit)
         recovery.await()
         assertTrue(
-            "The older query's answer cannot drop a purchase reported after it started",
+            "An older query's answer cannot drop a purchase delivered after it started",
             fixture.core.featureInfo.isAllowed("pro"),
         )
         fixture.close()
     }
 
     @Test
-    fun anOlderQuerysAnswerCannotReAddAPurchaseANewerQueryDropped() = runTest {
+    fun overlappingQueriesLeaveTheEarlyUnlockUntilTheServerAnswers() = runTest {
         val fixture = fixture(this)
         val customer = fixture.core.identity.distinctId()
         fixture.service.rememberProduct(
@@ -4979,16 +4856,21 @@ class PurchaseServiceTest {
         runCurrent()
         olderOut.await()
 
-        // A newer query finds it gone (a refund, say).
+        // A newer query finds it gone (a refund, say): the server has not answered.
         fixture.billing.active[BillingClient.ProductType.INAPP] = emptyList()
-        fixture.service.refreshPlayReport()
-        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.service.recover()
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
 
-        // The older answer arrives last: the purchase stays dropped.
+        // The older answer arrives last: still nothing but the server decides.
         answerTheOlder.complete(Unit)
         older.await()
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+
+        // The server refuses it: the early unlock ends at once, whatever Play said.
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(refused = true) }
+        fixture.service.recover()
         assertFalse(
-            "An older query's answer cannot re-add what a newer report dropped",
+            "Only the server's answer ends the early unlock",
             fixture.core.featureInfo.isAllowed("pro"),
         )
         fixture.close()

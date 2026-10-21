@@ -550,18 +550,6 @@ internal class PurchaseService(
     /** Process-lifetime terminal identities; guarded by [processing]. */
     private val completedPurchaseCommits = mutableMapOf<PurchaseCommitIdentity, Unit>()
     /**
-     * What Play reported most recently: each purchase token with its product
-     * type (null while only a purchase update has delivered it and nothing
-     * knows the type) and the stamp of when it was last reported. In memory
-     * only, recomputed on every query, and empty after launch until the first
-     * one, so stored entries unlock nothing early before Play has reported
-     * them. Guarded by itself, as is [playReportStamp].
-     */
-    private val playReported = mutableMapOf<String, PlayReported>()
-    /** Purchases a query found absent, with that query's stamp, until a newer report. */
-    private val playAbsent = mutableMapOf<String, Long>()
-    private var playReportStamp = 0L
-    /**
      * Purchases the server answered in this process. An answer ends the early
      * unlock at once, even when saving it failed and the entry stays owed.
      */
@@ -596,7 +584,7 @@ internal class PurchaseService(
 
     /**
      * At launch, each unanswered entry that has failed gets its timer from its
-     * saved due time. An overdue one, or one stored before due times, is due now.
+     * saved due time. An overdue one, or one with no saved due time, is due now.
      */
     private suspend fun scheduleStoredRetries() {
         evidenceStore.load().values
@@ -989,7 +977,7 @@ internal class PurchaseService(
             )
         }
         val queried = try {
-            queryPlay(product.productType)
+            billing.queryActive(product.productType)
         } catch (failure: Throwable) {
             ensureCheckoutIntakeOpen()
             throw failure
@@ -1115,7 +1103,7 @@ internal class PurchaseService(
         ownerKind: CustomerKind,
         outcomeEventId: String?,
     ): PurchaseResult? {
-        val owned = (runCatching { queryPlay(product.productType) }.getOrNull() as? ActivePurchasesResult.Success)
+        val owned = (runCatching { billing.queryActive(product.productType) }.getOrNull() as? ActivePurchasesResult.Success)
             ?.purchases?.ownedPurchaseOf(product)
             ?: return null
         return alreadyOwned(product, owned, owner, ownerKind, outcomeEventId)
@@ -1185,10 +1173,9 @@ internal class PurchaseService(
             return result
         }
         val found = mutableListOf<PlayPurchase>()
-        val pass = beginPlayPass()
         for (type in listOf(BillingClient.ProductType.SUBS, BillingClient.ProductType.INAPP)) {
             val query = try {
-                queryPlay(type)
+                billing.queryActive(type)
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
                 // Connection setup can fail before Play supplies a query response.
@@ -1205,8 +1192,6 @@ internal class PurchaseService(
                 }
             }
         }
-        // Both types answered: this Restore's queries are a full pass.
-        endPlayPass(pass)
         // Null means Play owns purchases this Restore must ask the server about.
         val settled: RestoreResult? = withProcessingDecision { effects ->
             when {
@@ -1371,18 +1356,16 @@ internal class PurchaseService(
             }
             return
         }
-        recordPlayUpdate(update.purchases.orEmpty()) {
-            processPurchases(
-                update.purchases.orEmpty(),
-                PurchaseOutcomeSource.PURCHASES_UPDATED_STREAM,
-            )
-        }
+        processPurchases(
+            update.purchases.orEmpty(),
+            PurchaseOutcomeSource.PURCHASES_UPDATED_STREAM,
+        )
     }
 
     /** Billing connect and app foreground share one recovery lane. */
     suspend fun recover() {
         if (testStore != null) return
-        val active = refreshPlayReport()
+        val active = queryActivePurchases()
         val purchaseFollowUps = withProcessingDecision { effects ->
             active.mapNotNull {
                 commitPurchaseOutcome(
@@ -1392,7 +1375,7 @@ internal class PurchaseService(
             }
         }
         purchaseFollowUps.forEach { finishPurchase(it) }
-        // Each entry gets one attempt per recovery: those Play reported above were just sent.
+        // Each entry gets one attempt per recovery: those Play returned above were just sent.
         val sentThisPass = purchaseFollowUps.mapTo(mutableSetOf()) { it.purchaseToken }
 
         val recoveryFollowUps = withProcessingDecision { effects ->
@@ -1810,7 +1793,6 @@ internal class PurchaseService(
         )
         // D2: evidence is durable before projection, facts, sync, acknowledge, or consume.
         val evidence = upsertEvidence(evidenceCandidate)
-        evidence?.let { typeReportedPurchase(it) }
         if (evidence == null) {
             val failedOutcome = PurchaseOutcome.Failed(
                 IllegalStateException("Could not persist purchase evidence."),
@@ -2297,7 +2279,7 @@ internal class PurchaseService(
      * proving the token absent can turn ITEM_NOT_OWNED into success.
      */
     private suspend fun reconcilePriorConsume(purchaseToken: String): Boolean =
-        when (val active = queryPlay(BillingClient.ProductType.INAPP)) {
+        when (val active = billing.queryActive(BillingClient.ProductType.INAPP)) {
             is ActivePurchasesResult.Success -> active.purchases.none {
                 it.purchaseToken == purchaseToken
             }
@@ -2727,166 +2709,22 @@ internal class PurchaseService(
     )
 
     /**
-     * Ask Play for its active purchases of both types, recording what it
-     * reports. Returns the purchases Play reported.
+     * Ask Play for its active purchases of both types. Returns what the
+     * queries that answered reported; a failed query reports nothing.
      */
-    internal suspend fun refreshPlayReport(): List<PlayPurchase> {
-        val pass = beginPlayPass()
-        val active = mutableListOf<PlayPurchase>()
-        var bothAnswered = true
-        for (type in listOf(BillingClient.ProductType.SUBS, BillingClient.ProductType.INAPP)) {
-            val result = runCatching { queryPlay(type) }.getOrNull()
-            if (result is ActivePurchasesResult.Success) active += result.purchases else bothAnswered = false
+    private suspend fun queryActivePurchases(): List<PlayPurchase> =
+        listOf(BillingClient.ProductType.SUBS, BillingClient.ProductType.INAPP).flatMap { type ->
+            (runCatching { billing.queryActive(type) }.getOrNull() as? ActivePurchasesResult.Success)
+                ?.purchases.orEmpty()
         }
-        if (bothAnswered) endPlayPass(pass)
-        return active
-    }
 
     /**
-     * The one place Play's latest report changes. Applies [change], runs
-     * [during], then, when the set of reported purchases changed, republishes
-     * the early unlock, so no caller can change the report without publishing
-     * it. If [during] fails, the purchases this change added leave the report
-     * again, so a commit that failed exposes nothing.
+     * Beyond the stored entry (the buyer's own unanswered purchase or sync,
+     * see [isBuyersOwnUnsyncedPurchase]), the early unlock ends at any server
+     * answer for the purchase in this process, even one that could not be saved.
+     * Play's queries never change it: only the server's answer ends it.
      */
-    private suspend fun <T> updatePlayReport(
-        change: PlayReportEdit.() -> Unit,
-        during: suspend () -> T,
-    ): T {
-        val (removed, added) = synchronized(playReported) {
-            val before = playReported.keys.toSet()
-            PlayReportEdit().change()
-            (before - playReported.keys) to (playReported.keys - before)
-        }
-        var completed = false
-        try {
-            return during().also { completed = true }
-        } finally {
-            if (!completed) {
-                synchronized(playReported) {
-                    PlayReportEdit().run { added.forEach { drop(it, nextStamp()) } }
-                }
-            }
-            if (removed.isNotEmpty() || (completed && added.isNotEmpty())) {
-                withContext(NonCancellable) { refreshOptimisticProjection() }
-            }
-        }
-    }
-
-    private suspend fun updatePlayReport(change: PlayReportEdit.() -> Unit) =
-        updatePlayReport(change) {}
-
-    private class PlayReported(val type: String?, val stamp: Long)
-
-    /** The changes [updatePlayReport] may make; used only while it holds the report. */
-    private inner class PlayReportEdit {
-        val reported: MutableMap<String, PlayReported> get() = playReported
-
-        fun nextStamp(): Long {
-            playReportStamp += 1
-            return playReportStamp
-        }
-
-        /** The stamp of the newest report about [token], present or absent. */
-        fun newest(token: String): Long =
-            maxOf(reported[token]?.stamp ?: Long.MIN_VALUE, playAbsent[token] ?: Long.MIN_VALUE)
-
-        /** Play reports [token] present as of [stamp]. */
-        fun report(token: String, type: String?, stamp: Long = nextStamp()) {
-            reported[token] = PlayReported(type, stamp)
-            playAbsent.remove(token)
-        }
-
-        /** Play reports [token] absent as of [stamp]: kept as an absence until a newer report. */
-        fun drop(token: String, stamp: Long) {
-            reported.remove(token)
-            playAbsent[token] = stamp
-        }
-    }
-
-    /** A fresh stamp for a query or pass that starts now: every report before it is older. */
-    private fun startPlayReport(): Long = synchronized(playReported) { PlayReportEdit().nextStamp() }
-
-    /**
-     * Ask Play for its active purchases of [productType], recording what it
-     * reports. A query speaks only for its own type, and its answer changes a
-     * purchase, adding or removing it, only if that purchase's newest report
-     * (present or absent) is older than the query's start. A purchase update,
-     * or a newer query, always wins over a query already in flight.
-     */
-    private suspend fun queryPlay(@BillingClient.ProductType productType: String): ActivePurchasesResult {
-        val start = startPlayReport()
-        val result = billing.queryActive(productType)
-        if (result is ActivePurchasesResult.Success) {
-            updatePlayReport {
-                val answered = result.purchases.mapTo(mutableSetOf()) { it.purchaseToken }
-                reported.filter { (token, entry) ->
-                    entry.type == productType && token !in answered && entry.stamp < start
-                }.keys.toList().forEach { drop(it, start) }
-                result.purchases.forEach { purchase ->
-                    if (newest(purchase.purchaseToken) < start) report(purchase.purchaseToken, productType, start)
-                }
-            }
-        }
-        return result
-    }
-
-    /** When a pass that queries both types starts. */
-    private fun beginPlayPass(): Long = startPlayReport()
-
-    /**
-     * Both types answered in one pass: a token of unknown type whose newest
-     * report is older than the pass, and that neither query reported, has left
-     * Play's report.
-     */
-    private suspend fun endPlayPass(since: Long) {
-        updatePlayReport {
-            reported.filter { (_, entry) -> entry.type == null && entry.stamp < since }
-                .keys.toList().forEach { drop(it, since) }
-        }
-    }
-
-    /**
-     * Play delivered these purchases: it reports them until a query of their
-     * type says otherwise, and [process] commits them. Each keeps the product
-     * type its checkout or the catalog knows for it; [typeReportedPurchase]
-     * fills in the rest from the evidence the update commits. The commit
-     * publishes the early unlock in its own order, and the report's own
-     * republish follows it.
-     */
-    private suspend fun recordPlayUpdate(purchases: List<PlayPurchase>, process: suspend () -> Unit) {
-        val types = purchases.map { purchase ->
-            purchase.purchaseToken to purchase.products.firstNotNullOfOrNull { storeProductId ->
-                inFlight[storeProductId]?.product?.productType
-                    ?: products.values.firstOrNull { it.storeProductId == storeProductId }?.productType
-            }
-        }
-        updatePlayReport(
-            { types.forEach { (token, type) -> report(token, reported[token]?.type ?: type) } },
-            process,
-        )
-    }
-
-    /** A purchase Play reported with no known type takes the type its committed evidence records. */
-    private suspend fun typeReportedPurchase(evidence: PurchaseEvidence) {
-        val type = evidence.productType ?: return
-        updatePlayReport {
-            val current = reported[evidence.purchaseToken]
-            if (current != null && current.type == null) {
-                reported[evidence.purchaseToken] = PlayReported(type, current.stamp)
-            }
-        }
-    }
-
-    private fun reportedByPlay(purchaseToken: String): Boolean =
-        synchronized(playReported) { purchaseToken in playReported }
-
-    /**
-     * Beyond the stored entry, the early unlock needs Play to report the
-     * purchase in its latest query and no server answer for it in this process.
-     */
-    private fun unlocksEarly(purchaseToken: String): Boolean =
-        reportedByPlay(purchaseToken) && purchaseToken !in answeredTokens
+    private fun unlocksEarly(purchaseToken: String): Boolean = purchaseToken !in answeredTokens
 
     private suspend fun refreshOptimisticProjection() {
         val publication = projectionRefresh.withLock { stageOptimisticProjectionLocked() }
