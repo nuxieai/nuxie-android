@@ -387,6 +387,67 @@ class PurchaseFeatureUseTest {
         directory.listFiles().orEmpty().filter { it.name.startsWith("$store.unreadable-") && it.name.endsWith(".json") }
 
     @Test
+    fun aCommandThatSettlesItsEntryStillAsksForTheRequestersProfile() = runBlocking {
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                when (request.url.path) {
+                    "/feature/consume" -> featureCommandResponse(request, balance = 0.0)
+                    else -> canonicalJourneyProfileResponse()
+                }
+            }
+        }
+        val core = core(transport)
+        val store = InMemoryPurchaseEvidenceStore()
+        store.upsert(evidence())
+        val refreshes = java.util.concurrent.atomic.AtomicInteger()
+        val service = service(core, store, refreshFeatureAuthority = { refreshes.incrementAndGet() })
+        withTimeout(5_000) { while ((store.load().getValue("token-1").syncAttempts) < 1) delay(10) }
+        val before = refreshes.get()
+
+        assertTrue(checkNotNull(service.useFeatureWithPendingPurchase("customer-a", "credits", 1.0, null, null)).success)
+
+        assertTrue("The command settled its entry", store.load().getValue("token-1").synced)
+        assertEquals(
+            "Its profile is fetched again, for the product's other Features",
+            before + 1,
+            refreshes.get(),
+        )
+        core.stop()
+    }
+
+    @Test
+    fun aCommandWhoseAnswerCannotBeSavedReportsNoPurchaseSynced() = runBlocking {
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                when (request.url.path) {
+                    "/feature/consume" -> featureCommandResponse(request, balance = 0.0)
+                    else -> canonicalJourneyProfileResponse()
+                }
+            }
+        }
+        val core = core(transport)
+        val captured = mutableListOf<String>()
+        // The entry's owed send saves, but its answer does not.
+        val store = AnswerWritesFailStore(evidence())
+        val refreshes = java.util.concurrent.atomic.AtomicInteger()
+        val service = service(
+            core,
+            store,
+            capture = { name, _, _, _ -> captured += name; true },
+            refreshFeatureAuthority = { refreshes.incrementAndGet() },
+        )
+        withTimeout(5_000) { while ((store.load().getValue("token-1").syncAttempts) < 1) delay(10) }
+        val before = refreshes.get()
+
+        val result = service.useFeatureWithPendingPurchase("customer-a", "credits", 1.0, null, null)
+
+        assertTrue("The server consumed the Feature: the caller gets its result", checkNotNull(result).success)
+        assertTrue("Nothing is reported before its answer is saved", captured.isEmpty())
+        assertEquals("The profile is still fetched again", before + 1, refreshes.get())
+        core.stop()
+    }
+
+    @Test
     fun aSendHeldBackByAFeatureCommandCountsAFailedAttemptAndIsRetried() = runBlocking {
         // The launch sent the entry once without an answer; it is due again in a second.
         val fixture = concurrentFixture(firstStatus = 503, outboxRetryMillis = 1_000)
@@ -805,6 +866,7 @@ class PurchaseFeatureUseTest {
         billing: PlayBillingGateway = NoopBilling,
         ownedOnPlay: MutableSet<String> = mutableSetOf("token-1"),
         outboxRetryMillis: Long = 30_000,
+        refreshFeatureAuthority: () -> Unit = {},
     ): PurchaseService {
         kotlinx.coroutines.runBlocking { store.upsertProductMapping(featureDescriptor()) }
         return PurchaseService(
@@ -826,6 +888,7 @@ class PurchaseFeatureUseTest {
             capturePurchaseSynced = capture,
             outboxRetryInitialDelayMillis = outboxRetryMillis,
             outboxRetryMaxDelayMillis = outboxRetryMillis * 4,
+            refreshFeatureAuthority = refreshFeatureAuthority,
         ).also { it.start() }
     }
 
@@ -975,6 +1038,29 @@ class PurchaseFeatureUseTest {
             entityId = null,
             metadata = null,
         )
+    }
+
+    /** Saves an entry's owed send, but never an answer (an entry without a send). */
+    private class AnswerWritesFailStore(initial: PurchaseEvidence) : PurchaseEvidenceStore {
+        private val delegate = InMemoryPurchaseEvidenceStore()
+
+        init {
+            runBlocking { delegate.upsert(initial) }
+        }
+
+        override suspend fun load(): Map<String, PurchaseEvidence> = delegate.load()
+
+        override suspend fun upsert(evidence: PurchaseEvidence): Boolean =
+            evidence.pendingSend != null && delegate.upsert(evidence)
+
+        override suspend fun loadBindings(): List<StoredPurchaseBinding> = delegate.loadBindings()
+
+        override suspend fun upsertBinding(binding: StoredPurchaseBinding): Boolean = delegate.upsertBinding(binding)
+
+        override suspend fun loadProductMappings(): List<StoredProductMapping> = delegate.loadProductMappings()
+
+        override suspend fun upsertProductMapping(mapping: StoredProductMapping, catalogChange: Boolean): Boolean =
+            delegate.upsertProductMapping(mapping, catalogChange)
     }
 
     /** Reads its entries and installs the catalog, but cannot save an entry. */
