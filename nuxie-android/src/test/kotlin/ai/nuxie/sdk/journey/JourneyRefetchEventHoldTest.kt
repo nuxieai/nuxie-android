@@ -282,21 +282,28 @@ class JourneyRefetchEventHoldTest {
         launch.track("start_waiting")
         launch.journeys.profileRefetchWillBegin("customer")
         launch.withdraw("customer")
-        launch.eventLog.capture("go")
-        withTimeout(5_000L) { goReached.await() }
-        launch.clock.addAndGet(70_000L)
+        try {
+            launch.eventLog.capture("go")
+            withTimeout(5_000L) { goReached.await() }
+            launch.clock.addAndGet(70_000L)
 
-        launch.commit("customer", saved)
-        assertEquals(0, launch.outcomes("customer", "timed_out"))
+            // Resolving the wait now would report it through the route worker
+            // that go still occupies, so a regression shows as this timeout.
+            withTimeout(5_000L) { launch.commit("customer", saved) }
+            assertEquals(0, launch.outcomes("customer", "timed_out"))
 
-        releaseGo.complete(Unit)
-        launch.journeys.profileRefetchDidSettle("customer")
-        launch.eventLog.awaitBarrier()
-        withTimeout(5_000L) {
-            while (launch.outcomes("customer", "took_go") + launch.outcomes("customer", "timed_out") == 0) delay(20)
+            releaseGo.complete(Unit)
+            launch.journeys.profileRefetchDidSettle("customer")
+            launch.eventLog.awaitBarrier()
+            withTimeout(5_000L) {
+                while (launch.outcomes("customer", "took_go") + launch.outcomes("customer", "timed_out") == 0) delay(20)
+            }
+            assertEquals(1, launch.outcomes("customer", "took_go"))
+            assertEquals(0, launch.outcomes("customer", "timed_out"))
+        } finally {
+            // Closing EventLog waits for its route worker, which the gate may hold.
+            releaseGo.complete(Unit)
         }
-        assertEquals(1, launch.outcomes("customer", "took_go"))
-        assertEquals(0, launch.outcomes("customer", "timed_out"))
     }
 
     /** One launch: Journey subscribed to a real EventLog as NuxieCore subscribes it. */
