@@ -92,6 +92,12 @@ internal data class StoredPurchaseBinding(
      * is the checkout's own purchase, so none is ever matched to this binding.
      */
     val priorTokens: Set<String> = emptySet(),
+    /**
+     * The checkout this binding was written for, an id made when it began. A
+     * binding is retired only by name: by its own checkout, or by the completion
+     * of the purchase that matched it. One without an id correlates no delivery.
+     */
+    val checkoutId: String? = null,
 )
 
 internal data class StoredProductMapping(
@@ -259,6 +265,8 @@ internal data class PurchaseEvidence(
     val authorityScope: String? = null,
     val backendSyncedAtMillis: Long? = null,
     val checkoutCompletionEventId: String? = null,
+    /** The checkout whose binding (or flight) this purchase matched; its completion retires that binding. */
+    val checkoutId: String? = null,
 ) {
     /** The server accepted this purchase for its owner. */
     val synced: Boolean get() = ownerDistinctId != null
@@ -314,6 +322,15 @@ internal interface PurchaseEvidenceStore {
     suspend fun upsert(evidence: PurchaseEvidence): Boolean
     suspend fun loadBindings(): List<StoredPurchaseBinding> = emptyList()
     suspend fun upsertBinding(binding: StoredPurchaseBinding): Boolean = true
+    /**
+     * End the binding of checkout [checkoutId], if one still awaits it. The
+     * check and the write are one step, so it never ends another checkout's
+     * binding. True when nothing was left to end or it was ended.
+     */
+    suspend fun retireCheckoutBinding(checkoutId: String): Boolean =
+        loadBindings()
+            .filter { it.awaitingCheckout && it.checkoutId == checkoutId }
+            .all { upsertBinding(it.copy(awaitingCheckout = false)) }
     suspend fun loadProductMappings(): List<StoredProductMapping> = emptyList()
     /**
      * An installation that changes the catalog (a new product or a changed
@@ -452,17 +469,29 @@ internal class FilePurchaseEvidenceStore(
                 StoredPurchaseBindingKey(it.obfuscatedAccountId, it.productIdentity)
             }
             entries[StoredPurchaseBindingKey(binding.obfuscatedAccountId, binding.productIdentity)] = binding
-            runCatching {
-                directory.mkdirs()
-                val temporary = File(bindingsFile.parentFile, "${bindingsFile.name}.tmp")
-                val encoded = JsonArray(entries.values.map(::encodeBinding))
-                temporary.writeText(json.encodeToString(JsonArray.serializer(), encoded))
-                if (!temporary.renameTo(bindingsFile)) error("Could not publish purchase bindings")
-                true
-            }.onFailure { Log.w("NuxieBilling", "Could not persist purchase binding.", it) }
-                .getOrDefault(false)
+            saveBindingsUnlocked(entries.values)
         }
     }
+
+    override suspend fun retireCheckoutBinding(checkoutId: String): Boolean = onIo {
+        synchronized(lock) {
+            val bindings = loadBindingsUnlocked() ?: return@synchronized false
+            if (bindings.none { it.awaitingCheckout && it.checkoutId == checkoutId }) return@synchronized true
+            saveBindingsUnlocked(
+                bindings.map { if (it.awaitingCheckout && it.checkoutId == checkoutId) it.copy(awaitingCheckout = false) else it },
+            )
+        }
+    }
+
+    private fun saveBindingsUnlocked(bindings: Collection<StoredPurchaseBinding>): Boolean = runCatching {
+        directory.mkdirs()
+        val temporary = File(bindingsFile.parentFile, "${bindingsFile.name}.tmp")
+        val encoded = JsonArray(bindings.map(::encodeBinding))
+        temporary.writeText(json.encodeToString(JsonArray.serializer(), encoded))
+        if (!temporary.renameTo(bindingsFile)) error("Could not publish purchase bindings")
+        true
+    }.onFailure { Log.w("NuxieBilling", "Could not persist purchase binding.", it) }
+        .getOrDefault(false)
 
     /** An unreadable catalog reads as empty and is never written over. */
     override suspend fun loadProductMappings(): List<StoredProductMapping> = onIo {
@@ -683,6 +712,7 @@ internal class FilePurchaseEvidenceStore(
             put("signatureVerified", JsonPrimitive(evidence.signatureVerified))
             evidence.authorityScope?.let { put("authorityScope", JsonPrimitive(it)) }
             evidence.backendSyncedAtMillis?.let { put("backendSyncedAtMillis", JsonPrimitive(it)) }
+            evidence.checkoutId?.let { put("checkoutId", JsonPrimitive(it)) }
             evidence.checkoutCompletionEventId?.let {
                 put("checkoutCompletionEventId", JsonPrimitive(it))
             }
@@ -730,6 +760,7 @@ internal class FilePurchaseEvidenceStore(
         authorityScope = raw.optionalString("authorityScope"),
         backendSyncedAtMillis = raw.optionalLong("backendSyncedAtMillis"),
         checkoutCompletionEventId = raw.optionalString("checkoutCompletionEventId"),
+        checkoutId = raw.optionalString("checkoutId"),
     )
 
     /** An owed send records its reason, requester, kind and admission; one without any of them is not read. */
@@ -766,6 +797,7 @@ internal class FilePurchaseEvidenceStore(
             binding.outcomeEventId?.let { put("outcomeEventId", JsonPrimitive(it)) }
             put("awaitingCheckout", JsonPrimitive(binding.awaitingCheckout))
             put("priorTokens", JsonArray(binding.priorTokens.map(::JsonPrimitive)))
+            binding.checkoutId?.let { put("checkoutId", JsonPrimitive(it)) }
         },
     )
 
@@ -788,6 +820,7 @@ internal class FilePurchaseEvidenceStore(
         // A binding stored without it awaits no checkout.
         awaitingCheckout = raw.optionalBoolean("awaitingCheckout") ?: false,
         priorTokens = raw.optionalStrings("priorTokens").orEmpty().toSet(),
+        checkoutId = raw.optionalString("checkoutId"),
     )
 
     private fun encodeMapping(mapping: StoredProductMapping): JsonObject = encodeBinding(
@@ -917,6 +950,13 @@ internal class InMemoryPurchaseEvidenceStore : PurchaseEvidenceStore {
     }
     override suspend fun upsertBinding(binding: StoredPurchaseBinding): Boolean = synchronized(bindings) {
         bindings[StoredPurchaseBindingKey(binding.obfuscatedAccountId, binding.productIdentity)] = binding
+        true
+    }
+    override suspend fun retireCheckoutBinding(checkoutId: String): Boolean = synchronized(bindings) {
+        for (entry in bindings.entries) {
+            val binding = entry.value
+            if (binding.awaitingCheckout && binding.checkoutId == checkoutId) entry.setValue(binding.copy(awaitingCheckout = false))
+        }
         true
     }
     override suspend fun loadProductMappings(): List<StoredProductMapping> = synchronized(mappings) {

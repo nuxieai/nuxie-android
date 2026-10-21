@@ -5236,6 +5236,47 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun aCheckoutEndsOnlyItsOwnBindingNotTheNextCheckoutsForTheSameProduct() = runTest {
+        val io = HoldingDispatcher(kotlinx.coroutines.test.StandardTestDispatcher(testScheduler))
+        val actions = mutableListOf<String>()
+        val fixture = fixture(this, actions = actions, ioDispatcher = io)
+        val customer = fixture.core.identity.distinctId()
+        val first = async { fixture.service.purchase(activity(), product(consumable = true), null) }
+        runCurrent()
+        val firstPurchase = playPurchase("first-token").forCheckout(fixture)
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(firstPurchase)
+
+        // The first checkout gets its result, but its coroutine resumes only after a
+        // second checkout of the same product for the same customer wrote its binding.
+        io.holdNext = true
+        fixture.service.onPurchasesUpdated(okUpdate(firstPurchase))
+        runCurrent()
+        val second = async { fixture.service.purchase(activity(), product(consumable = true), null) }
+        runCurrent()
+        val secondBinding = fixture.store.loadBindings().single()
+        assertTrue(secondBinding.awaitingCheckout)
+        io.releaseHeld()
+        runCurrent()
+        assertEquals(PurchaseResult.Purchased, first.await())
+
+        val binding = fixture.store.loadBindings().single()
+        assertEquals(secondBinding.checkoutId, binding.checkoutId)
+        assertTrue("The first checkout never ends the second's binding", binding.awaitingCheckout)
+
+        // The second purchase waits for approval, then is approved: it keeps its buyer
+        // and its completion.
+        val pendingSecond = playPurchase("second-token", state = StoredPurchaseState.PENDING).forCheckout(fixture)
+        fixture.service.onPurchasesUpdated(okUpdate(pendingSecond))
+        runCurrent()
+        assertEquals(PurchaseResult.Pending, second.await())
+        fixture.service.onPurchasesUpdated(okUpdate(pendingSecond.copy(state = StoredPurchaseState.PURCHASED)))
+        runCurrent()
+        assertEquals(customer, fixture.store.load().getValue("second-token").buyerDistinctId)
+        assertEquals(2, actions.count { it == SystemEventNames.PURCHASE_COMPLETED })
+        fixture.close()
+    }
+
+    @Test
     fun noTimerSendsWhileTheOutboxIsOff() = runTest {
         val clock = { 1_800_000_000_000L + testScheduler.currentTime }
         val store = RecordingEvidenceStore()
@@ -6106,6 +6147,27 @@ class PurchaseServiceTest {
         fun close() = core.stop()
     }
 
+    /** Dispatches on [delegate], except the one dispatch it is told to hold until [releaseHeld]. */
+    private class HoldingDispatcher(private val delegate: kotlinx.coroutines.CoroutineDispatcher) :
+        kotlinx.coroutines.CoroutineDispatcher() {
+        @Volatile var holdNext = false
+        private var held: Runnable? = null
+        override fun isDispatchNeeded(context: kotlin.coroutines.CoroutineContext): Boolean = true
+        override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) {
+            if (holdNext) {
+                holdNext = false
+                held = block
+                return
+            }
+            delegate.dispatch(context, block)
+        }
+        fun releaseHeld() {
+            val block = held ?: return
+            held = null
+            delegate.dispatch(kotlin.coroutines.EmptyCoroutineContext, block)
+        }
+    }
+
     private class RecordingEvidenceStore(private val checkThread: () -> Unit = {}) : PurchaseEvidenceStore {
         private val entries = linkedMapOf<String, PurchaseEvidence>()
         private val bindings =
@@ -6377,7 +6439,12 @@ class PurchaseServiceTest {
         obfuscatedAccountId = fixture.billing.launched?.obfuscatedAccountId,
     )
 
-    private fun StoreProduct.bindingFor(owner: String, nuxieManaged: Boolean = true) = StoredPurchaseBinding(
+    /** A checkout binding for [owner], named by its own checkout id as a real checkout's is. */
+    private fun StoreProduct.bindingFor(
+        owner: String,
+        nuxieManaged: Boolean = true,
+        checkoutId: String = "checkout-$owner",
+    ) = StoredPurchaseBinding(
         obfuscatedAccountId = accountHash(owner),
         distinctId = owner,
         storeProductId = storeProductId,
@@ -6396,6 +6463,7 @@ class PurchaseServiceTest {
         },
         licensingPublicKey = licensingPublicKey,
         nuxieManaged = nuxieManaged,
+        checkoutId = checkoutId,
     )
 
     private fun accountHash(value: String): String = MessageDigest.getInstance("SHA-256")
