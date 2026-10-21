@@ -1054,8 +1054,18 @@ internal class PurchaseService(
             val response = store.purchase(product, initiatingOwner, activity)
             response.access?.let { access ->
                 // The server granted this purchase's Features: unlock them now,
-                // before the purchase is announced, as a Play purchase sync does.
-                features.updateFromPurchase(initiatingOwner, access, checkNotNull(response.transactionId))
+                // before the purchase is announced, as a Play purchase's 200 does.
+                // They hold until a profile requested after this answer lands, and
+                // the customer's profile is fetched again, as after every answer.
+                // A Test Store purchase never has an outbox entry.
+                if (initiatingOwner == distinctId()) {
+                    features.publishStaged(
+                        projectionRefresh.withLock {
+                            features.stagePurchaseAnswer(initiatingOwner, access, deriveOptimisticProjection(initiatingOwner))
+                        },
+                    )
+                    refreshFeatureAuthority()
+                }
             }
             val outcome = if (response.result == PurchaseResult.Purchased) {
                 PurchaseOutcome.External(ExternalPurchaseDeclaration.Purchase(
