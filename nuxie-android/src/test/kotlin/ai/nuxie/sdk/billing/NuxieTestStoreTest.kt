@@ -202,6 +202,31 @@ class NuxieTestStoreTest {
     }
 
     @Test
+    fun `overlapping unanswered grants are each replayed once`() = runTest {
+        val transactionIds = mutableListOf<String>()
+        val firstAnswer = CompletableDeferred<Unit>()
+        val store = NuxieTestStore(Choices()) { _, transactionId, _ ->
+            transactionIds += transactionId
+            val call = transactionIds.size
+            if (call == 1) firstAnswer.await()
+            if (call <= 2) throw java.io.IOException("timeout")
+            kotlinx.serialization.json.buildJsonObject { put("success", kotlinx.serialization.json.JsonPrimitive(true)) }
+        }
+
+        val first = async { store.purchase(product("prd_credits"), "alice") }
+        runCurrent()
+        store.purchase(product("prd_credits"), "alice")
+        firstAnswer.complete(Unit)
+        first.await()
+        repeat(3) { store.purchase(product("prd_credits"), "alice") }
+
+        assertEquals(5, transactionIds.size)
+        assertNotEquals(transactionIds[0], transactionIds[1])
+        assertEquals("each unanswered grant is replayed", transactionIds.subList(0, 2).toSet(), transactionIds.subList(2, 4).toSet())
+        assertTrue("once both are settled, a purchase is new", transactionIds[4] !in transactionIds.subList(0, 2))
+    }
+
+    @Test
     fun `an unanswered grant is kept for its own customer and product`() = runTest {
         val transactionIds = mutableListOf<String>()
         val store = NuxieTestStore(Choices()) { _, transactionId, distinctId ->
