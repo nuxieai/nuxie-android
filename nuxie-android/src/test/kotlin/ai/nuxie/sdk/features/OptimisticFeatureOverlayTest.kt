@@ -316,7 +316,7 @@ class OptimisticFeatureOverlayTest {
     }
 
     @Test
-    fun failedFirstArrivalPinRetriesTheSameAllowancesAfterDescriptorReplacement() = runBlocking {
+    fun aFirstArrivalPinThatCannotBeSavedTurnsTheOutboxOffUntilTheNextLaunch() = runBlocking {
         val apiKey = "pk_test_descriptor_pin_failure_${System.nanoTime()}"
         val owner = "customer-a"
         val application = RuntimeEnvironment.getApplication()
@@ -341,7 +341,7 @@ class OptimisticFeatureOverlayTest {
                 ),
             ),
         )
-        val core = NuxieCore(
+        fun launch() = NuxieCore(
             context = application,
             apiKey = apiKey,
             environment = NuxieEnvironment.DEVELOPMENT,
@@ -356,65 +356,44 @@ class OptimisticFeatureOverlayTest {
             billingClientFactory = InertBillingClientAdapter.factory,
             ),
         ).also(cores::add)
+        val core = launch()
+        fun mapping(allowance: Double) = StoredProductMapping(
+            storeProductId = "play-credit-pack",
+            nuxieProductId = "credit-pack",
+            productType = "inapp",
+            consumable = false,
+            featureAllowances = listOf(StoredFeatureAllowance("credits", FeatureType.METERED.name, false, allowance)),
+        )
         try {
             store.failPinnedEvidenceUpserts = true
-            assertTrue(
-                store.upsertProductMapping(
-                    StoredProductMapping(
-                        storeProductId = "play-credit-pack",
-                        nuxieProductId = "credit-pack",
-                        productType = "inapp",
-                        consumable = false,
-                        featureAllowances = listOf(
-                            StoredFeatureAllowance(
-                                "credits",
-                                FeatureType.METERED.name,
-                                false,
-                                10.0,
-                            ),
-                        ),
-                    ),
-                ),
-            )
+            assertTrue(store.upsertProductMapping(mapping(10.0)))
 
-            val projection = core.purchases.withOptimisticProjectionSnapshot(owner) { it }
-
-            assertNull(projection)
+            // The allowance snapshot cannot be saved: the outbox is off, and nothing unlocks early.
+            assertNull(core.purchases.withOptimisticProjectionSnapshot(owner) { it })
             assertNull(store.load().getValue("token-1").pinnedFeatureAllowances)
             assertFalse(core.featureInfo.isAllowed("credits"))
 
-            assertTrue(
-                store.upsertProductMapping(
-                    StoredProductMapping(
-                        storeProductId = "play-credit-pack",
-                        nuxieProductId = "credit-pack",
-                        productType = "inapp",
-                        consumable = false,
-                        featureAllowances = listOf(
-                            StoredFeatureAllowance(
-                                "credits",
-                                FeatureType.METERED.name,
-                                false,
-                                99.0,
-                            ),
-                        ),
-                    ),
-                ),
-            )
-            assertNull(core.purchases.withOptimisticProjectionSnapshot(owner) { it })
-
+            // It stays off for the session, even once the store saves again.
             store.failPinnedEvidenceUpserts = false
-            val retried = core.purchases.withOptimisticProjectionSnapshot(owner) { it }
+            assertNull(core.purchases.withOptimisticProjectionSnapshot(owner) { it })
+            assertNull(store.load().getValue("token-1").pinnedFeatureAllowances)
+        } finally {
+            core.stop()
+        }
 
-            assertEquals(10.0, retried?.get("credits")?.balanceIncrease!!, 0.0)
+        // Nothing was pinned or held, so the next launch pins the allowances its catalog holds then.
+        assertTrue(store.upsertProductMapping(mapping(99.0)))
+        val relaunched = launch()
+        try {
+            val projection = relaunched.purchases.withOptimisticProjectionSnapshot(owner) { it }
+            assertEquals(99.0, projection?.get("credits")?.balanceIncrease!!, 0.0)
             assertEquals(
-                10.0,
-                store.load().getValue("token-1").pinnedFeatureAllowances
-                    ?.single()?.allowance!!,
+                99.0,
+                store.load().getValue("token-1").pinnedFeatureAllowances?.single()?.allowance!!,
                 0.0,
             )
         } finally {
-            core.stop()
+            relaunched.stop()
         }
     }
 

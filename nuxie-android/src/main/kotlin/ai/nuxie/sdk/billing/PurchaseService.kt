@@ -261,22 +261,6 @@ internal class PurchaseService(
         val completion: CompletableDeferred<Unit>,
     )
 
-    private data class AllowanceResolutionIdentity(
-        val purchaseToken: String,
-        val obfuscatedAccountId: String?,
-        val storeProductIds: Set<String>,
-        val nuxieProductId: String?,
-        val basePlanId: String?,
-        val purchaseOptionId: String?,
-        val offerId: String?,
-        val productType: String?,
-    )
-
-    private data class PendingAllowancePin(
-        val identity: AllowanceResolutionIdentity,
-        val allowances: List<StoredFeatureAllowance>,
-    )
-
     private class ProcessingEffects {
         val purchaseCommits = mutableListOf<PendingPurchaseCommit>()
         val ownedPurchaseCommits = mutableListOf<OwnedPurchaseCommit>()
@@ -285,6 +269,8 @@ internal class PurchaseService(
         val purchaseCompletions = mutableListOf<PendingPurchaseCompletion>()
         val directCheckoutCompletions = mutableListOf<PendingDirectCheckoutCompletion>()
         val outcomeEmissions = mutableListOf<PendingOutcomeEmission>()
+        /** While the outbox is off: what this decision's deliveries would have saved, by token. */
+        val unsavedEntries = linkedMapOf<String, PurchaseEvidence>()
     }
 
     /**
@@ -513,29 +499,36 @@ internal class PurchaseService(
         if (existing == null) retry.start() else retry.cancel()
     }
 
+    /**
+     * Record that the purchase's completion is captured. While the outbox is
+     * off there is nothing saved to mark: the entry and its checkout context
+     * live only in this session, so the next launch's recovery has no context
+     * to capture the completion again.
+     */
     private suspend fun markCompletionCaptured(purchaseToken: String): Boolean =
         projectionRefresh.withLock {
+            if (outboxOff) return@withLock true
             val current = evidenceStore.load()[purchaseToken] ?: return@withLock false
             val marked = current.completionEmitted ||
-                evidenceStore.upsert(current.copy(completionEmitted = true))
+                saveEntry(current.copy(completionEmitted = true)) || outboxOff
             // The checkout's completion is delivered: its binding stands for no other purchase.
             evidenceStore.loadBindings()
                 .filter {
                     it.awaitingCheckout && it.obfuscatedAccountId == current.obfuscatedAccountId &&
                         current.matchesProductIdentity(it.productIdentity)
                 }
-                .forEach { evidenceStore.upsertBinding(it.copy(awaitingCheckout = false)) }
+                .forEach { saveBinding(it.copy(awaitingCheckout = false)) }
             marked && clearOutcomeCorrelation(current.checkoutCompletionEventId)
         }
 
     private suspend fun clearOutcomeCorrelation(eventId: String?): Boolean {
-        if (eventId == null) return true
+        if (eventId == null || outboxOff) return true
         var cleared = true
         evidenceStore.loadBindings()
             .filter { it.outcomeEventId == eventId }
             .forEach { binding ->
-                if (!evidenceStore.upsertBinding(binding.copy(outcomeEventId = null, context = binding.context?.copy(journeyId = null)))) {
-                    cleared = false
+                if (!saveBinding(binding.copy(outcomeEventId = null, context = binding.context?.copy(journeyId = null)))) {
+                    cleared = outboxOff
                 }
             }
         return cleared
@@ -563,28 +556,49 @@ internal class PurchaseService(
     /** For the commit observer only: each purchase's completed commit is reported once. Guarded by [processing]. */
     private val reportedEvidenceCommits = mutableSetOf<PurchaseCommitIdentity.Evidence>()
     /**
-     * Failed attempts the store could not save, by purchase token, held until a
-     * later write succeeds: a failed write never makes a retry fire sooner than
-     * the backoff its attempt count gives. Guarded by [projectionRefresh].
+     * Set for the rest of the session once the outbox cannot save: an evidence
+     * write failed (a full disk, say) or the store cannot be read. While it is
+     * off nothing is saved and nothing is held in memory instead: no entry
+     * unlocks early (access comes from the profile alone), no timer sends or
+     * completes, and each purchase Play delivers is sent once, its answer only
+     * refreshing the profile. Such a purchase is never acknowledged or
+     * consumed, so the next launch's recovery finds it, saves its entry, sends
+     * it and completes it.
      */
-    private val unsavedAttempts = mutableMapOf<String, UnsavedAttempts>()
+    @Volatile private var outboxOff = false
+
     /**
-     * Server answers the store could not save, by purchase token, for the
-     * admission they answered. For this session such an entry gives no early
-     * unlock and is not sent again before its backoff; the hold ends when a
-     * later answer is saved or a new admission replaces the entry. After a
-     * relaunch the entry is sent and answered again. Written while
-     * [projectionRefresh] is held.
+     * The outbox could not save: it is off for the rest of the session. Its
+     * timers stop (except the caller's own, which ends by itself), and the
+     * early unlock is withdrawn.
      */
-    private val unsavedAnswers = ConcurrentHashMap<String, UnsavedAnswer>()
+    private suspend fun switchOutboxOff() {
+        if (outboxOff) return
+        outboxOff = true
+        Log.w("NuxieBilling", "The purchase outbox cannot save; it is off until the next launch.")
+        val caller = currentCoroutineContext()[Job]
+        for (jobs in listOf(sendRetryJobs, completionRetryJobs)) {
+            jobs.values.filter { it !== caller }.forEach { it.cancel() }
+            jobs.clear()
+        }
+        scope.launch { refreshOptimisticProjection() }
+    }
+
+    /** Every evidence write goes through these: one that fails turns the outbox off. */
+    private suspend fun saveEntry(evidence: PurchaseEvidence): Boolean =
+        !outboxOff && (evidenceStore.upsert(evidence) || false.also { switchOutboxOff() })
+
+    private suspend fun saveBinding(binding: StoredPurchaseBinding): Boolean =
+        !outboxOff && (evidenceStore.upsertBinding(binding) || false.also { switchOutboxOff() })
+
+    private suspend fun saveMapping(mapping: StoredProductMapping, catalogChange: Boolean = true): Boolean =
+        !outboxOff && (evidenceStore.upsertProductMapping(mapping, catalogChange) || false.also { switchOutboxOff() })
     private val usageCoordinationLock = Any()
     /** The one send in flight per purchase token; guarded by [usageCoordinationLock]. */
     private val sending = mutableMapOf<String, CompletableDeferred<SendAnswer>>()
     private val purchaseUsageClaims = mutableSetOf<String>()
     private val purchaseUsageWaiters = mutableMapOf<String, MutableList<CompletableDeferred<Unit>>>()
     private val managedCompletionClaims = mutableSetOf<String>()
-    /** Guarded by [projectionRefresh]; failed pins retry their first resolved snapshot. */
-    private val pendingAllowancePins = mutableMapOf<String, PendingAllowancePin>()
     private val initialProjectionRefresh: Job
 
     init {
@@ -616,7 +630,11 @@ internal class PurchaseService(
     fun start() {
         if (started) return
         started = true
-        scope.launch { scheduleStoredRetries() }
+        scope.launch {
+            // A store that cannot be read cannot save either: the outbox is off.
+            if (!evidenceStore.isReadable()) switchOutboxOff()
+            scheduleStoredRetries()
+        }
     }
 
     /**
@@ -626,8 +644,8 @@ internal class PurchaseService(
      * sends without Play, so this holds even when Billing cannot connect.
      */
     private suspend fun scheduleStoredRetries() {
-        // The Test Store never sends native evidence.
-        if (testStore != null) return
+        // The Test Store never sends native evidence, and an outbox that is off sets no timer.
+        if (testStore != null || outboxOff) return
         evidenceStore.load().values
             .filter { it.pendingSend != null }
             .forEach { scheduleSendRetry(it.purchaseToken, it.retryDueAtMillis ?: nowMillis()) }
@@ -786,10 +804,11 @@ internal class PurchaseService(
     private suspend fun eligibleEvidence(distinctId: String, featureId: String): List<PurchaseEvidence> {
         val descriptors = evidenceStore.loadProductMappings()
         val bindings = evidenceStore.loadBindings()
+        // While the outbox is off no entry unlocks early: the profile alone decides.
+        if (outboxOff) return emptyList()
         return evidenceStore.load().values.filter { evidence ->
             evidence.authorityScope == purchaseStorageScope &&
                 evidence.isBuyersOwnUnsyncedPurchase(distinctId, bindings, descriptors) &&
-                !evidence.hasUnsavedAnswer() &&
                 evidence.purchaseToken.isNotBlank() &&
                 evidence.packageName.isNotBlank() &&
                 evidence.storeProductIds.firstOrNull()?.isNotBlank() == true &&
@@ -991,16 +1010,10 @@ internal class PurchaseService(
         products[product.productIdentity()] = product.forJourneyCheckout(null)
         val owner = initiatingOwner
         val accountId = playAccountId(owner)
-        // The checkout's own product is no catalog change: it starts no recovery.
-        if (!evidenceStore.upsertProductMapping(product.toMapping(), catalogChange = false)) {
-            return failed(
-                product,
-                IllegalStateException("Could not persist purchase catalog mapping."),
-                owner,
-                PurchaseOutcomeSource.CHECKOUT,
-                outcomeCorrelation?.eventId,
-            )
-        }
+        // The checkout's own product is no catalog change: it starts no recovery. A
+        // mapping that cannot be saved turns the outbox off, and the checkout goes on
+        // with the product it holds.
+        saveMapping(product.toMapping(), catalogChange = false)
         val outcome: PurchaseResult = run checkout@{
             val queried = try {
                 billing.queryActive(product.productType)
@@ -1030,16 +1043,9 @@ internal class PurchaseService(
             }
             val priorTokens = active.mapTo(mutableSetOf()) { it.purchaseToken }
             // The checkout's binding names what Play already owned when it began, so
-            // none of that is ever taken for the checkout's own purchase.
-            if (!evidenceStore.upsertBinding(product.toBinding(accountId, owner, outcomeCorrelation?.eventId, priorTokens))) {
-                return@checkout failed(
-                    product,
-                    IllegalStateException("Could not persist purchase catalog mapping."),
-                    owner,
-                    PurchaseOutcomeSource.CHECKOUT,
-                    outcomeCorrelation?.eventId,
-                )
-            }
+            // none of that is ever taken for the checkout's own purchase. Without it
+            // (the outbox is off) the checkout in flight is the only context.
+            saveBinding(product.toBinding(accountId, owner, outcomeCorrelation?.eventId, priorTokens))
 
             val result = CompletableDeferred<PurchaseResult>()
             val pending = InFlightPurchase(
@@ -1125,7 +1131,7 @@ internal class PurchaseService(
         val identity = product.productIdentity()
         evidenceStore.loadBindings()
             .filter { it.awaitingCheckout && it.obfuscatedAccountId == accountId && it.productIdentity == identity }
-            .forEach { evidenceStore.upsertBinding(it.copy(awaitingCheckout = false)) }
+            .forEach { saveBinding(it.copy(awaitingCheckout = false)) }
     }
 
     /**
@@ -1171,16 +1177,18 @@ internal class PurchaseService(
         // checkout's only outcome is the already-owned failure below.
         endCheckoutBinding(playAccountId(owner), product)
         clearOutcomeCorrelation(outcomeEventId)
-        withProcessingDecision { effects ->
+        val unsaved = withProcessingDecision { effects ->
             commitPurchaseOutcome(
                 classifyPurchaseObservation(owned, PurchaseOutcomeSource.STARTUP_RECOVERY),
                 effects,
                 admitsSend = false,
                 correlatesCheckout = false,
             )
+            effects.unsavedEntries[owned.purchaseToken]
         }
-        if (distinctId() == owner && evidenceStore.load().containsKey(owned.purchaseToken)) {
-            claim(owned.purchaseToken, PurchaseSend.admit(PurchaseSyncReason.PURCHASE, owner, ownerKind))
+        val entry = unsaved ?: evidenceStore.load()[owned.purchaseToken]
+        if (distinctId() == owner && entry != null) {
+            claim(entry, PurchaseSend.admit(PurchaseSyncReason.PURCHASE, owner, ownerKind))
         }
         return failed(product, PurchaseAlreadyOwnedException(), owner, PurchaseOutcomeSource.CHECKOUT, outcomeEventId)
     }
@@ -1249,7 +1257,7 @@ internal class PurchaseService(
             }
         }
         // Null means Play owns purchases this Restore must ask the server about.
-        val settled: RestoreResult? = withProcessingDecision { effects ->
+        val (settled, unsaved) = withProcessingDecision { effects ->
             when {
                 found.isEmpty() -> RestoreResult.NoPurchases
                 else -> {
@@ -1263,13 +1271,14 @@ internal class PurchaseService(
                     }
                     null
                 }
-            }
+            } to effects.unsavedEntries.toMap()
         }
         // Restore queues a send for every purchase Play owns, whoever this device
         // last saw holding it, even after an earlier sync was refused or a
         // checkout receipt was accepted: only the server can move a purchase to
         // the restoring customer, and only its answer grants access.
-        val retained = if (settled != null) emptyMap() else evidenceStore.load()
+        // While the outbox is off, what this Restore found lives only in its decision.
+        val retained = if (settled != null) emptyMap() else evidenceStore.load() + unsaved
         val bindings = evidenceStore.loadBindings()
         val mappings = evidenceStore.loadProductMappings()
         val restorable = if (settled != null) emptyList() else {
@@ -1292,7 +1301,7 @@ internal class PurchaseService(
         }
         val send = PurchaseSend.admit(PurchaseSyncReason.RESTORE, initiatingOwner, initiatingKind)
         val results = restorable.associate { evidence ->
-            evidence.purchaseToken to claim(evidence.purchaseToken, send)
+            evidence.purchaseToken to claim(evidence, send)
         }
         val outcome = when {
             settled != null -> settled
@@ -1437,6 +1446,9 @@ internal class PurchaseService(
             }
         }
         purchaseFollowUps.forEach { finishPurchase(it) }
+        // While the outbox is off only what Play delivered is sent; stored entries
+        // are sent and completed by the next launch's recovery.
+        if (outboxOff) return
         // Each entry gets one attempt per recovery: those Play returned above were just sent.
         val sentThisPass = purchaseFollowUps.mapTo(mutableSetOf()) { it.purchaseToken }
 
@@ -1855,22 +1867,12 @@ internal class PurchaseService(
                     ?: exactBinding?.outcomeEventId,
             )
             upsertEvidenceLocked(evidenceCandidate, givesWayTo = checkoutFlight?.owner)
-                ?.let { stored -> stored to (stored.signatureVerified || !signatureVerificationRequired) }
+                .let { stored -> stored to (stored.signatureVerified || !signatureVerificationRequired) }
         }
-        val evidence = committed?.first
-        if (evidence == null) {
-            val failedOutcome = PurchaseOutcome.Failed(
-                IllegalStateException("Could not persist purchase evidence."),
-                source,
-            )
-            recordTerminalPurchaseOutcome(failedOutcome)
-            effects.completeCheckoutAfterPublications(
-                purchase,
-                failedOutcome,
-                checkoutFlight,
-            )
-            return null
-        }
+        val evidence = committed.first
+        // While the outbox is off the entry is this delivery's alone: the decision
+        // goes on with it, and a Restore or already-owned claim sends it.
+        if (outboxOff) effects.unsavedEntries[evidence.purchaseToken] = evidence
         if (evidence.purchaseState == StoredPurchaseState.PENDING) {
             val pendingOutcome = PurchaseOutcome.Pending(source, purchase)
             recordTerminalPurchaseOutcome(pendingOutcome)
@@ -1896,7 +1898,7 @@ internal class PurchaseService(
             )
             return null
         }
-        if (committed.second != true) {
+        if (!committed.second) {
             val failedOutcome = PurchaseOutcome.Failed(
                 SecurityException("Play purchase signature is invalid."),
                 source,
@@ -1958,6 +1960,12 @@ internal class PurchaseService(
 
     /** Backend synchronization and Play completion deliberately run outside [processing]. */
     private suspend fun finishPurchase(evidence: PurchaseEvidence) {
+        // While the outbox is off the delivered purchase is sent once and never
+        // completed with Play: the next launch's recovery does that.
+        if (outboxOff) {
+            evidence.pendingSend?.let { sendUnsaved(evidence, it) }
+            return
+        }
         val current = evidenceStore.load()[evidence.purchaseToken] ?: evidence
         when {
             current.pendingSend != null -> sendOwed(current.purchaseToken)
@@ -1972,24 +1980,25 @@ internal class PurchaseService(
      * also after a relaunch. One entry per purchase: the claim, the newer
      * intent, takes over whatever entry the purchase had.
      */
-    private suspend fun claim(purchaseToken: String, requested: PurchaseSend): SyncResult {
+    private suspend fun claim(evidence: PurchaseEvidence, requested: PurchaseSend): SyncResult {
+        val purchaseToken = evidence.purchaseToken
         // The customer changed during the Restore: the claim is not made.
         if (requested.distinctId != distinctId()) return SyncResult.UNAVAILABLE
         // Each purchase's claim is its own admission.
         val claim = PurchaseSend.admit(requested.reason, requested.distinctId, requested.customerKind)
+        // While the outbox is off the claim is sent once, unsaved.
+        if (outboxOff) return sendUnsaved(evidence, claim)
         // Writes to one purchase's entry are serialized: a spend holding this
         // purchase's usage claim finishes before the claim takes the entry over.
         val admitted = withUsageClaim(purchaseToken) {
             withContext(NonCancellable) {
                 projectionRefresh.withLock {
                     val current = evidenceStore.load()[purchaseToken] ?: return@withLock false
-                    evidenceStore.upsert(
-                        current.copy(pendingSend = claim, syncAttempts = 0, retryDueAtMillis = null),
-                    )
+                    saveEntry(current.copy(pendingSend = claim, syncAttempts = 0, retryDueAtMillis = null))
                 }
             }
         }
-        if (!admitted) return SyncResult.UNAVAILABLE
+        if (!admitted) return if (outboxOff) sendUnsaved(evidence, claim) else SyncResult.UNAVAILABLE
         // A claim of the buyer's own purchase replaces an entry that unlocked early.
         refreshOptimisticProjection()
         return sendOwed(purchaseToken, expected = claim)
@@ -2092,11 +2101,8 @@ internal class PurchaseService(
     private suspend fun sendOnce(purchaseToken: String): SendAnswer {
         val evidence = evidenceStore.load()[purchaseToken] ?: return SendAnswer(null, SyncResult.UNAVAILABLE)
         val send = evidence.pendingSend ?: return SendAnswer(null, SyncResult.UNAVAILABLE)
-        // An answer this session could not save is not sent again before its backoff;
-        // its timer sends it then.
-        unsavedAnswers[purchaseToken]
-            ?.takeIf { it.admissionId == send.admissionId && nowMillis() < it.dueAtMillis }
-            ?.let { return SendAnswer(null, SyncResult.UNAVAILABLE) }
+        // While the outbox is off a stored entry waits for the next launch.
+        if (outboxOff) return SendAnswer(null, SyncResult.UNAVAILABLE)
         // A purchase whose Play signature the current catalog requires and that
         // never verified is never sent. Like any owed entry that cannot be sent,
         // it counts a failed attempt and waits out its backoff, so its timer
@@ -2122,6 +2128,41 @@ internal class PurchaseService(
         }
         return SendAnswer(send, applyPurchaseAnswer(purchaseToken, send, answer))
     }
+
+    /**
+     * While the outbox is off: send [evidence], which could not be saved, once
+     * for [send]. Nothing is written, held or retried. Any answer only refreshes
+     * the requester's profile; the purchase is not completed with Play, so the
+     * next launch's recovery saves its entry and sends it again.
+     */
+    private suspend fun sendUnsaved(evidence: PurchaseEvidence, send: PurchaseSend): SyncResult {
+        // Never sent without the signature the current catalog requires.
+        if (!signatureEligible(evidence)) return SyncResult.UNAVAILABLE
+        val outcome = try {
+            synchronizer.sync(
+                evidence.copy(pendingSend = send),
+                PurchaseSyncRequest(send.reason, send.distinctId, send.customerKind),
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            Log.w("NuxieBilling", "Purchase synchronization failed.", failure)
+            PurchaseSyncOutcome.Rejected()
+        }
+        val answer = when (outcome) {
+            is PurchaseSyncOutcome.Rejected -> if (outcome.refused) PurchaseAnswer.Refused else PurchaseAnswer.Failed
+            is PurchaseSyncOutcome.Accepted -> acceptedAnswer(evidence, outcome.response)
+        }
+        if (answer != PurchaseAnswer.Failed && send.distinctId == distinctId()) refreshFeatureAuthority()
+        return answer.result
+    }
+
+    private val PurchaseAnswer.result: SyncResult
+        get() = when (this) {
+            is PurchaseAnswer.Accepted, is PurchaseAnswer.AcceptedFeatureUse -> SyncResult.ACCEPTED
+            PurchaseAnswer.Refused -> SyncResult.REFUSED
+            PurchaseAnswer.Failed -> SyncResult.UNAVAILABLE
+        }
 
     /** What the server answered one send of a purchase's entry. */
     private sealed interface PurchaseAnswer {
@@ -2153,13 +2194,15 @@ internal class PurchaseService(
     private sealed interface EntryAnswer {
         /** The answer is saved: the entry is answered and stays as the purchase's record. */
         data class Answered(val evidence: PurchaseEvidence) : EntryAnswer
-        /**
-         * No answer, or one that could not be saved: the entry stays owed with
-         * one more failed attempt, sent again at [dueAtMillis].
-         */
+        /** No answer: the entry stays owed with one more failed attempt, sent again at [dueAtMillis]. */
         data class Kept(val dueAtMillis: Long) : EntryAnswer
         /** A newer admission holds the entry: the answer changes nothing. */
         data object Superseded : EntryAnswer
+        /**
+         * The outbox is off (this write failed, or an earlier one did): nothing
+         * changes on disk or in memory, and the answer only refreshes the profile.
+         */
+        data object Unsaved : EntryAnswer
     }
 
     /**
@@ -2170,7 +2213,8 @@ internal class PurchaseService(
      * it used, [answersPayload]) may change it. A matching answer answers the
      * entry, which stays as the purchase's record; its flags, not any state
      * kept beside it, stop a later delivery from sending again. A matching
-     * failure, or an answer that cannot be saved, counts one more attempt.
+     * failure counts one more attempt. Nothing is written while the outbox is
+     * off, and a write that fails turns it off: the answer is then [EntryAnswer.Unsaved].
      * Called only while [projectionRefresh] is held.
      */
     private suspend fun answerEntryLocked(
@@ -2179,6 +2223,7 @@ internal class PurchaseService(
         answer: PurchaseAnswer,
         answersPayload: (PurchaseEvidence) -> Boolean = { true },
     ): EntryAnswer {
+        if (outboxOff) return EntryAnswer.Unsaved
         val current = evidenceStore.load()[purchaseToken]
         if (current == null || current.pendingSend != send || !answersPayload(current)) return EntryAnswer.Superseded
         val answered = when (answer) {
@@ -2220,41 +2265,20 @@ internal class PurchaseService(
             }
             PurchaseAnswer.Failed -> null
         }?.copy(pendingSend = null, syncAttempts = 0, retryDueAtMillis = null)
-        if (answered != null && evidenceStore.upsert(answered)) {
-            unsavedAttempts.remove(purchaseToken)
-            unsavedAnswers.remove(purchaseToken)
-            return EntryAnswer.Answered(answered)
+        if (answered != null) {
+            return if (saveEntry(answered)) EntryAnswer.Answered(answered) else EntryAnswer.Unsaved
         }
-        // No answer, or one that could not be saved: on disk it changes nothing but
-        // the attempt count, so the entry stays owed and is sent again after its backoff.
-        // An attempt count whose write failed is held here, so the backoff still grows.
-        val held = unsavedAttempts[purchaseToken]?.takeIf { it.admissionId == send.admissionId }?.attempts ?: 0
-        val attempts = maxOf(current.syncAttempts, held) + 1
-        // The due time is saved with the attempt, so it survives a restart.
+        // No answer: on disk only the attempt count changes, so the entry stays owed
+        // and is sent again after its backoff. The due time is saved with the
+        // attempt, so it survives a restart.
+        val attempts = current.syncAttempts + 1
         val dueAt = nowMillis() + outboxRetryDelay(attempts)
-        if (evidenceStore.upsert(current.copy(syncAttempts = attempts, retryDueAtMillis = dueAt))) {
-            unsavedAttempts.remove(purchaseToken)
+        return if (saveEntry(current.copy(syncAttempts = attempts, retryDueAtMillis = dueAt))) {
+            EntryAnswer.Kept(dueAt)
         } else {
-            unsavedAttempts[purchaseToken] = UnsavedAttempts(send.admissionId, attempts)
+            EntryAnswer.Unsaved
         }
-        // The server did answer: for this session the entry gives no early unlock and
-        // is not sent again before its backoff. A later failure keeps the hold, due later.
-        val heldAnswer = unsavedAnswers[purchaseToken]?.takeIf { it.admissionId == send.admissionId }
-        if (answered != null || heldAnswer != null) {
-            unsavedAnswers[purchaseToken] = UnsavedAnswer(send.admissionId, dueAt)
-        }
-        return EntryAnswer.Kept(dueAt)
     }
-
-    /** An attempt count the store could not save, for the admission it counts. */
-    private data class UnsavedAttempts(val admissionId: String, val attempts: Int)
-
-    /** A server answer the store could not save, for the admission it answered, due again at [dueAtMillis]. */
-    private data class UnsavedAnswer(val admissionId: String, val dueAtMillis: Long)
-
-    /** The server answered [evidence]'s current admission in this session, but the answer is not saved. */
-    private fun PurchaseEvidence.hasUnsavedAnswer(): Boolean =
-        pendingSend?.let { send -> unsavedAnswers[purchaseToken]?.admissionId == send.admissionId } == true
 
     /**
      * Apply the server's answer to a send of [purchaseToken]'s entry. After any
@@ -2272,8 +2296,8 @@ internal class PurchaseService(
                 val entry = answerEntryLocked(purchaseToken, send, answer)
                 val currentDistinctId = distinctId()
                 entry to when {
-                    // An answer that could not be saved still withdraws the early unlock.
-                    entry is EntryAnswer.Kept && answer != PurchaseAnswer.Failed -> stageOptimisticProjectionLocked()
+                    // The outbox is off: no entry unlocks early, and the profile decides.
+                    entry is EntryAnswer.Unsaved -> stageOptimisticProjectionLocked()
                     entry !is EntryAnswer.Answered -> null
                     // The 200's Features bridge until the profile refresh lands; nobody
                     // else keeps the early unlock this acceptance ends.
@@ -2303,11 +2327,8 @@ internal class PurchaseService(
             }
             is EntryAnswer.Kept -> SyncResult.UNAVAILABLE
             // A newer admission holds the entry; it is still owed and sent itself.
-            EntryAnswer.Superseded -> when (answer) {
-                is PurchaseAnswer.Accepted, is PurchaseAnswer.AcceptedFeatureUse -> SyncResult.ACCEPTED
-                PurchaseAnswer.Refused -> SyncResult.REFUSED
-                PurchaseAnswer.Failed -> SyncResult.UNAVAILABLE
-            }
+            // Or the outbox is off, and the answer only refreshed the profile.
+            EntryAnswer.Superseded, EntryAnswer.Unsaved -> answer.result
         }
     }
 
@@ -2319,7 +2340,8 @@ internal class PurchaseService(
     private suspend fun emitPurchaseSyncedIfNeeded(evidence: PurchaseEvidence): PurchaseEvidence =
         projectionRefresh.withLock {
             val current = evidenceStore.load()[evidence.purchaseToken] ?: evidence
-            if (current.syncedEventEmitted || current.ownerDistinctId != distinctId()) {
+            // While the outbox is off it is reported by the next launch, from a saved entry.
+            if (outboxOff || current.syncedEventEmitted || current.ownerDistinctId != distinctId()) {
                 return@withLock current
             }
             val properties = buildMap<String, Any?> {
@@ -2332,10 +2354,13 @@ internal class PurchaseService(
                 current.context?.journeyId?.let { put("journey_id", it) }
             }
             emit(SystemEventNames.PURCHASE_SYNCED, properties)
-            current.copy(syncedEventEmitted = true).takeIf { evidenceStore.upsert(it) } ?: current
+            current.copy(syncedEventEmitted = true).takeIf { saveEntry(it) } ?: current
         }
 
     private suspend fun completeManaged(evidence: PurchaseEvidence) {
+        // While the outbox is off nothing is acknowledged or consumed: Play keeps the
+        // purchase for the next launch's recovery.
+        if (outboxOff) return
         if (completionRetryJobs[evidence.purchaseToken]?.isActive == true) return
         val ownsCompletion = synchronized(usageCoordinationLock) {
             managedCompletionClaims.add(evidence.purchaseToken)
@@ -2348,7 +2373,7 @@ internal class PurchaseService(
                 // Nothing is acknowledged or consumed without the signature the catalog requires.
                 if (!signatureEligible(current)) return@withLock null
                 current.copy(completionAttempts = current.completionAttempts + 1)
-                    .takeIf { evidenceStore.upsert(it) }
+                    .takeIf { saveEntry(it) }
             } ?: return
             val completion = if (attempted.consumable) {
                 billing.consume(evidence.purchaseToken)
@@ -2365,7 +2390,7 @@ internal class PurchaseService(
             if (completed) {
                 projectionRefresh.withLock {
                     val current = evidenceStore.load()[attempted.purchaseToken] ?: return@withLock
-                    evidenceStore.upsert(
+                    saveEntry(
                         if (attempted.consumable) current.copy(consumed = true)
                         else current.copy(acknowledged = true),
                     )
@@ -2417,7 +2442,7 @@ internal class PurchaseService(
      * customer's own checkout upgrades only an owed entry's reason. A settled
      * record of another customer than [givesWayTo] is replaced, not merged.
      */
-    private suspend fun upsertEvidenceLocked(candidate: PurchaseEvidence, givesWayTo: String? = null): PurchaseEvidence? {
+    private suspend fun upsertEvidenceLocked(candidate: PurchaseEvidence, givesWayTo: String? = null): PurchaseEvidence {
         val current = evidenceStore.load()[candidate.purchaseToken]?.takeUnless { it.givesWayTo(givesWayTo) }
         val merged = if (current == null) candidate else candidate.copy(
             purchaseState = if (candidate.purchaseState == StoredPurchaseState.PURCHASED ||
@@ -2480,9 +2505,9 @@ internal class PurchaseService(
             }
         }
         // A later delivery that changes nothing writes nothing: the entry already
-        // records it.
-        if (merged == current) return merged
-        if (!evidenceStore.upsert(merged)) return null
+        // records it. One that cannot be saved turns the outbox off, and the merged
+        // entry is this delivery's alone.
+        if (merged != current) saveEntry(merged)
         return merged
     }
 
@@ -2493,8 +2518,11 @@ internal class PurchaseService(
      */
     private fun scheduleSendRetry(token: String, dueAtMillis: Long) {
         sendRetryJobs.remove(token)?.cancel()
+        // An outbox that is off sets no timer.
+        if (outboxOff) return
         sendRetryJobs[token] = scope.launch {
             delay((dueAtMillis - nowMillis()).coerceAtLeast(0))
+            if (outboxOff) return@launch
             // ConcurrentMap's own remove(key, value): available on every supported API level.
             (sendRetryJobs as java.util.concurrent.ConcurrentMap<String, Job>).remove(token, coroutineContext[Job])
             // A held-back send counts a failed attempt in sendOwed itself.
@@ -2503,9 +2531,10 @@ internal class PurchaseService(
     }
 
     private fun scheduleCompletionRetry(token: String, attempt: Int) {
-        if (completionRetryJobs[token]?.isActive == true) return
+        if (outboxOff || completionRetryJobs[token]?.isActive == true) return
         completionRetryJobs[token] = scope.launch {
             delay(retryDelay(attempt))
+            if (outboxOff) return@launch
             completionRetryJobs.remove(token)
             evidenceStore.load()[token]
                 ?.takeIf { it.synced && it.needsManagedCompletion }
@@ -2788,7 +2817,7 @@ internal class PurchaseService(
     )
 
     internal suspend fun rememberProduct(product: StoreProduct): Boolean =
-        evidenceStore.upsertProductMapping(product.toMapping()).also { persisted ->
+        saveMapping(product.toMapping()).also { persisted ->
             if (persisted) scope.launch { refreshOptimisticProjection() }
         }
 
@@ -2878,55 +2907,28 @@ internal class PurchaseService(
         // -> projection order is per-commit discipline; another commit's
         // refresh surfacing this row before this commit's carrier lands is
         // spec-conformant, not a leak (adjudicated UNIV-2676 review r2).
-        val retainedEvidence = evidenceStore.load().values
-        val identitiesByToken = retainedEvidence.associate { retained ->
-            retained.purchaseToken to retained.allowanceResolutionIdentity()
-        }
-        pendingAllowancePins.entries.removeAll { (token, pending) ->
-            identitiesByToken[token] != pending.identity
-        }
-        val evidence = retainedEvidence.mapNotNull { retained ->
-            if (retained.pinnedFeatureAllowances != null) {
-                pendingAllowancePins.remove(retained.purchaseToken)
-                return@mapNotNull retained
-            }
-            val identity = identitiesByToken.getValue(retained.purchaseToken)
-            val pending = pendingAllowancePins[retained.purchaseToken]
-                ?.takeIf { it.identity == identity }
-            val resolved = pending?.allowances
-                ?: resolvedFeatureAllowancesForEvidence(retained, descriptors, bindings)
-                ?: return@mapNotNull retained
-            if (pending == null) {
-                pendingAllowancePins[retained.purchaseToken] = PendingAllowancePin(identity, resolved)
-            }
+        val retainedEvidence = if (outboxOff) emptyList() else evidenceStore.load().values
+        val evidence = retainedEvidence.map { retained ->
+            if (retained.pinnedFeatureAllowances != null) return@map retained
+            val resolved = resolvedFeatureAllowancesForEvidence(retained, descriptors, bindings)
+                ?: return@map retained
             // A resolved allowance projection is safe only after its token-scoped
             // allowance snapshot is durable. Otherwise a later replacement or
-            // relaunch could silently swap the retained purchase's allowances.
-            upsertEvidenceLocked(retained.copy(pinnedFeatureAllowances = resolved))?.also {
-                pendingAllowancePins.remove(retained.purchaseToken)
-            }
+            // relaunch could silently swap the retained purchase's allowances. A
+            // snapshot that cannot be saved turns the outbox off.
+            upsertEvidenceLocked(retained.copy(pinnedFeatureAllowances = resolved))
         }
         return optimisticFeatureProjection(
             distinctId = currentDistinctId,
             authorityScope = purchaseStorageScope,
-            // The entry decides the early unlock (see [isBuyersOwnUnsyncedPurchase]),
-            // except that an answer this session could not save already ended it.
-            evidence = evidence.filterNot { it.hasUnsavedAnswer() },
+            // The entry alone decides the early unlock (see [isBuyersOwnUnsyncedPurchase]),
+            // and none does while the outbox is off: access comes from the profile alone.
+            evidence = if (outboxOff) emptyList() else evidence,
             descriptors = descriptors,
             bindings = bindings,
         )
     }
 
-    private fun PurchaseEvidence.allowanceResolutionIdentity() = AllowanceResolutionIdentity(
-        purchaseToken = purchaseToken,
-        obfuscatedAccountId = obfuscatedAccountId,
-        storeProductIds = storeProductIds.toSet(),
-        nuxieProductId = nuxieProductId,
-        basePlanId = basePlanId,
-        purchaseOptionId = purchaseOptionId,
-        offerId = offerId,
-        productType = productType,
-    )
 
 private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.encodeToByteArray())

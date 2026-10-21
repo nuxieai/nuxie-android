@@ -298,6 +298,8 @@ internal data class PurchaseEvidence(
 }
 
 internal interface PurchaseEvidenceStore {
+    /** False when the store cannot be read (it fails closed): it cannot save either. */
+    suspend fun isReadable(): Boolean = true
     suspend fun load(): Map<String, PurchaseEvidence>
     suspend fun upsert(evidence: PurchaseEvidence): Boolean
     suspend fun loadBindings(): List<StoredPurchaseBinding> = emptyList()
@@ -326,6 +328,8 @@ internal class FilePurchaseEvidenceStore(
     private val productMappingInstallationLock = Mutex()
     private val json = Json { ignoreUnknownKeys = true }
     @Volatile private var productMappingsChangedListener: (suspend () -> Unit)? = null
+
+    override suspend fun isReadable(): Boolean = onIo { synchronized(lock) { readUnlocked() != null } }
 
     /** An unreadable store reads as empty: nothing unlocks early and nothing is sent. */
     override suspend fun load(): Map<String, PurchaseEvidence> = onIo { synchronized(lock) { readUnlocked().orEmpty() } }
