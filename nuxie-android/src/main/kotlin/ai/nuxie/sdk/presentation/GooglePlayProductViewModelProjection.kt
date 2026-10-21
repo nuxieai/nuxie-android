@@ -32,12 +32,36 @@ internal object GooglePlayProductViewModelProjection {
         val values = (descriptor["viewModelValues"] as? JsonArray)
             ?.mapIndexed { index, element -> parseValue(element, index) }
             .orEmpty()
-        val productGroups = values
+        val releaseProducts = values
             .filter { it.viewModelName == PRODUCT_VIEW_MODEL }
             .groupBy { value ->
                 value.instanceId ?: invalid("PaywallProduct value has no instanceId")
             }
-        if (productGroups.isEmpty()) return null
+        if (releaseProducts.isEmpty()) return null
+        val screen = screen(descriptor, screenId)
+        val rootViewModelName = screen?.string("defaultViewModelName")
+            ?: invalid("Paywall commerce claims have no default root view model")
+        val rootInstanceId = screen?.string("defaultInstanceId")
+        // A release signs every screen's values together. As on iOS, a screen
+        // binds only the products its own root lists: a screen without a
+        // product list has nothing to project.
+        val listed = values.filter {
+            it.viewModelName == rootViewModelName && it.path == PRODUCT_LIST_PATH &&
+                (rootInstanceId == null || it.instanceId == rootInstanceId)
+        }
+        if (listed.isEmpty()) return null
+        val listedInstanceIds = ((listed.singleOrNull() ?: invalid("Screen root lists its products twice"))
+            .value as? JsonArray ?: invalid("Screen product list is not a list"))
+            .map { link ->
+                ((link as? JsonObject)?.get("vmInstanceId") as? JsonPrimitive)
+                    ?.takeIf(JsonPrimitive::isString)?.content
+                    ?: invalid("Screen product list links no PaywallProduct instance")
+            }
+            .toSet()
+        val productGroups = releaseProducts.filterKeys { it in listedInstanceIds }
+        if (productGroups.size != listedInstanceIds.size) {
+            invalid("Screen product list links an unsigned PaywallProduct instance")
+        }
 
         val hasVisibleClaim = productGroups.values.any { group ->
             group.any { it.path in COMMERCE_VALUE_PATHS && it.value.isVisibleClaim() }
@@ -47,8 +71,6 @@ internal object GooglePlayProductViewModelProjection {
         // placeholders never become the production source of truth.
         if (!hasVisibleClaim && products.isEmpty()) return null
 
-        val rootViewModelName = rootViewModelName(descriptor, screenId)
-            ?: invalid("Paywall commerce claims have no default root view model")
         val productsByPlacement = products.groupBy(StoreProduct::placementId)
         val projected = productGroups.values.map { group ->
             val placementId = group.requiredString("placementId")
@@ -308,14 +330,13 @@ internal object GooglePlayProductViewModelProjection {
             "$count ${unit.name}${if (count == 1) "" else "s"}"
         }
 
-    private fun rootViewModelName(descriptor: JsonObject, screenId: String?): String? {
+    private fun screen(descriptor: JsonObject, screenId: String?): JsonObject? {
         val screens = ((descriptor["leg"] as? JsonObject)?.get("screens") as? JsonArray)
             ?.mapNotNull { it as? JsonObject }
             .orEmpty()
-        val screen = screenId?.let { id ->
+        return screenId?.let { id ->
             screens.singleOrNull { it.string("id") == id }
         } ?: screens.firstOrNull()
-        return screen?.string("defaultViewModelName")
     }
 
     private fun parseValue(element: JsonElement, index: Int): Value {

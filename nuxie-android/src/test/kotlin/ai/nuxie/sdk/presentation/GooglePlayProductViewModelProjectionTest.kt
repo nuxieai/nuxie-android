@@ -193,6 +193,38 @@ class GooglePlayProductViewModelProjectionTest {
         assertEquals(string("€1.99/1 month for 2 months"), values["introOfferLabel"])
     }
 
+    // A Journey's release signs every screen's values together. Only the
+    // paywall screen's root lists products; the welcome screen before it has
+    // none, and binding a product list there failed the whole presentation.
+    @Test
+    fun `a screen projects only the products its own root lists`() {
+        val screen = { id: String ->
+            JsonObject(mapOf(
+                "id" to JsonPrimitive(id),
+                "defaultViewModelName" to JsonPrimitive("Root_$id"),
+                "defaultInstanceId" to JsonPrimitive("root-$id"),
+            ))
+        }
+        val release = JsonObject(mapOf(
+            "leg" to JsonObject(mapOf("screens" to JsonArray(listOf(screen("welcome"), screen("paywall"))))),
+            "viewModelValues" to JsonArray(listOf(
+                productList("Root_paywall", "root-paywall", "product-1"),
+                value("placementId", JsonPrimitive("primary")),
+                value("list_index", JsonPrimitive(0)),
+                value("price", JsonPrimitive("$19.99")),
+            )),
+        ))
+
+        assertNull(GooglePlayProductViewModelProjection.prepare(
+            release, products = listOf(subscription()), screenId = "welcome", locale = Locale.US,
+        ))
+        val paywall = checkNotNull(GooglePlayProductViewModelProjection.prepare(
+            release, products = listOf(subscription()), screenId = "paywall", locale = Locale.US,
+        ))
+        assertEquals("Root_paywall", paywall.rootSchemaName)
+        assertEquals(listOf("product-1"), paywall.items.map { it.instanceId })
+    }
+
     @Test
     fun `signed commerce claim fails closed without matching ProductDetails`(): Unit = kotlinx.coroutines.runBlocking {
         val failure = assertThrows(IllegalStateException::class.java) {
@@ -251,16 +283,32 @@ class GooglePlayProductViewModelProjectionTest {
                         ),
                     ),
                 ),
-                "viewModelValues" to JsonArray(productValues),
+                "viewModelValues" to JsonArray(listOf(productList("Runtime", null, "product-1")) + productValues),
             ),
         )
     }
 
-    private fun value(path: String, value: JsonPrimitive): JsonObject = JsonObject(
+    /** The root list of a screen's paywall, as the publisher signs it. */
+    private fun productList(viewModelName: String, instanceId: String?, vararg products: String): JsonObject =
+        JsonObject(
+            buildMap {
+                put("viewModelName", JsonPrimitive(viewModelName))
+                instanceId?.let { put("instanceId", JsonPrimitive(it)) }
+                put("path", JsonPrimitive("paywall/products"))
+                put("value", JsonArray(products.map { JsonObject(mapOf("vmInstanceId" to JsonPrimitive(it))) }))
+            },
+        )
+
+    private fun value(
+        path: String,
+        value: JsonPrimitive,
+        instanceId: String = "product-1",
+        instanceName: String = "Live Pro",
+    ): JsonObject = JsonObject(
         mapOf(
             "viewModelName" to JsonPrimitive("PaywallProduct"),
-            "instanceId" to JsonPrimitive("product-1"),
-            "instanceName" to JsonPrimitive("Live Pro"),
+            "instanceId" to JsonPrimitive(instanceId),
+            "instanceName" to JsonPrimitive(instanceName),
             "path" to JsonPrimitive(path),
             "value" to value,
         ),
