@@ -3426,40 +3426,42 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun restoreReportsAFailureWhenItCannotRetainAPlayPurchase() = runTest {
+    fun aRestoreThatCannotSaveStillSendsEachPurchaseOnceAndReportsItsAnswer() = runTest {
         val actions = mutableListOf<String>()
         val fixture = fixture(this, actions = actions)
         val owner = fixture.core.identity.distinctId()
         fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
-            playPurchase("unretained", obfuscatedAccountId = accountHash(owner)),
+            playPurchase("unsaved-restore", obfuscatedAccountId = accountHash(owner)),
         )
-        fixture.store.failEvidenceUpserts = true
+        // A full disk: nothing can be saved, so the outbox is off.
+        fixture.store.failAllWrites = true
 
-        val host = fixture.service.restorePurchases()
-        val journey = fixture.service.restorePurchases(expectedOwnerDistinctId = owner)
-
-        for (result in listOf(host, journey)) {
-            assertTrue("Play owns a purchase, so this is not NoPurchases: $result", result is RestoreResult.Failed)
-            assertTrue(
-                (result as RestoreResult.Failed).cause.message.orEmpty().contains("could not be retained"),
-            )
-        }
+        assertEquals(RestoreResult.Restored, fixture.service.restorePurchases())
+        assertEquals(
+            listOf("unsaved-restore" to PurchaseSyncReason.RESTORE),
+            fixture.requests.map { it.first to it.second.reason },
+        )
+        assertEquals("The answer refreshes the profile", 1, fixture.authorityRefreshes)
+        assertTrue("Nothing is saved", fixture.store.load().isEmpty())
+        assertFalse("Nothing is acknowledged", "ack" in actions)
+        // A Journey's Restore also needs the purchase saved and completed with Play,
+        // which waits for the next launch.
+        assertTrue(fixture.service.restorePurchases(expectedOwnerDistinctId = owner) is RestoreResult.Failed)
         assertEquals(0, actions.count { it == SystemEventNames.RESTORE_NO_PURCHASES })
-        assertEquals(2, actions.count { it == SystemEventNames.RESTORE_FAILED })
-        assertTrue(fixture.requests.isEmpty())
         fixture.close()
     }
 
     @Test
-    fun refusalThatCannotBeWrittenStillEndsAccessAndIsAnsweredAgain() = runTest {
+    fun refusalThatCannotBeWrittenEndsAccessAndIsAnsweredAgainAtTheNextLaunch() = runTest {
         val fixture = fixture(this)
         val owner = fixture.core.identity.distinctId()
         fixture.service.rememberProduct(
             product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
         )
-        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+        val owned = listOf(
             playPurchase("refresh-token", obfuscatedAccountId = accountHash(owner)).copy(acknowledged = true),
         )
+        fixture.billing.active[BillingClient.ProductType.SUBS] = owned
         // The launch scan gets no answer: the buyer's own unanswered purchase unlocks early.
         fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
         fixture.service.recover()
@@ -3467,33 +3469,41 @@ class PurchaseServiceTest {
 
         val conflict = NuxieApiPurchaseSynchronizer(conflictApi(mutableListOf()))
         fixture.synchronizer = { conflict.sync(it, fixture.requests.last().second) }
-        // Only the write that records the refusal fails.
+        // Only the write that records the refusal fails, which turns the outbox off.
         fixture.store.rejectEvidenceUpsert = { it.purchaseToken == "refresh-token" && it.refused }
         assertTrue(fixture.service.restorePurchases() is RestoreResult.Failed)
 
-        assertFalse("A refusal ends the early unlock at once", fixture.core.featureInfo.isAllowed("pro"))
+        assertFalse("While the outbox is off nothing unlocks early", fixture.core.featureInfo.isAllowed("pro"))
         assertNotNull("The unwritten answer leaves the entry owed", fixture.store.load().getValue("refresh-token").pendingSend)
 
-        // Once the store accepts writes again, the entry is sent after its backoff (not
-        // before: the server answered it) and the answer is written. The recovery
-        // waits for a send already going out.
+        // It stays off for the session: a store that saves again changes nothing, and
+        // no timer sends the entry.
         fixture.store.rejectEvidenceUpsert = null
-        advanceTimeBy(60_000)
+        val sent = fixture.requests.size
+        advanceTimeBy(3_600_000)
         runCurrent()
-        fixture.service.recover()
+        assertEquals(sent, fixture.requests.size)
+        assertNotNull(fixture.store.load().getValue("refresh-token").pendingSend)
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+
+        // The next launch sends it again and saves the refusal.
+        val restarted = fixture(this, store = fixture.store)
+        restarted.synchronizer = { PurchaseSyncOutcome.Rejected(refused = true) }
+        restarted.billing.active[BillingClient.ProductType.SUBS] = owned
+        restarted.service.recover()
+        assertEquals(listOf("refresh-token"), restarted.requests.map { it.first }.distinct())
         val answered = fixture.store.load().getValue("refresh-token")
         assertNull(answered.pendingSend)
         assertTrue(answered.refused)
-
-        val restarted = fixture(this, store = fixture.store)
-        restarted.billing.active[BillingClient.ProductType.SUBS] = fixture.billing.active.getValue(
-            BillingClient.ProductType.SUBS,
-        )
-        restarted.service.recover()
         assertFalse(restarted.core.featureInfo.isAllowed("pro"))
-        assertTrue("A refused purchase is not sent again on its own", restarted.requests.isEmpty())
         restarted.close()
-        fixture.close()
+
+        val again = fixture(this, store = fixture.store)
+        again.billing.active[BillingClient.ProductType.SUBS] = owned
+        again.service.recover()
+        assertTrue("A refused purchase is not sent again on its own", again.requests.isEmpty())
+        again.close()
     }
 
     @Test
@@ -4748,7 +4758,7 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun aRefusalThatCannotBeSavedEndsTheEarlyUnlockForTheSessionAndWaitsOutItsBackoff() = runTest {
+    fun anAnswerThatCannotBeSavedTurnsTheOutboxOffForTheSession() = runTest {
         val fixture = fixture(this, initialRetryDelayMillis = 1_000, maxRetryDelayMillis = 1_000)
         // The buyer's own checkout: no answer yet, so it unlocks early.
         fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
@@ -4765,30 +4775,32 @@ class PurchaseServiceTest {
         assertEquals(PurchaseResult.Purchased, checkout.await())
         assertTrue(fixture.core.featureInfo.isAllowed("pro"))
 
-        // The server refuses it, and saving that answer fails.
+        // The server refuses it, and saving that answer fails: the outbox is off.
         fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(bought)
         fixture.synchronizer = { PurchaseSyncOutcome.Rejected(refused = true) }
         fixture.store.rejectEvidenceUpsert = { it.purchaseToken == "unsaved-refusal" && it.pendingSend == null }
         val refreshes = fixture.authorityRefreshes
         fixture.service.recover()
 
-        assertNotNull("Unsaved, the entry stays owed", fixture.store.load().getValue("unsaved-refusal").pendingSend)
-        assertFalse("The refusal ends the early unlock for this session", fixture.core.featureInfo.isAllowed("pro"))
+        assertNotNull("Unsaved, the entry stays owed on disk", fixture.store.load().getValue("unsaved-refusal").pendingSend)
+        assertFalse("Nothing unlocks early while the outbox is off", fixture.core.featureInfo.isAllowed("pro"))
         assertEquals("The requester's profile is still fetched", refreshes + 1, fixture.authorityRefreshes)
-        // It is not sent again before its backoff, even by another recovery.
-        val sent = fixture.requests.size
-        fixture.service.recover()
-        assertEquals(sent, fixture.requests.size)
 
-        // Once saving works, the retry at its due time saves the answer.
+        // Off for the rest of the session: the checkout's retry timer is gone, and a
+        // store that saves again changes nothing.
         fixture.store.rejectEvidenceUpsert = null
-        advanceTimeBy(1_000)
+        val sent = fixture.requests.size
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertEquals("No timer sends it", sent, fixture.requests.size)
+        // Each purchase Play delivers is still sent once.
+        fixture.service.recover()
+        assertEquals(sent + 1, fixture.requests.size)
+        assertNotNull(fixture.store.load().getValue("unsaved-refusal").pendingSend)
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        advanceTimeBy(60_000)
         runCurrent()
         assertEquals(sent + 1, fixture.requests.size)
-        val answered = fixture.store.load().getValue("unsaved-refusal")
-        assertNull(answered.pendingSend)
-        assertTrue(answered.refused)
-        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
         fixture.close()
     }
 
@@ -5066,11 +5078,14 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun aRetryBackoffKeepsGrowingWhenItsAttemptCannotBeSaved() = runTest {
+    fun noTimerSendsWhileTheOutboxIsOff() = runTest {
         val clock = { 1_800_000_000_000L + testScheduler.currentTime }
         val store = RecordingEvidenceStore()
         store.upsert(owedRestoreEvidence("stored-customer"))
-        // The store cannot save the entry's retry bookkeeping (a full disk, say).
+        store.upsert(
+            owedRestoreEvidence("stored-customer").copy(purchaseToken = "later-token", retryDueAtMillis = clock() + 10_000),
+        )
+        // The store cannot save the first entry's retry bookkeeping (a full disk, say).
         store.rejectEvidenceUpsert = { it.purchaseToken == "refresh-token" && it.syncAttempts > 0 }
         val launched = fixture(
             this,
@@ -5079,26 +5094,97 @@ class PurchaseServiceTest {
             maxRetryDelayMillis = 1_000_000,
             nowMillis = clock,
         )
-        var sends = 0
+        val sent = mutableListOf<String>()
         launched.synchronizer = {
-            sends += 1
+            sent += it.purchaseToken
             PurchaseSyncOutcome.Rejected()
         }
 
-        // Sent at launch; each failure is due again after 1 s, then 2 s, then 4 s.
+        // Sent at launch, with no answer; its attempt cannot be saved, so the outbox is
+        // off: neither that entry's timer nor the other entry's sends again.
         runCurrent()
-        assertEquals(1, sends)
-        advanceTimeBy(3_500)
+        assertEquals(listOf("refresh-token"), sent)
+        advanceTimeBy(3_600_000)
         runCurrent()
-        assertEquals("The backoff grows though no attempt was saved", 3, sends)
-        advanceTimeBy(3_499)
-        runCurrent()
-        assertEquals(3, sends)
-        advanceTimeBy(1)
-        runCurrent()
-        assertEquals(4, sends)
+        assertEquals(listOf("refresh-token"), sent)
         assertEquals("Nothing was saved", 0, store.load().getValue("refresh-token").syncAttempts)
         launched.close()
+    }
+
+    @Test
+    fun aPurchaseTheOutboxCannotSaveIsSentOnceAndCompletedByTheNextLaunch() = runTest {
+        val actions = mutableListOf<String>()
+        val proProfile = Json.parseToJsonElement(
+            """{"features":[{"id":"pro","type":"boolean","unlimited":false}]}""",
+        ).jsonObject
+        // A full disk: the store refuses every write.
+        val store = RecordingEvidenceStore().apply { failAllWrites = true }
+        val fixture = fixture(this, store = store, actions = actions, refreshedProfile = proProfile)
+        val unlockedAtSend = mutableListOf<Boolean>()
+        fixture.synchronizer = { evidence ->
+            unlockedAtSend += fixture.core.featureInfo.isAllowed("pro")
+            accepted(fixture.core.identity.distinctId(), evidence)
+        }
+        val checkout = async {
+            fixture.service.purchase(
+                activity(),
+                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+                null,
+            )
+        }
+        runCurrent()
+        val bought = playPurchase("full-disk-token").forCheckout(fixture)
+        fixture.service.onPurchasesUpdated(okUpdate(bought))
+        assertEquals("The checkout still finishes for the host and the Journey", PurchaseResult.Purchased, checkout.await())
+        runCurrent()
+
+        assertEquals("Exactly one send", listOf("full-disk-token"), fixture.requests.map { it.first })
+        assertEquals("No early unlock", listOf(false), unlockedAtSend)
+        assertEquals(1, fixture.authorityRefreshes)
+        assertTrue("The profile the answer asked for shows access", fixture.core.featureInfo.isAllowed("pro"))
+        assertEquals(1, actions.count { it == SystemEventNames.PURCHASE_COMPLETED })
+        assertFalse("Not acknowledged", "ack" in actions)
+        assertFalse("Not consumed", "consume" in actions)
+        assertTrue("Nothing is saved", store.load().isEmpty())
+        advanceTimeBy(3_600_000)
+        runCurrent()
+        assertEquals("No timer sends it again", 1, fixture.requests.size)
+        fixture.close()
+
+        // The relaunch, with a store that saves again: recovery finds the purchase,
+        // saves its entry, sends it and completes it with Play.
+        store.failAllWrites = false
+        val relaunchActions = mutableListOf<String>()
+        val relaunched = fixture(this, store = store, actions = relaunchActions)
+        relaunched.billing.active[BillingClient.ProductType.INAPP] = listOf(bought)
+        relaunched.service.recover()
+        runCurrent()
+        assertEquals(listOf("full-disk-token"), relaunched.requests.map { it.first })
+        val saved = store.load().getValue("full-disk-token")
+        assertNull("Saved and answered", saved.pendingSend)
+        assertTrue(saved.acknowledged)
+        assertEquals(1, relaunchActions.count { it == "ack" })
+        assertEquals("No second completion", 0, relaunchActions.count { it == SystemEventNames.PURCHASE_COMPLETED })
+        relaunched.close()
+    }
+
+    @Test
+    fun anUnreadableStoreTurnsTheOutboxOffAtLaunch() = runTest {
+        val actions = mutableListOf<String>()
+        val store = RecordingEvidenceStore().apply { unreadable = true }
+        val fixture = fixture(this, store = store, actions = actions)
+        runCurrent()
+        val customer = fixture.core.identity.distinctId()
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("unreadable-token", obfuscatedAccountId = accountHash(customer)),
+        )
+
+        fixture.service.recover()
+
+        assertEquals("What Play delivers is sent once", listOf("unreadable-token"), fixture.requests.map { it.first })
+        assertEquals("Nothing is written to a store that cannot be read", 0, actions.count { it == "persist" })
+        assertFalse("ack" in actions)
+        fixture.close()
     }
 
     @Test
@@ -5722,6 +5808,8 @@ class PurchaseServiceTest {
         startService: Boolean = true,
         /** Whether the core is built far enough to refresh the profile. */
         profileReady: () -> Boolean = { true },
+        /** The profile each refresh the service asks for lands, if any. */
+        refreshedProfile: JsonObject? = null,
     ): Fixture {
         val storageDirectory = temporaryFolder.newFolder("fixture-${fixtures.size}")
         val core = NuxieCore(
@@ -5817,6 +5905,11 @@ class PurchaseServiceTest {
             refreshFeatureAuthority = {
                 check(profileReady()) { "The profile is not built yet." }
                 fixture.authorityRefreshes += 1
+                refreshedProfile?.let { profile ->
+                    scope.backgroundScope.launch {
+                        core.features.hydrateProfile(core.identity.distinctId(), profile)
+                    }
+                }
             },
         )
         if (startService) service.start()
@@ -5862,6 +5955,11 @@ class PurchaseServiceTest {
         private val mappings = linkedMapOf<StoredProductIdentity, StoredProductMapping>()
         var actions: MutableList<String> = mutableListOf()
         var failEvidenceUpserts = false
+        /** Refuses every write (entries, bindings, catalog), as a full disk does. */
+        var failAllWrites = false
+        /** Reads as empty and refuses every write, as a store that fails closed does. */
+        var unreadable = false
+        override suspend fun isReadable(): Boolean = !unreadable
         /** Rejects only the evidence writes it matches. */
         var rejectEvidenceUpsert: ((PurchaseEvidence) -> Boolean)? = null
         var afterNextLoad: ((Map<String, PurchaseEvidence>) -> Unit)? = null
@@ -5870,6 +5968,7 @@ class PurchaseServiceTest {
         var beforeUpsert: (suspend (PurchaseEvidence) -> Unit)? = null
         override suspend fun load(): Map<String, PurchaseEvidence> {
             checkThread()
+            if (unreadable) return emptyMap()
             val snapshot = entries.toMap()
             val callback = afterNextLoad
             afterNextLoad = null
@@ -5879,7 +5978,7 @@ class PurchaseServiceTest {
         override suspend fun upsert(evidence: PurchaseEvidence): Boolean {
             beforeUpsert?.invoke(evidence)
             actions += "persist"
-            if (failEvidenceUpserts || rejectEvidenceUpsert?.invoke(evidence) == true) return false
+            if (unreadable || failAllWrites || failEvidenceUpserts || rejectEvidenceUpsert?.invoke(evidence) == true) return false
             entries[evidence.purchaseToken] = evidence
             return true
         }
@@ -5889,6 +5988,7 @@ class PurchaseServiceTest {
         override suspend fun loadBindings(): List<StoredPurchaseBinding> = bindings.values.toList()
         override suspend fun upsertBinding(binding: StoredPurchaseBinding): Boolean {
             checkThread()
+            if (unreadable || failAllWrites) return false
             bindings[binding.obfuscatedAccountId to binding.productIdentity] = binding
             return true
         }
@@ -5907,6 +6007,7 @@ class PurchaseServiceTest {
         }
         override suspend fun upsertProductMapping(mapping: StoredProductMapping, catalogChange: Boolean): Boolean {
             checkThread()
+            if (unreadable || failAllWrites) return false
             val changed = mappings.put(mapping.productIdentity, mapping) != mapping
             if (notifiesCatalogChanges && changed && catalogChange) catalogListener?.invoke()
             return true
