@@ -908,7 +908,7 @@
     "runtime/screen-exit-reason/field-absent/source/screens/tap/index.html": "ea4be62bf08895f388ea109b3931168b4d0aaea7",
     "journeys/planes/unsupported-video-actions.json": "0e110da608a247abfdfd280dc4d0a641c8ee24c0",
     "sdk/early-event-admission.json": "a858eb1430bf557de7a209e92ab19cdd53775131",
-    "sdk/refetch-event-hold.json": "5a1801798dd5398ad1660c938c8d8a4085fb4df3",
+    "sdk/refetch-event-hold.json": "c35e8d235cc5a70cad3893a0b3d16e421bc83c49",
     "video/greeting.nux": "ac016bf60a9d96342d4bfdba30cd8102a8f7d158",
     "video/waiting.nux": "ac016bf60a9d96342d4bfdba30cd8102a8f7d158",
     "video/list.nux": "ac016bf60a9d96342d4bfdba30cd8102a8f7d158",
