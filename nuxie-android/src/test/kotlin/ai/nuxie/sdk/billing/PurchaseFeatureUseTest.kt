@@ -55,6 +55,11 @@ class PurchaseFeatureUseTest {
 
     private val cores = mutableListOf<NuxieCore>()
     private var coreSequence = 0
+    private val serviceClockOrigin = System.nanoTime()
+
+    private companion object {
+        const val SERVICE_CLOCK_START = 1_784_462_400_000L
+    }
 
     @After
     fun closeCores() {
@@ -809,7 +814,9 @@ class PurchaseFeatureUseTest {
             emit = { _, _ -> },
             settings = PurchaseSettings(null, PurchaseHandlingMode.NUXIE_MANAGED),
             scope = core.scope,
-            nowMillis = { 1_784_462_400_000L },
+            // The clock moves with real time, as the retry timers' delays do: a timer
+            // sends only once the entry's stored due time has passed.
+            nowMillis = { SERVICE_CLOCK_START + (System.nanoTime() - serviceClockOrigin) / 1_000_000 },
             api = core.api,
             purchaseStorageScope = "scope-a",
             capturePurchaseSynced = capture,

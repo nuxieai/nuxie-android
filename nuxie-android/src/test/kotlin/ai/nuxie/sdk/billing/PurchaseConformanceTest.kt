@@ -142,6 +142,8 @@ class PurchaseConformanceTest {
             maxRetryDelayMillis = 10,
             outboxRetryInitialDelayMillis = 10,
             outboxRetryMaxDelayMillis = 10,
+            // The service's clock follows the virtual clock, so saved due times and retry timers agree.
+            nowMillis = { 1_800_000_000_000L + testScheduler.currentTime },
         ).also { it.start() }
         service.onPurchasesUpdated(okUpdate(purchase))
 

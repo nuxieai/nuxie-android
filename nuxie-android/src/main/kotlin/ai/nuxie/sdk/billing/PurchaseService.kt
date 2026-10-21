@@ -662,9 +662,10 @@ internal class PurchaseService(
     private suspend fun scheduleStoredRetries() {
         // The Test Store never sends native evidence, and an outbox that is off sets no timer.
         if (testStore != null || outboxOff) return
-        evidenceStore.load().values
-            .filter { it.pendingSend != null }
-            .forEach { scheduleSendRetry(it.purchaseToken, it.retryDueAtMillis ?: nowMillis()) }
+        evidenceStore.load().values.forEach { entry ->
+            val send = entry.pendingSend ?: return@forEach
+            scheduleSendRetry(entry.purchaseToken, send, entry.retryDueAtMillis ?: nowMillis())
+        }
     }
 
     /** Wait until cold-start evidence has established the initial optimistic projection. */
@@ -2345,7 +2346,7 @@ internal class PurchaseService(
             }
         }
         features.publishStaged(publication)
-        if (entry is EntryAnswer.Kept) scheduleSendRetry(purchaseToken, entry.dueAtMillis)
+        if (entry is EntryAnswer.Kept) scheduleSendRetry(purchaseToken, send, entry.dueAtMillis)
         if (answer != PurchaseAnswer.Failed && send.distinctId == distinctId()) refreshFeatureAuthority()
         return when (entry) {
             is EntryAnswer.Answered -> when (answer) {
@@ -2543,22 +2544,49 @@ internal class PurchaseService(
     }
 
     /**
-     * Send [token]'s entry again at [dueAtMillis]: its failure time plus the
-     * delay for its attempt count. A later failure replaces an earlier timer,
-     * so each entry keeps its own due time; an overdue one is due now.
+     * Wake [token]'s entry at [dueAtMillis] to send [send] again: its failure
+     * time plus the delay for its attempt count. A timer is only a wake-up; the
+     * stored entry decides. It is set only while the entry still owes [send],
+     * and never earlier than the entry's stored due time, so a caller holding
+     * an older read of the entry cannot bring a retry forward. Reading the
+     * entry and replacing the timer happen as one step, so the last timer set
+     * is for the latest stored due time. An overdue one is due now.
      */
-    private fun scheduleSendRetry(token: String, dueAtMillis: Long) {
-        sendRetryJobs.remove(token)?.cancel()
-        // An outbox that is off sets no timer.
-        if (outboxOff) return
-        sendRetryJobs[token] = scope.launch {
-            delay((dueAtMillis - nowMillis()).coerceAtLeast(0))
-            if (outboxOff) return@launch
-            // ConcurrentMap's own remove(key, value): available on every supported API level.
-            (sendRetryJobs as java.util.concurrent.ConcurrentMap<String, Job>).remove(token, coroutineContext[Job])
-            // A held-back send counts a failed attempt in sendOwed itself.
-            if (evidenceStore.load()[token]?.pendingSend != null) sendOwed(token)
+    private suspend fun scheduleSendRetry(token: String, send: PurchaseSend, dueAtMillis: Long) {
+        retryScheduling.withLock {
+            val stored = evidenceStore.load()[token]
+            // An outbox that is off sets no timer.
+            if (outboxOff || stored?.pendingSend != send) return@withLock
+            val dueAt = maxOf(dueAtMillis, stored.retryDueAtMillis ?: dueAtMillis)
+            sendRetryJobs.remove(token)?.cancel()
+            sendRetryJobs[token] = scope.launch {
+                delay((dueAt - nowMillis()).coerceAtLeast(0))
+                // ConcurrentMap's own remove(key, value): available on every supported API level.
+                (sendRetryJobs as java.util.concurrent.ConcurrentMap<String, Job>).remove(token, coroutineContext[Job])
+                wakeSendRetry(token, send)
+            }
         }
+    }
+
+    /** Serializes reading an entry's due time with replacing its timer. */
+    private val retryScheduling = Mutex()
+
+    /**
+     * A retry timer fired. The entry decides: answered, or held by a newer
+     * admission, it does nothing; still owed but not yet due, the timer is set
+     * again for its stored due time; owed and due, it is sent.
+     */
+    private suspend fun wakeSendRetry(token: String, send: PurchaseSend) {
+        if (outboxOff) return
+        val stored = evidenceStore.load()[token] ?: return
+        if (stored.pendingSend != send) return
+        val dueAt = stored.retryDueAtMillis
+        if (dueAt != null && dueAt > nowMillis()) {
+            scheduleSendRetry(token, send, dueAt)
+            return
+        }
+        // A held-back send counts a failed attempt in sendOwed itself.
+        sendOwed(token)
     }
 
     private fun scheduleCompletionRetry(token: String, attempt: Int) {
