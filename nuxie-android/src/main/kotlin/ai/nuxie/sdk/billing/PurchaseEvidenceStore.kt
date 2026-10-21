@@ -301,6 +301,15 @@ internal data class PurchaseEvidence(
 internal interface PurchaseEvidenceStore {
     /** False when the store cannot be read (it fails closed): it cannot save either. */
     suspend fun isReadable(): Boolean = true
+    /**
+     * At launch, before any outbox work. A file that was read but does not
+     * decode is corrupt: it is moved aside to a quarantine name, never read
+     * again, and an empty file takes its place. False only when a file cannot
+     * be read right now (an IO error, or storage that is still locked before
+     * the first unlock): that is not corruption, nothing is moved, and the
+     * outbox is off for the session; the next launch tries again.
+     */
+    suspend fun openAtLaunch(): Boolean = isReadable()
     suspend fun load(): Map<String, PurchaseEvidence>
     suspend fun upsert(evidence: PurchaseEvidence): Boolean
     suspend fun loadBindings(): List<StoredPurchaseBinding> = emptyList()
@@ -321,6 +330,8 @@ internal interface PurchaseEvidenceStore {
 internal class FilePurchaseEvidenceStore(
     private val directory: File,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    /** Names the quarantined files. */
+    private val nowMillis: () -> Long = System::currentTimeMillis,
 ) : PurchaseEvidenceStore {
     private val file = File(directory, "purchase-evidence.json")
     private val bindingsFile = File(directory, "purchase-bindings.json")
@@ -334,6 +345,87 @@ internal class FilePurchaseEvidenceStore(
     override suspend fun isReadable(): Boolean = onIo {
         synchronized(lock) {
             readUnlocked() != null && loadBindingsUnlocked() != null && loadMappingsUnlocked() != null
+        }
+    }
+
+    override suspend fun openAtLaunch(): Boolean = onIo {
+        synchronized(lock) {
+            // Every file is opened, so each corrupt one is moved aside at this launch.
+            listOf(
+                openAtLaunchUnlocked(StoreFile.EVIDENCE, readEvidenceFileUnlocked()),
+                openAtLaunchUnlocked(StoreFile.BINDINGS, readRowsFileUnlocked(bindingsFile, ::decodeBinding)),
+                openAtLaunchUnlocked(StoreFile.CATALOG, readRowsFileUnlocked(catalogFile, ::decodeMapping)),
+            ).all { it }
+        }
+    }
+
+    /** The store's three files, and the names their quarantined copies take. */
+    private enum class StoreFile(val fileName: String, val quarantinePrefix: String) {
+        EVIDENCE("purchase-evidence.json", "purchase-evidence.unreadable-"),
+        BINDINGS("purchase-bindings.json", "purchase-bindings.unreadable-"),
+        CATALOG("purchase-catalog.json", "purchase-catalog.unreadable-"),
+    }
+
+    /** One read of a store file. */
+    private sealed interface FileRead<out T> {
+        data class Read<T>(val value: T) : FileRead<T>
+        /** The bytes could not be read now: an IO error, not corruption. */
+        data class Unavailable(val cause: Throwable) : FileRead<Nothing>
+        /** The bytes were read but do not decode; [row] is null when the file does not parse. */
+        data class Corrupt(val row: Int?, val field: String?, val cause: Throwable? = null) : FileRead<Nothing>
+    }
+
+    private fun openAtLaunchUnlocked(kind: StoreFile, read: FileRead<*>): Boolean = when (read) {
+        is FileRead.Read -> true
+        is FileRead.Unavailable -> false.also { logUnavailable(kind, read.cause) }
+        is FileRead.Corrupt -> quarantineUnlocked(kind, read)
+    }
+
+    /**
+     * Move a corrupt file aside, next to where it was, so an empty one takes its
+     * place. Only the newest quarantined copy of each file is kept, so repeated
+     * corruption cannot fill the disk. A file that cannot be moved stays where
+     * it is, closed, and the outbox is off for the session.
+     */
+    private fun quarantineUnlocked(kind: StoreFile, corrupt: FileRead.Corrupt): Boolean {
+        val source = File(directory, kind.fileName)
+        val target = File(directory, "${kind.quarantinePrefix}${nowMillis()}.json")
+        if (!runCatching { source.renameTo(target) }.getOrDefault(false)) {
+            logUnavailable(kind, IllegalStateException("Could not move the unreadable file aside"))
+            return false
+        }
+        directory.listFiles()
+            ?.filter { it != target && it.name.startsWith(kind.quarantinePrefix) && it.name.endsWith(".json") }
+            ?.forEach { runCatching { it.delete() } }
+        logQuarantined(kind, corrupt, target)
+        return true
+    }
+
+    private fun logUnavailable(kind: StoreFile, cause: Throwable) = when (kind) {
+        StoreFile.EVIDENCE -> Log.w("NuxieBilling", "Could not read purchase evidence.", cause)
+        StoreFile.BINDINGS -> Log.w("NuxieBilling", "Could not read purchase bindings.", cause)
+        StoreFile.CATALOG -> Log.w("NuxieBilling", "Could not read purchase catalog.", cause)
+    }
+
+    /** One line per quarantine: where it failed (row -1 when the file does not parse) and where it went. */
+    private fun logQuarantined(kind: StoreFile, corrupt: FileRead.Corrupt, target: File) {
+        val row = Log.status("row", corrupt.row ?: -1)
+        val field = Log.sensitive("field", corrupt.field)
+        val path = Log.sensitive("path", target.path)
+        when (kind) {
+            StoreFile.EVIDENCE -> Log.w("NuxieBilling", "Quarantined an unreadable purchase evidence file.", null, row, field, path)
+            StoreFile.BINDINGS -> Log.w("NuxieBilling", "Quarantined an unreadable purchase bindings file.", null, row, field, path)
+            StoreFile.CATALOG -> Log.w("NuxieBilling", "Quarantined an unreadable purchase catalog file.", null, row, field, path)
+        }
+    }
+
+    /** The file's text, null when there is no file, or why it cannot be read now. */
+    private fun readTextUnlocked(target: File): FileRead<String?> {
+        if (!target.exists()) return FileRead.Read(null)
+        return try {
+            FileRead.Read(target.readText())
+        } catch (failure: Exception) {
+            FileRead.Unavailable(failure)
         }
     }
 
@@ -410,55 +502,61 @@ internal class FilePurchaseEvidenceStore(
      * fails closed, as the entries do: nothing is written over the file.
      */
     private fun loadBindingsUnlocked(): List<StoredPurchaseBinding>? =
-        when (val read = readRowsUnlocked(bindingsFile, ::decodeBinding)) {
-            is RowsRead.Read -> read.rows
-            is RowsRead.Unparsable -> null.also { Log.w("NuxieBilling", "Could not read purchase bindings.", read.cause) }
-            is RowsRead.Malformed -> null.also {
-                Log.w(
-                    "NuxieBilling",
-                    "Invalid purchase bindings row; the store stays closed until it reads.",
-                    null,
-                    Log.status("row", read.row),
-                    Log.sensitive("field", read.field),
-                )
+        when (val read = readRowsFileUnlocked(bindingsFile, ::decodeBinding)) {
+            is FileRead.Read -> read.value
+            is FileRead.Unavailable -> null.also { logUnavailable(StoreFile.BINDINGS, read.cause) }
+            is FileRead.Corrupt -> null.also {
+                if (read.row == null) {
+                    Log.w("NuxieBilling", "Could not read purchase bindings.", read.cause)
+                } else {
+                    Log.w(
+                        "NuxieBilling",
+                        "Invalid purchase bindings row; the store stays closed until it reads.",
+                        null,
+                        Log.status("row", read.row),
+                        Log.sensitive("field", read.field),
+                    )
+                }
             }
         }
 
     /** The catalog mappings, or null when they cannot be read, as for the bindings. */
     private fun loadMappingsUnlocked(): List<StoredProductMapping>? =
-        when (val read = readRowsUnlocked(catalogFile, ::decodeMapping)) {
-            is RowsRead.Read -> read.rows
-            is RowsRead.Unparsable -> null.also { Log.w("NuxieBilling", "Could not read purchase catalog.", read.cause) }
-            is RowsRead.Malformed -> null.also {
-                Log.w(
-                    "NuxieBilling",
-                    "Invalid purchase catalog row; the store stays closed until it reads.",
-                    null,
-                    Log.status("row", read.row),
-                    Log.sensitive("field", read.field),
-                )
+        when (val read = readRowsFileUnlocked(catalogFile, ::decodeMapping)) {
+            is FileRead.Read -> read.value
+            is FileRead.Unavailable -> null.also { logUnavailable(StoreFile.CATALOG, read.cause) }
+            is FileRead.Corrupt -> null.also {
+                if (read.row == null) {
+                    Log.w("NuxieBilling", "Could not read purchase catalog.", read.cause)
+                } else {
+                    Log.w(
+                        "NuxieBilling",
+                        "Invalid purchase catalog row; the store stays closed until it reads.",
+                        null,
+                        Log.status("row", read.row),
+                        Log.sensitive("field", read.field),
+                    )
+                }
             }
         }
 
-    private sealed interface RowsRead<out T> {
-        data class Read<T>(val rows: List<T>) : RowsRead<T>
-        data class Unparsable(val cause: Throwable) : RowsRead<Nothing>
-        data class Malformed(val row: Int, val field: String) : RowsRead<Nothing>
-    }
-
-    private fun <T> readRowsUnlocked(target: File, decode: (JsonObject) -> T): RowsRead<T> {
-        if (!target.exists()) return RowsRead.Read(emptyList())
-        val rows = try {
-            json.parseToJsonElement(target.readText()).jsonArray
-        } catch (failure: Exception) {
-            return RowsRead.Unparsable(failure)
+    private fun <T> readRowsFileUnlocked(target: File, decode: (JsonObject) -> T): FileRead<List<T>> {
+        val text = when (val read = readTextUnlocked(target)) {
+            is FileRead.Read -> read.value ?: return FileRead.Read(emptyList())
+            is FileRead.Unavailable -> return read
+            is FileRead.Corrupt -> return read
         }
-        return RowsRead.Read(
+        val rows = try {
+            json.parseToJsonElement(text).jsonArray
+        } catch (failure: Exception) {
+            return FileRead.Corrupt(row = null, field = null, cause = failure)
+        }
+        return FileRead.Read(
             rows.mapIndexed { index, raw ->
                 try {
                     decode(raw as? JsonObject ?: throw MalformedField("row"))
                 } catch (malformed: MalformedField) {
-                    return RowsRead.Malformed(index, malformed.field)
+                    return FileRead.Corrupt(index, malformed.field)
                 }
             },
         )
@@ -484,11 +582,35 @@ internal class FilePurchaseEvidenceStore(
      * goes through the outbox normally. Rows are named by their position,
      * never their purchase token.
      */
-    private fun readUnlocked(): Map<String, PurchaseEvidence>? {
-        if (!file.exists()) return emptyMap()
-        val rows = runCatching { json.parseToJsonElement(file.readText()).jsonObject }
-            .onFailure { Log.w("NuxieBilling", "Could not read purchase evidence.", it) }
-            .getOrNull() ?: return null
+    private fun readUnlocked(): Map<String, PurchaseEvidence>? = when (val read = readEvidenceFileUnlocked()) {
+        is FileRead.Read -> read.value
+        is FileRead.Unavailable -> null.also { logUnavailable(StoreFile.EVIDENCE, read.cause) }
+        is FileRead.Corrupt -> null.also {
+            if (read.row == null) {
+                Log.w("NuxieBilling", "Could not read purchase evidence.", read.cause)
+            } else {
+                Log.w(
+                    "NuxieBilling",
+                    "Could not read a purchase evidence row; the store stays closed until it reads.",
+                    null,
+                    Log.status("row", read.row),
+                    Log.sensitive("field", read.field),
+                )
+            }
+        }
+    }
+
+    private fun readEvidenceFileUnlocked(): FileRead<Map<String, PurchaseEvidence>> {
+        val text = when (val read = readTextUnlocked(file)) {
+            is FileRead.Read -> read.value ?: return FileRead.Read(emptyMap())
+            is FileRead.Unavailable -> return read
+            is FileRead.Corrupt -> return read
+        }
+        val rows = try {
+            json.parseToJsonElement(text).jsonObject
+        } catch (failure: Exception) {
+            return FileRead.Corrupt(row = null, field = null, cause = failure)
+        }
         val entries = linkedMapOf<String, PurchaseEvidence>()
         rows.entries.forEachIndexed { index, (token, raw) ->
             val row = raw as? JsonObject
@@ -496,21 +618,13 @@ internal class FilePurchaseEvidenceStore(
                 Log.w("NuxieBilling", "Invalid purchase evidence row was dropped: it is in a previous format.", null, Log.status("row", index))
                 return@forEachIndexed
             }
-            val decoded = try {
+            entries[token] = try {
                 decodeEvidence(row ?: throw MalformedField("row"))
             } catch (malformed: MalformedField) {
-                Log.w(
-                    "NuxieBilling",
-                    "Could not read a purchase evidence row; the store stays closed until it reads.",
-                    null,
-                    Log.status("row", index),
-                    Log.sensitive("field", malformed.field),
-                )
-                return null
+                return FileRead.Corrupt(index, malformed.field)
             }
-            entries[token] = decoded
         }
-        return entries
+        return FileRead.Read(entries)
     }
 
     /** A row written before the outbox (no `refused`), or before admission ids (an owed send without one). */

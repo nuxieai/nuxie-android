@@ -232,45 +232,150 @@ class PurchaseFeatureUseTest {
     }
 
     @Test
-    fun aCurrentEntryWithAMalformedFieldKeepsTheOutboxOffAndItsFileUntouched() = runBlocking {
-        for ((field, value) in listOf(
-            "retryDueAtMillis" to kotlinx.serialization.json.JsonPrimitive("soon"),
-            "acknowledged" to kotlinx.serialization.json.JsonPrimitive("yes"),
-        )) {
-            // The buyer's own owed entry, due now, with one field that is not of its type.
-            val directory = temporaryFolder.newFolder()
-            assertTrue(FilePurchaseEvidenceStore(directory).upsert(evidence()))
-            val file = File(directory, "purchase-evidence.json")
-            val rows = Json.parseToJsonElement(file.readText()).jsonObject
-            file.writeText(
-                kotlinx.serialization.json.JsonObject(
-                    rows + ("token-1" to kotlinx.serialization.json.JsonObject(rows.getValue("token-1").jsonObject + (field to value))),
-                ).toString(),
-            )
-            val stored = file.readBytes()
-            val store = FilePurchaseEvidenceStore(directory)
-            assertFalse("$field: the store is not readable", store.isReadable())
+    fun aCorruptEvidenceFileIsQuarantinedAndPlayRedeliveryRebuildsIt() = runBlocking {
+        ai.nuxie.sdk.logging.NuxieLog.configure(LogLevel.WARN)
+        org.robolectric.shadows.ShadowLog.clear()
+        val directory = temporaryFolder.newFolder()
+        val corrupt = corruptEvidenceFile(directory, "retryDueAtMillis", kotlinx.serialization.json.JsonPrimitive("soon"))
+        val billing = RecordingBilling()
+        val sent = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val core = core(FakeTransport())
+        val store = FilePurchaseEvidenceStore(directory)
+        val service = service(
+            core,
+            store,
+            synchronizer = PurchaseSynchronizer { evidence, _ ->
+                sent += evidence.purchaseToken
+                PurchaseSyncOutcome.Accepted(purchaseResponse("customer-a"))
+            },
+            billing = billing,
+        )
 
-            val sends = java.util.concurrent.atomic.AtomicInteger()
-            val core = core(FakeTransport())
-            val service = service(
-                core,
-                store,
-                synchronizer = PurchaseSynchronizer { _, _ ->
-                    sends.incrementAndGet()
-                    PurchaseSyncOutcome.Rejected()
-                },
-                ownedOnPlay = mutableSetOf(),
-            )
-            // Read as due now, the entry would be sent at once by the launch's timer.
-            withTimeoutOrNull(500) { while (sends.get() == 0) delay(10) }
-            service.recover()
+        // Play redelivers the unacknowledged purchase.
+        service.recover()
 
-            assertEquals("$field: the outbox is off, so nothing is sent", 0, sends.get())
-            assertTrue("$field: the entry's file is left byte for byte", stored.contentEquals(file.readBytes()))
-            core.stop()
-        }
+        val quarantined = quarantinedFiles(directory, "purchase-evidence")
+        assertEquals("The corrupt file is moved aside", 1, quarantined.size)
+        assertTrue("Its bytes are kept as they were", corrupt.contentEquals(quarantined.single().readBytes()))
+        // An empty store took its place and the outbox is on: the redelivered purchase
+        // is saved, sent and completed with Play.
+        assertNull(store.load().getValue("token-1").pendingSend)
+        assertEquals(listOf("token-1"), sent.toList())
+        assertEquals(1, billing.acknowledgeCalls + billing.consumeCalls)
+        assertEquals(
+            "One log line for the quarantine",
+            1,
+            org.robolectric.shadows.ShadowLog.getLogsForTag("NuxieBilling")
+                .count { it.msg.contains("Quarantined an unreadable purchase evidence file.") },
+        )
+        core.stop()
     }
+
+    @Test
+    fun aStoreFileThatCannotBeReadNowStaysInPlaceAndIsTriedAgainNextLaunch() = runBlocking {
+        val directory = temporaryFolder.newFolder()
+        // A read error with no bytes read (here a directory where the file belongs).
+        val unreadable = File(directory, "purchase-evidence.json").apply { mkdirs() }
+        val billing = RecordingBilling()
+        val sent = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val synchronizer = PurchaseSynchronizer { evidence, _ ->
+            sent += evidence.purchaseToken
+            PurchaseSyncOutcome.Accepted(purchaseResponse("customer-a"))
+        }
+        val core = core(FakeTransport())
+        val store = FilePurchaseEvidenceStore(directory)
+        service(core, store, synchronizer = synchronizer, billing = billing).recover()
+
+        assertTrue("Nothing is moved aside", quarantinedFiles(directory, "purchase-evidence").isEmpty())
+        assertTrue(unreadable.isDirectory)
+        // The outbox is off for the session: the delivered purchase is sent once, unsaved.
+        assertEquals(listOf("token-1"), sent.toList())
+        assertTrue(store.load().isEmpty())
+        assertEquals(0, billing.acknowledgeCalls + billing.consumeCalls)
+        core.stop()
+
+        // The next launch reads the store again; it reads now.
+        unreadable.delete()
+        sent.clear()
+        val relaunched = core(FakeTransport())
+        service(relaunched, FilePurchaseEvidenceStore(directory), synchronizer = synchronizer, billing = billing).recover()
+        assertEquals(listOf("token-1"), sent.toList())
+        assertNull(FilePurchaseEvidenceStore(directory).load().getValue("token-1").pendingSend)
+        assertEquals(1, billing.acknowledgeCalls + billing.consumeCalls)
+        relaunched.stop()
+    }
+
+    @Test
+    fun repeatedCorruptionKeepsOnlyTheNewestQuarantinedFile() = runBlocking {
+        val directory = temporaryFolder.newFolder()
+        val first = corruptEvidenceFile(directory, "acknowledged", kotlinx.serialization.json.JsonPrimitive("yes"))
+        val firstCore = core(FakeTransport())
+        service(firstCore, FilePurchaseEvidenceStore(directory), ownedOnPlay = mutableSetOf())
+        withTimeout(5_000) {
+            while (quarantinedFiles(directory, "purchase-evidence").none { first.contentEquals(it.readBytes()) }) delay(10)
+        }
+        firstCore.stop()
+
+        Thread.sleep(5)
+        val second = corruptEvidenceFile(directory, "retryDueAtMillis", kotlinx.serialization.json.JsonPrimitive("soon"))
+        val secondCore = core(FakeTransport())
+        service(secondCore, FilePurchaseEvidenceStore(directory), ownedOnPlay = mutableSetOf())
+        withTimeout(5_000) {
+            while (quarantinedFiles(directory, "purchase-evidence").map { it.readBytes() }.let { files ->
+                    files.size != 1 || !second.contentEquals(files.single())
+                }
+            ) delay(10)
+        }
+        secondCore.stop()
+    }
+
+    @Test
+    fun aCorruptCatalogFileIsQuarantinedAndTheCatalogStartsEmpty() = runBlocking {
+        ai.nuxie.sdk.logging.NuxieLog.configure(LogLevel.WARN)
+        org.robolectric.shadows.ShadowLog.clear()
+        val directory = temporaryFolder.newFolder()
+        // A catalog row whose licensing key is not a string.
+        val catalog = File(directory, "purchase-catalog.json").apply {
+            writeText("""[{"storeProductId":"play-credit-pack","nuxieProductId":"credit-pack","productType":"inapp","licensingPublicKey":42}]""")
+        }
+        val corrupt = catalog.readBytes()
+        val core = core(FakeTransport())
+        val store = FilePurchaseEvidenceStore(directory)
+        service(core, store, ownedOnPlay = mutableSetOf())
+        withTimeout(5_000) { while (quarantinedFiles(directory, "purchase-catalog").isEmpty()) delay(10) }
+
+        assertTrue(corrupt.contentEquals(quarantinedFiles(directory, "purchase-catalog").single().readBytes()))
+        assertTrue("An empty catalog takes its place", store.isReadable())
+        assertTrue(store.loadProductMappings().isEmpty())
+        assertTrue("It is written again", store.upsertProductMapping(featureDescriptor()))
+        assertEquals(
+            1,
+            org.robolectric.shadows.ShadowLog.getLogsForTag("NuxieBilling")
+                .count { it.msg.contains("Quarantined an unreadable purchase catalog file.") },
+        )
+        core.stop()
+    }
+
+    /** Write the buyer's own owed entry with one field that is not of its type; returns the file's bytes. */
+    private suspend fun corruptEvidenceFile(
+        directory: File,
+        field: String,
+        value: kotlinx.serialization.json.JsonElement,
+    ): ByteArray {
+        val file = File(directory, "purchase-evidence.json")
+        file.delete()
+        assertTrue(FilePurchaseEvidenceStore(directory).upsert(evidence()))
+        val rows = Json.parseToJsonElement(file.readText()).jsonObject
+        file.writeText(
+            kotlinx.serialization.json.JsonObject(
+                rows + ("token-1" to kotlinx.serialization.json.JsonObject(rows.getValue("token-1").jsonObject + (field to value))),
+            ).toString(),
+        )
+        return file.readBytes()
+    }
+
+    private fun quarantinedFiles(directory: File, store: String): List<File> =
+        directory.listFiles().orEmpty().filter { it.name.startsWith("$store.unreadable-") && it.name.endsWith(".json") }
 
     @Test
     fun aSendHeldBackByAFeatureCommandCountsAFailedAttemptAndIsRetried() = runBlocking {
