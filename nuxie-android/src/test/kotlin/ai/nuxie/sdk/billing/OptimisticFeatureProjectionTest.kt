@@ -174,15 +174,11 @@ class OptimisticFeatureProjectionTest {
 
     @Test
     fun purchasedWithoutRequiredSignatureIsEligibleWhenUnverified() {
+        // The catalog has no licensing key for the product: no signature is required.
         val projection = optimisticFeatureProjection(
             distinctId = "customer-a",
             authorityScope = AUTHORITY_SCOPE,
-            evidence = listOf(
-                evidence(owner = "customer-a").copy(
-                    signatureVerificationRequired = false,
-                    signatureVerified = false,
-                ),
-            ),
+            evidence = listOf(evidence(owner = "customer-a").copy(signatureVerified = false)),
             descriptors = listOf(descriptor(FeatureAllowance("pro", FeatureType.BOOLEAN))),
         )
 
@@ -194,12 +190,15 @@ class OptimisticFeatureProjectionTest {
 
     @Test
     fun purchasedWithRequiredButUnverifiedSignatureIsNotEligible() {
+        // The current catalog's licensing key requires the signature.
         assertNull(
             optimisticFeatureProjection(
                 distinctId = "customer-a",
                 authorityScope = AUTHORITY_SCOPE,
                 evidence = listOf(evidence(owner = "customer-a").copy(signatureVerified = false)),
-                descriptors = listOf(descriptor(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+                descriptors = listOf(
+                    descriptor(FeatureAllowance("pro", FeatureType.BOOLEAN)).copy(licensingPublicKey = "catalog-key"),
+                ),
             ),
         )
     }
@@ -566,7 +565,6 @@ class OptimisticFeatureProjectionTest {
         acknowledged = false,
         firstSeenMillis = 1L,
         catalogResolved = true,
-        signatureVerificationRequired = true,
         signatureVerified = true,
         authorityScope = AUTHORITY_SCOPE,
     )

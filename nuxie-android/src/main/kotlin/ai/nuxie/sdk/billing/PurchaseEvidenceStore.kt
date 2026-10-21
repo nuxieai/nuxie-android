@@ -236,7 +236,7 @@ internal data class PurchaseEvidence(
     val syncedEventEmitted: Boolean = false,
     val syncedCustomerId: String? = null,
     val nuxieManaged: Boolean = false,
-    val signatureVerificationRequired: Boolean = false,
+    /** Play's signature on this purchase verified against the catalog's licensing key. */
     val signatureVerified: Boolean = false,
     val authorityScope: String? = null,
     val backendSyncedAtMillis: Long? = null,
@@ -484,7 +484,6 @@ internal class FilePurchaseEvidenceStore(
             put("syncedEventEmitted", JsonPrimitive(evidence.syncedEventEmitted))
             evidence.syncedCustomerId?.let { put("syncedCustomerId", JsonPrimitive(it)) }
             put("nuxieManaged", JsonPrimitive(evidence.nuxieManaged))
-            put("signatureVerificationRequired", JsonPrimitive(evidence.signatureVerificationRequired))
             put("signatureVerified", JsonPrimitive(evidence.signatureVerified))
             evidence.authorityScope?.let { put("authorityScope", JsonPrimitive(it)) }
             evidence.backendSyncedAtMillis?.let { put("backendSyncedAtMillis", JsonPrimitive(it)) }
@@ -527,7 +526,6 @@ internal class FilePurchaseEvidenceStore(
             syncedEventEmitted = raw.boolean("syncedEventEmitted"),
             syncedCustomerId = raw.string("syncedCustomerId"),
             nuxieManaged = raw.boolean("nuxieManaged"),
-            signatureVerificationRequired = raw.boolean("signatureVerificationRequired"),
             signatureVerified = raw.boolean("signatureVerified"),
             authorityScope = raw.string("authorityScope"),
             backendSyncedAtMillis = (raw["backendSyncedAtMillis"] as? JsonPrimitive)?.longOrNull,
