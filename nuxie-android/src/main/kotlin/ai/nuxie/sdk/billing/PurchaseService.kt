@@ -549,11 +549,6 @@ internal class PurchaseService(
         ConcurrentHashMap<PurchaseCommitIdentity, CompletableDeferred<Unit>>()
     /** Process-lifetime terminal identities; guarded by [processing]. */
     private val completedPurchaseCommits = mutableMapOf<PurchaseCommitIdentity, Unit>()
-    /**
-     * Purchases the server answered in this process. An answer ends the early
-     * unlock at once, even when saving it failed and the entry stays owed.
-     */
-    private val answeredTokens: MutableSet<String> = Collections.newSetFromMap(ConcurrentHashMap())
     private val usageCoordinationLock = Any()
     /** The one send in flight per purchase token; guarded by [usageCoordinationLock]. */
     private val sending = mutableMapOf<String, CompletableDeferred<SendAnswer>>()
@@ -688,7 +683,6 @@ internal class PurchaseService(
                         current.pendingSend == evidence.pendingSend &&
                         current.matchesAtomicUsePayload(evidence)
                     val persistedAccepted = if (answersEntry) {
-                        answeredTokens += evidence.purchaseToken
                         // The server's receipt attached the purchase to this customer.
                         checkNotNull(current).copy(
                             ownerDistinctId = distinctId,
@@ -761,7 +755,6 @@ internal class PurchaseService(
         return evidenceStore.load().values.filter { evidence ->
             evidence.authorityScope == purchaseStorageScope &&
                 evidence.isBuyersOwnUnsyncedPurchase(distinctId) &&
-                unlocksEarly(evidence.purchaseToken) &&
                 evidence.purchaseToken.isNotBlank() &&
                 evidence.packageName.isNotBlank() &&
                 evidence.storeProductIds.firstOrNull()?.isNotBlank() == true &&
@@ -1920,10 +1913,7 @@ internal class PurchaseService(
                     val current = evidenceStore.load()[purchaseToken] ?: return@withLock false
                     evidenceStore.upsert(
                         current.copy(pendingSend = claim, syncAttempts = 0, retryDueAtMillis = null),
-                    ).also { saved ->
-                        // A new entry: earlier answers no longer end its early unlock.
-                        if (saved) answeredTokens -= purchaseToken
-                    }
+                    )
                 }
             }
         }
@@ -2101,7 +2091,6 @@ internal class PurchaseService(
                 // The entry was replaced by a newer admission: this answer only
                 // asks for a fresh profile.
                 if (current == null || current.pendingSend != send) return@withLock EntryAnswer.Stale
-                answeredTokens += attempted.purchaseToken
                 val accepted = current.copy(
                     nuxieProductId = catalog?.productId ?: current.nuxieProductId,
                     basePlanId = catalog?.basePlanId ?: current.basePlanId,
@@ -2122,8 +2111,9 @@ internal class PurchaseService(
                     syncedCustomerId = response.customerId,
                     backendSyncedAtMillis = nowMillis(),
                 )
-                // Unsaved, the answer still ends the early unlock.
-                if (!evidenceStore.upsert(accepted)) return@withLock EntryAnswer.Unsaved(stageOptimisticProjectionLocked())
+                // Unsaved, the answer changes nothing: the entry stays owed and is
+                // sent again, and its early unlock lasts until an answer is saved.
+                if (!evidenceStore.upsert(accepted)) return@withLock EntryAnswer.Unsaved
                 val currentDistinctId = distinctId()
                 // The 200's Features bridge until the profile refresh lands; nobody
                 // else keeps the early unlock this acceptance ends.
@@ -2139,20 +2129,14 @@ internal class PurchaseService(
                 EntryAnswer.Saved(accepted, publication)
             }
         }
-        when (answer) {
-            is EntryAnswer.Saved -> features.publishStaged(answer.publication)
-            // The answer could not be saved: the entry stays owed and is sent
-            // again, but the answer already ends the early unlock.
-            is EntryAnswer.Unsaved -> features.publishStaged(answer.publication)
-            EntryAnswer.Stale -> Unit
-        }
+        if (answer is EntryAnswer.Saved) features.publishStaged(answer.publication)
         if (send.distinctId == distinctId()) refreshFeatureAuthority()
         return when (answer) {
             is EntryAnswer.Saved -> {
                 completeManaged(emitPurchaseSyncedIfNeeded(answer.evidence))
                 SyncResult.ACCEPTED
             }
-            is EntryAnswer.Unsaved -> SyncResult.UNAVAILABLE
+            EntryAnswer.Unsaved -> SyncResult.UNAVAILABLE
             // The server accepted this send; the newer entry is still owed.
             EntryAnswer.Stale -> SyncResult.ACCEPTED
         }
@@ -2160,8 +2144,8 @@ internal class PurchaseService(
 
     private sealed interface EntryAnswer {
         data class Saved(val evidence: PurchaseEvidence, val publication: FeatureInfo.Mutation?) : EntryAnswer
-        /** The answer is for the current entry but could not be written. */
-        data class Unsaved(val publication: FeatureInfo.Mutation?) : EntryAnswer
+        /** The answer is for the current entry but could not be written: it changes nothing. */
+        data object Unsaved : EntryAnswer
         /** A newer admission replaced the entry this send was for. */
         data object Stale : EntryAnswer
     }
@@ -2182,7 +2166,6 @@ internal class PurchaseService(
                 // The entry was replaced by a newer admission: this answer only
                 // asks for a fresh profile.
                 if (current == null || current.pendingSend != send) return@withLock EntryAnswer.Stale
-                answeredTokens += attempted.purchaseToken
                 val owner = current.ownerDistinctId.takeUnless { it == send.distinctId }
                 val answered = current.copy(
                     pendingSend = null,
@@ -2191,21 +2174,17 @@ internal class PurchaseService(
                     ownerDistinctId = owner,
                     refused = current.refused || owner == null,
                 )
-                val saved = evidenceStore.upsert(answered)
+                if (!evidenceStore.upsert(answered)) return@withLock EntryAnswer.Unsaved
                 // Access is whatever the profile requested below says; an earlier
                 // 200's Features hold only until it lands.
-                val publication = stageOptimisticProjectionLocked()
-                if (saved) EntryAnswer.Saved(answered, publication) else EntryAnswer.Unsaved(publication)
+                EntryAnswer.Saved(answered, stageOptimisticProjectionLocked())
             }
         }
         when (answer) {
             is EntryAnswer.Saved -> features.publishStaged(answer.publication)
-            // A refusal that could not be written leaves the entry owed: it is
-            // sent again, though the answer already ended its early unlock.
-            is EntryAnswer.Unsaved -> {
-                features.publishStaged(answer.publication)
-                recordFailedSend(attempted.purchaseToken, send)
-            }
+            // A refusal that could not be written changes nothing: the entry stays
+            // owed and is sent again, and its early unlock lasts until an answer is saved.
+            EntryAnswer.Unsaved -> recordFailedSend(attempted.purchaseToken, send)
             EntryAnswer.Stale -> Unit
         }
         if (send.distinctId == distinctId()) refreshFeatureAuthority()
@@ -2718,14 +2697,6 @@ internal class PurchaseService(
                 ?.purchases.orEmpty()
         }
 
-    /**
-     * Beyond the stored entry (the buyer's own unanswered purchase or sync,
-     * see [isBuyersOwnUnsyncedPurchase]), the early unlock ends at any server
-     * answer for the purchase in this process, even one that could not be saved.
-     * Play's queries never change it: only the server's answer ends it.
-     */
-    private fun unlocksEarly(purchaseToken: String): Boolean = purchaseToken !in answeredTokens
-
     private suspend fun refreshOptimisticProjection() {
         val publication = projectionRefresh.withLock { stageOptimisticProjectionLocked() }
         features.publishStaged(publication)
@@ -2795,7 +2766,8 @@ internal class PurchaseService(
         return optimisticFeatureProjection(
             distinctId = currentDistinctId,
             authorityScope = purchaseStorageScope,
-            evidence = evidence.filter { unlocksEarly(it.purchaseToken) },
+            // The entry alone decides the early unlock: see [isBuyersOwnUnsyncedPurchase].
+            evidence = evidence,
             descriptors = descriptors,
             bindings = bindings,
         )

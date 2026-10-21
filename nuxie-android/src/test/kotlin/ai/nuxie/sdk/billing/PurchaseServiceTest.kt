@@ -4392,7 +4392,7 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun aRefusalThatCannotBeSavedStillEndsTheEarlyUnlockAndIsSentAgain() = runTest {
+    fun aRefusalThatCannotBeSavedKeepsTheEntryOwedAndUnlockedUntilItIsSaved() = runTest {
         val fixture = fixture(this, initialRetryDelayMillis = 10, maxRetryDelayMillis = 10)
         // The buyer's own checkout: no answer yet, so it unlocks early.
         fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
@@ -4415,10 +4415,14 @@ class PurchaseServiceTest {
         fixture.store.rejectEvidenceUpsert = { it.purchaseToken == "unsaved-refusal" && it.pendingSend == null }
         fixture.service.recover()
 
-        assertFalse("Any answer ends the early unlock at once", fixture.core.featureInfo.isAllowed("pro"))
         assertNotNull("Unsaved, the entry stays owed", fixture.store.load().getValue("unsaved-refusal").pendingSend)
+        assertTrue(
+            "An answer ends the early unlock only once it is saved on the entry",
+            fixture.core.featureInfo.isAllowed("pro"),
+        )
 
-        // Once saving works, the entry is sent again and its answer saved.
+        // Once saving works, the entry is sent again and its answer saved, which
+        // ends the early unlock.
         fixture.store.rejectEvidenceUpsert = null
         advanceTimeBy(100)
         runCurrent()

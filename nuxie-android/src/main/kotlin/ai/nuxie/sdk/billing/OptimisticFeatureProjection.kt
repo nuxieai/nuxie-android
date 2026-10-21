@@ -91,9 +91,11 @@ private fun <T> PurchaseEvidence.selectAllowanceSource(
  * for the server projects. Play must name the account the SDK derives for this
  * customer, and the owed send must be theirs. A Restore claim waits for the
  * server, as Restore itself does; so does a purchase the server has answered.
- * Nothing else decides it, Play's queries included: a refund or cancellation
- * before the server answers keeps the early unlock until that answer, seconds
- * online or until the device is back online, the same as the offline case.
+ * Nothing else decides it, Play's queries and in-memory state included: a
+ * refund or cancellation before the server answers keeps the early unlock until
+ * that answer, seconds online or until the device is back online, the same as
+ * the offline case. An answer ends it by being saved on the entry; if saving
+ * fails, the entry stays owed and is sent again until an answer is saved.
  */
 internal fun PurchaseEvidence.isBuyersOwnUnsyncedPurchase(
     distinctId: String,
