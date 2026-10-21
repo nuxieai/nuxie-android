@@ -5214,6 +5214,28 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun turningTheOutboxOffKeepsAnEarlierAnswersFeatureHold() = runTest {
+        val fixture = fixture(this)
+        val customer = fixture.core.identity.distinctId()
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("held-token", obfuscatedAccountId = accountHash(customer)),
+        )
+        // A 200 for the purchase, saved: its Features hold until a profile requested after it.
+        fixture.service.recover()
+        runCurrent()
+        assertNull(fixture.store.load().getValue("held-token").pendingSend)
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+
+        // A later write fails, and the outbox turns off.
+        fixture.store.failAllWrites = true
+        assertFalse(fixture.service.rememberProduct(product(storeProductId = "play-other")))
+        runCurrent()
+
+        assertTrue("The saved answer's hold stays", fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
     fun noTimerSendsWhileTheOutboxIsOff() = runTest {
         val clock = { 1_800_000_000_000L + testScheduler.currentTime }
         val store = RecordingEvidenceStore()

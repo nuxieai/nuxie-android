@@ -735,41 +735,16 @@ internal class PurchaseService(
                 val send = checkNotNull(evidence.pendingSend)
                 // The command's answer passes the same admission check as every
                 // answer: only one for the admission (and payload) its entry still
-                // holds is captured as purchase synced and answers the entry. The
-                // server consumed the Feature, so its result reaches the caller
-                // either way; a superseded answer only refreshes the profile.
-                val answersAdmission = evidenceStore.load()[evidence.purchaseToken]
-                    ?.let { it.pendingSend == send && it.matchesAtomicUsePayload(evidence) } == true
-                if (answersAdmission) {
-                    val properties = buildMap<String, Any?> {
-                        put("transaction_id", evidence.purchaseToken)
-                        put("original_transaction_id", evidence.purchaseToken)
-                        put("product_id", evidence.storeProductIds.first())
-                        put("customer_id", distinctId)
-                        evidence.context?.experienceId?.let { put("experience_id", it) }
-                        evidence.context?.experienceVersion?.let { put("experience_version_id", it) }
-                        evidence.context?.journeyId?.let { put("journey_id", it) }
-                    }
-                    if (!capturePurchaseSynced(
-                            SystemEventNames.PURCHASE_SYNCED,
-                            properties,
-                            purchaseSyncedEventId(distinctId, evidence.purchaseToken, send.admissionId),
-                            distinctId,
-                        )
-                    ) {
-                        throw IllegalStateException("Could not durably capture the purchase synchronization event.")
-                    }
-                }
+                // holds answers the entry, and only once that answer is saved is it
+                // captured as purchase synced. The server consumed the Feature, so
+                // its result reaches the caller either way; a superseded answer only
+                // refreshes the profile.
                 val stagedUse = projectionRefresh.withLock {
-                    val entry = if (answersAdmission) {
-                        answerEntryLocked(
-                            evidence.purchaseToken,
-                            send,
-                            PurchaseAnswer.AcceptedFeatureUse(distinctId),
-                        ) { it.matchesAtomicUsePayload(evidence) }
-                    } else {
-                        EntryAnswer.Superseded
-                    }
+                    val entry = answerEntryLocked(
+                        evidence.purchaseToken,
+                        send,
+                        PurchaseAnswer.AcceptedFeatureUse(distinctId),
+                    ) { it.matchesAtomicUsePayload(evidence) }
                     val currentDistinctId = this.distinctId()
                     when {
                         currentDistinctId != distinctId -> StagedAtomicUse(
@@ -812,13 +787,16 @@ internal class PurchaseService(
                 features.publishStaged(stagedUse.publication)
                 // The customer changed during the command: its result is not theirs.
                 val access = stagedUse.access ?: throw kotlinx.coroutines.CancellationException()
+                // Saved: the answer is reported as purchase synced, still holding the
+                // purchase so no other pass reports it too.
+                (stagedUse.entry as? EntryAnswer.Answered)?.let { reportCommandPurchaseSynced(it.evidence, send) }
                 releasePurchaseUsageClaim(evidence.purchaseToken)
                 // Answered: the purchase completes with Play. Not saved, or a newer
                 // admission: the profile decides, and the entry is sent again.
-                when (val entry = stagedUse.entry) {
-                    is EntryAnswer.Answered -> completeManaged(entry.evidence)
-                    else -> refreshFeatureAuthority()
-                }
+                (stagedUse.entry as? EntryAnswer.Answered)?.let { completeManaged(it.evidence) }
+                // As after every answer, the requester's profile is fetched again: it
+                // holds the product's other Features once the early unlock ends.
+                refreshFeatureAuthority()
                 return FeatureUsageResult(
                     success = true,
                     featureId = featureId,
@@ -829,6 +807,44 @@ internal class PurchaseService(
                 )
             } finally {
                 releasePurchaseUsageClaim(evidence.purchaseToken)
+            }
+        }
+    }
+
+    /**
+     * A purchase-backed Feature command's saved answer is reported as purchase
+     * synced, under the purchase's stable sync event id. A capture that fails
+     * leaves the entry unreported, and recovery reports it later.
+     */
+    private suspend fun reportCommandPurchaseSynced(saved: PurchaseEvidence, send: PurchaseSend) {
+        val customer = saved.syncedCustomerId ?: return
+        val properties = buildMap<String, Any?> {
+            put("transaction_id", saved.purchaseToken)
+            put("original_transaction_id", saved.purchaseToken)
+            put("product_id", saved.storeProductIds.first())
+            put("customer_id", customer)
+            saved.context?.experienceId?.let { put("experience_id", it) }
+            saved.context?.experienceVersion?.let { put("experience_version_id", it) }
+            saved.context?.journeyId?.let { put("journey_id", it) }
+        }
+        val captured = try {
+            capturePurchaseSynced(
+                SystemEventNames.PURCHASE_SYNCED,
+                properties,
+                purchaseSyncedEventId(customer, saved.purchaseToken, send.admissionId),
+                customer,
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            Log.w("NuxieBilling", "Could not capture the purchase synchronization event.", failure)
+            false
+        }
+        if (!captured) return
+        projectionRefresh.withLock {
+            val current = evidenceStore.load()[saved.purchaseToken] ?: return@withLock
+            if (current.pendingSend == null && current.syncedCustomerId == customer && !current.syncedEventEmitted) {
+                saveEntry(current.copy(syncedEventEmitted = true))
             }
         }
     }
@@ -2299,12 +2315,12 @@ internal class PurchaseService(
                 )
             }
             is PurchaseAnswer.AcceptedFeatureUse -> current.copy(
-                // The server's receipt attached the purchase to this customer; the
-                // command captured its purchase_synced already.
+                // The server's receipt attached the purchase to this customer. The
+                // command reports it as purchase synced once this answer is saved.
                 ownerDistinctId = answer.customerId,
                 refused = false,
                 syncedCustomerId = answer.customerId,
-                syncedEventEmitted = true,
+                syncedEventEmitted = false,
                 backendSyncedAtMillis = nowMillis(),
             )
             PurchaseAnswer.Refused -> {
@@ -2391,7 +2407,10 @@ internal class PurchaseService(
         projectionRefresh.withLock {
             val current = evidenceStore.load()[evidence.purchaseToken] ?: evidence
             // While the outbox is off it is reported by the next launch, from a saved entry.
-            if (outboxOff || current.syncedEventEmitted || current.ownerDistinctId != distinctId()) {
+            // A purchase-backed Feature command holding the purchase reports its own answer.
+            if (outboxOff || current.syncedEventEmitted || current.ownerDistinctId != distinctId() ||
+                synchronized(usageCoordinationLock) { current.purchaseToken in purchaseUsageClaims }
+            ) {
                 return@withLock current
             }
             val properties = buildMap<String, Any?> {
