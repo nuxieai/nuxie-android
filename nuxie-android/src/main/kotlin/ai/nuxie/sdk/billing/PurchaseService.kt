@@ -2365,8 +2365,19 @@ internal class PurchaseService(
             pinnedFeatureAllowances = current.pinnedFeatureAllowances
                 ?: candidate.pinnedFeatureAllowances,
         ).let { kept ->
-            // A new admission starts its attempt count and due time again.
-            if (kept.pendingSend != current.pendingSend) kept.copy(syncAttempts = 0, retryDueAtMillis = null) else kept
+            when {
+                // A new admission starts its attempt count and due time again.
+                kept.pendingSend != current.pendingSend -> kept.copy(syncAttempts = 0, retryDueAtMillis = null)
+                // A write that changes what the owed send carries (the catalog filling
+                // in a product type, base plan or offer, say) is an admission too, so
+                // an answer to the earlier payload cannot settle the changed entry.
+                kept.pendingSend != null && kept.sendPayload != current.sendPayload -> kept.copy(
+                    pendingSend = kept.pendingSend.readmitted(),
+                    syncAttempts = 0,
+                    retryDueAtMillis = null,
+                )
+                else -> kept
+            }
         }
         // A later delivery that changes nothing writes nothing: the entry already
         // records it.
