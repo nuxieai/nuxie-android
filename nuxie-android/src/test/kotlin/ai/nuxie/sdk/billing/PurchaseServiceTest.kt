@@ -5152,7 +5152,7 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun aRecoveryForAnotherCustomerKeepsTheBindingsRequester() = runTest {
+    fun aCheckoutCompletionWaitsForItsBuyerToBeTheCurrentCustomer() = runTest {
         val fixture = fixture(this)
         // Customer A's checkout binding still awaits its purchase.
         fixture.core.identity.setDistinctId("customer-a")
@@ -5171,14 +5171,45 @@ class PurchaseServiceTest {
             listOf("customer-a"),
             fixture.requests.map { it.second.distinctId }.distinct(),
         )
-        assertFalse(
-            "No completion under B",
-            fixture.purchaseEventDistinctIds.contains("customer-b"),
+        assertTrue("No completion while B is current", fixture.purchaseEventDistinctIds.isEmpty())
+        // The completion waits on A's saved entry, which now holds it, so the binding is retired.
+        val waiting = fixture.store.load().getValue("a-token")
+        assertEquals("customer-a", waiting.buyerDistinctId)
+        assertFalse(waiting.completionEmitted)
+        assertFalse(fixture.store.loadBindings().single().awaitingCheckout)
+
+        // When A is current again, the completion is captured from A's saved entry.
+        fixture.core.identity.setDistinctId("customer-a")
+        fixture.service.recover()
+        assertEquals(listOf("customer-a"), fixture.purchaseEventDistinctIds.toList())
+        assertTrue(fixture.store.load().getValue("a-token").completionEmitted)
+        fixture.close()
+    }
+
+    @Test
+    fun whileTheOutboxIsOffACheckoutCompletionWaitsInItsBinding() = runTest {
+        val fixture = fixture(this)
+        fixture.core.identity.setDistinctId("customer-a")
+        fixture.store.upsertBinding(product().bindingFor("customer-a").copy(awaitingCheckout = true))
+        fixture.core.identity.setDistinctId("customer-b")
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("a-token", obfuscatedAccountId = accountHash("customer-a")),
         )
-        // A's binding ends only with A's completion.
-        val completedForA = fixture.purchaseEventDistinctIds.contains("customer-a")
-        val bindingAwaits = fixture.store.loadBindings().single().awaitingCheckout
-        assertEquals(!completedForA, bindingAwaits)
+        // A full disk: nothing can be saved, so the outbox goes off.
+        fixture.store.failAllWrites = true
+
+        fixture.service.recover()
+
+        assertEquals(listOf("customer-a"), fixture.requests.map { it.second.distinctId }.distinct())
+        assertTrue("No completion while B is current", fixture.purchaseEventDistinctIds.isEmpty())
+        assertTrue("The binding keeps the completion", fixture.store.loadBindings().single().awaitingCheckout)
+
+        // When A is current again, the delivery finds the binding and the completion is
+        // captured. Nothing can be written, so the binding is retired at a later launch.
+        fixture.core.identity.setDistinctId("customer-a")
+        fixture.service.recover()
+        assertEquals(listOf("customer-a"), fixture.purchaseEventDistinctIds.toList())
+        assertTrue(fixture.store.loadBindings().single().awaitingCheckout)
         fixture.close()
     }
 

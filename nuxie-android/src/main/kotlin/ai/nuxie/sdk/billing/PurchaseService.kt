@@ -1488,11 +1488,17 @@ internal class PurchaseService(
             val bindings = evidenceStore.loadBindings()
             val mappings = evidenceStore.loadProductMappings()
             val evidenceRecords = evidenceStore.load().values
+            // A checkout's completion is captured only while its buyer is the current
+            // customer: the event log stamps the current identity on every event and
+            // routes it to the current customer's Journeys. Until then it waits on the
+            // buyer's saved entry.
+            val currentCustomer = distinctId()
             evidenceRecords
                 .filter {
                     it.purchaseState == StoredPurchaseState.PURCHASED &&
                         !it.completionEmitted &&
                         !it.buyerDistinctId.isNullOrBlank() &&
+                        it.buyerDistinctId == currentCustomer &&
                         !it.refused &&
                         (it.synced || it.pendingSend != null) &&
                         it.hasEligiblePurchaseSignature(bindings, mappings)
@@ -1898,8 +1904,18 @@ internal class PurchaseService(
                     ?: checkoutFlight?.outcomeEventId
                     ?: exactBinding?.outcomeEventId,
             )
-            upsertEvidenceLocked(evidenceCandidate, givesWayTo = checkoutFlight?.owner)
-                .let { stored -> stored to (stored.signatureVerified || !signatureVerificationRequired) }
+            val stored = upsertEvidenceLocked(evidenceCandidate, givesWayTo = checkoutFlight?.owner)
+            // A completion whose buyer is not the current customer waits on the buyer's
+            // saved entry, which now holds it, so the checkout binding is retired. While
+            // the outbox is off nothing is saved, and the binding keeps it until the
+            // completion is captured.
+            if (!outboxOff && exactBinding != null && checkoutFlight == null &&
+                stored.buyerDistinctId == exactBinding.distinctId && stored.buyerDistinctId != currentOwner &&
+                stored.purchaseState == StoredPurchaseState.PURCHASED && !stored.completionEmitted
+            ) {
+                saveBinding(exactBinding.copy(awaitingCheckout = false))
+            }
+            stored to (stored.signatureVerified || !signatureVerificationRequired)
         }
         val evidence = committed.first
         // While the outbox is off the entry is this delivery's alone: the decision
