@@ -930,6 +930,11 @@ class PurchaseServiceTest {
     @Test
     fun destinationProjectionInstallationOwnsTheRefreshMutexUntilInstallReturns() = runTest {
         val fixture = fixture(this)
+        // Play reported a purchase earlier; the Restore's query no longer does,
+        // so the Restore must republish the early unlock.
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(playPurchase("reported-before"))
+        fixture.service.refreshPlayReport()
+        fixture.billing.active[BillingClient.ProductType.INAPP] = emptyList()
         val installStarted = CountDownLatch(1)
         val releaseInstall = CountDownLatch(1)
         val installing = async(Dispatchers.Default) {
@@ -4692,6 +4697,47 @@ class PurchaseServiceTest {
             "A subscription query cannot speak for a one-time purchase",
             fixture.core.featureInfo.isAllowed("pro"),
         )
+        fixture.close()
+    }
+
+    @Test
+    fun aRestoreWhoseSecondQueryFailsStillPublishesWhatTheFirstReported() = runTest {
+        val fixture = fixture(this)
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
+        val subscription = product(subscription = true, allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)))
+        val checkout = async { fixture.service.purchase(activity(), subscription, null) }
+        runCurrent()
+        fixture.service.onPurchasesUpdated(okUpdate(playPurchase("subscription-token").forCheckout(fixture)))
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+
+        // The subscription query no longer reports it; the one-time query fails.
+        fixture.billing.active[BillingClient.ProductType.SUBS] = emptyList()
+        fixture.billing.failQueryTypes += BillingClient.ProductType.INAPP
+        assertTrue(fixture.service.restorePurchases() is RestoreResult.Failed)
+
+        assertFalse("Play's changed report is published at once", fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
+    fun aCancelledCheckoutStillPublishesWhatItsPreflightQueryReported() = runTest {
+        val fixture = fixture(this)
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
+        val pro = product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)))
+        val first = async { fixture.service.purchase(activity(), pro, null) }
+        runCurrent()
+        fixture.service.onPurchasesUpdated(okUpdate(playPurchase("first-token").forCheckout(fixture)))
+        assertEquals(PurchaseResult.Purchased, first.await())
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+
+        // Play no longer reports the first purchase when the next checkout asks,
+        // and the customer cancels that checkout.
+        fixture.billing.active[BillingClient.ProductType.INAPP] = emptyList()
+        fixture.billing.launchCode = BillingClient.BillingResponseCode.USER_CANCELED
+        assertEquals(PurchaseResult.Cancelled, fixture.service.purchase(activity(), pro, null))
+
+        assertFalse("Play's changed report is published at once", fixture.core.featureInfo.isAllowed("pro"))
         fixture.close()
     }
 
