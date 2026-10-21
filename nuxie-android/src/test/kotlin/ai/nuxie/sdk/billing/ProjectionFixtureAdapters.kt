@@ -33,8 +33,9 @@ internal object ProjectionFixtureAdapters {
                 purchaseState = StoredPurchaseState.PURCHASED,
                 // The fixture names the customer a purchase belongs to; on Play
                 // that is the account id the SDK set at that customer's checkout.
-                // A backend-synced purchase has the server's owner; a revoked one
-                // owes no send, so neither unlocks early.
+                // A backend-synced purchase has the server's owner. Play gives the
+                // device no signed revocation, so a revoked one is an entry the
+                // server has answered: no send owed. Neither unlocks early.
                 buyerDistinctId = owner,
                 ownerDistinctId = owner.takeIf { backendSynced },
                 pendingSend = PurchaseSend(PurchaseSyncReason.PURCHASE, owner, CustomerKind.ANONYMOUS)

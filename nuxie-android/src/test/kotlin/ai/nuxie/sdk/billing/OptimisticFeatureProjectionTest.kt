@@ -210,7 +210,7 @@ class OptimisticFeatureProjectionTest {
         val candidates = listOf(
             evidence(owner = "customer-b").copy(purchaseToken = "foreign"),
             evidence(owner = "customer-a").copy(purchaseToken = "synced", ownerDistinctId = "customer-a"),
-            // Play stopped owning it: no send is owed, so nothing unlocks early.
+            // The server answered it (Play has no signed revocation): no send is owed.
             evidence(owner = "customer-a").copy(purchaseToken = "revoked", pendingSend = null),
         )
 

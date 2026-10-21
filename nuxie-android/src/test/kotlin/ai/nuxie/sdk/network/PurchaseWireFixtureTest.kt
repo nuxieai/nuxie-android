@@ -10,7 +10,6 @@ import ai.nuxie.sdk.billing.CheckoutRequest
 import ai.nuxie.sdk.billing.InMemoryPurchaseEvidenceStore
 import ai.nuxie.sdk.billing.NuxieApiPurchaseSynchronizer
 import ai.nuxie.sdk.billing.PlayBillingGateway
-import ai.nuxie.sdk.billing.PlayPurchase
 import ai.nuxie.sdk.billing.PurchaseEvidence
 import ai.nuxie.sdk.billing.PurchaseHandlingMode
 import ai.nuxie.sdk.billing.PurchaseService
@@ -592,8 +591,6 @@ private object PurchaseWireFixtures {
 
         try {
             runBlocking {
-                // The launch query: the early unlock needs Play to report the purchase.
-                service.refreshPlayReport()
                 val firstAttempt = runCatching {
                     service.useFeatureWithPendingPurchase(
                         distinctId = FULL_CUSTOMER_ID,
@@ -667,24 +664,7 @@ private object PurchaseWireFixtures {
     private object SuccessfulBilling : PlayBillingGateway {
         override suspend fun launch(activity: Activity, request: CheckoutRequest): BillingResult = success()
         override suspend fun queryActive(productType: String): ActivePurchasesResult =
-            ActivePurchasesResult.Success(
-                if (productType == BillingClient.ProductType.INAPP) {
-                    listOf(
-                        PlayPurchase(
-                            purchaseToken = "fixture-consume-full-token",
-                            packageName = "ai.nuxie.fixture",
-                            products = listOf("fixture-credit-pack-full"),
-                            state = StoredPurchaseState.PURCHASED,
-                            acknowledged = false,
-                            obfuscatedAccountId = sha256(FULL_CUSTOMER_ID),
-                            originalJson = "{}",
-                            signature = "",
-                        ),
-                    )
-                } else {
-                    emptyList()
-                },
-            )
+            ActivePurchasesResult.Success(emptyList())
         override suspend fun acknowledge(purchaseToken: String): BillingResult = success()
         override suspend fun consume(purchaseToken: String): BillingResult = success()
 
