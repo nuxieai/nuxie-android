@@ -86,6 +86,11 @@ internal data class StoredPurchaseBinding(
      * completion is delivered, the binding keeps only catalog facts.
      */
     val awaitingCheckout: Boolean = true,
+    /**
+     * The purchases Play already owned when the checkout began. None of them
+     * is the checkout's own purchase, so none is ever matched to this binding.
+     */
+    val priorTokens: Set<String> = emptySet(),
 )
 
 internal data class StoredProductMapping(
@@ -302,8 +307,10 @@ internal interface PurchaseEvidenceStore {
      * An installation that changes the catalog (a new product or a changed
      * mapping) invokes the listener, once, before a later mapping installation
      * may begin. Installing the same mapping again changes nothing and does not.
+     * A checkout installing its own product's mapping passes [catalogChange]
+     * false: that is no catalog change, and the listener is not invoked.
      */
-    suspend fun upsertProductMapping(mapping: StoredProductMapping): Boolean = true
+    suspend fun upsertProductMapping(mapping: StoredProductMapping, catalogChange: Boolean = true): Boolean = true
     fun setProductMappingsChangedListener(listener: (suspend () -> Unit)?) = Unit
 }
 
@@ -358,7 +365,7 @@ internal class FilePurchaseEvidenceStore(
         synchronized(lock) { loadMappingsUnlocked() }
     }
 
-    override suspend fun upsertProductMapping(mapping: StoredProductMapping): Boolean = onIo {
+    override suspend fun upsertProductMapping(mapping: StoredProductMapping, catalogChange: Boolean): Boolean = onIo {
         productMappingInstallationLock.withLock {
             val upsert = synchronized(lock) {
                 val entries = loadMappingsUnlocked().associateByTo(linkedMapOf()) { it.productIdentity }
@@ -371,7 +378,9 @@ internal class FilePurchaseEvidenceStore(
                     MappingUpsert.FAILED
                 }
             }
-            if (upsert == MappingUpsert.CHANGED) withContext(NonCancellable) { productMappingsChangedListener?.invoke() }
+            if (upsert == MappingUpsert.CHANGED && catalogChange) {
+                withContext(NonCancellable) { productMappingsChangedListener?.invoke() }
+            }
             upsert != MappingUpsert.FAILED
         }
     }
@@ -574,6 +583,7 @@ internal class FilePurchaseEvidenceStore(
             put("nuxieManaged", JsonPrimitive(binding.nuxieManaged))
             binding.outcomeEventId?.let { put("outcomeEventId", JsonPrimitive(it)) }
             put("awaitingCheckout", JsonPrimitive(binding.awaitingCheckout))
+            put("priorTokens", JsonArray(binding.priorTokens.map(::JsonPrimitive)))
         },
     )
 
@@ -596,6 +606,8 @@ internal class FilePurchaseEvidenceStore(
             outcomeEventId = raw.string("outcomeEventId"),
             // A binding stored without it awaits no checkout.
             awaitingCheckout = raw.boolean("awaitingCheckout"),
+            priorTokens = (raw["priorTokens"] as? JsonArray).orEmpty()
+                .mapNotNullTo(mutableSetOf()) { (it as? JsonPrimitive)?.contentOrNull },
         )
     }.getOrNull()
 
@@ -699,13 +711,13 @@ internal class InMemoryPurchaseEvidenceStore : PurchaseEvidenceStore {
     override suspend fun loadProductMappings(): List<StoredProductMapping> = synchronized(mappings) {
         mappings.values.toList()
     }
-    override suspend fun upsertProductMapping(mapping: StoredProductMapping): Boolean =
+    override suspend fun upsertProductMapping(mapping: StoredProductMapping, catalogChange: Boolean): Boolean =
         productMappingInstallationLock.withLock {
             // The same mapping again changes nothing: no catalog change.
             val changed = synchronized(mappings) {
                 (mappings.put(mapping.productIdentity, mapping) != mapping)
             }
-            if (changed) withContext(NonCancellable) { productMappingsChangedListener?.invoke() }
+            if (changed && catalogChange) withContext(NonCancellable) { productMappingsChangedListener?.invoke() }
             true
         }
     override fun setProductMappingsChangedListener(listener: (suspend () -> Unit)?) {

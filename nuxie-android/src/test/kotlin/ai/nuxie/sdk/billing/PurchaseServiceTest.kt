@@ -5208,6 +5208,96 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun aRecoveryDuringACheckoutNeverTakesAnAlreadyOwnedPurchaseForTheCheckouts() = runTest {
+        val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
+        // The store invokes the catalog listener, as the real stores do.
+        val store = RecordingEvidenceStore().apply { notifiesCatalogChanges = true }
+        val fixture = fixture(this, store = store, emissions = emissions)
+        fixture.core.identity.setDistinctId("buyer")
+        fixture.synchronizer = { accepted(it.requester, it) }
+        // Play already owns the product for this account; the device has no record of it.
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("owned-token", obfuscatedAccountId = accountHash("buyer")),
+        )
+        fixture.billing.launchCode = BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED
+        val launching = CompletableDeferred<Unit>()
+        val finishLaunching = CompletableDeferred<Unit>()
+        fixture.billing.launchStarted = launching
+        fixture.billing.holdLaunch = finishLaunching
+
+        val checkout = async {
+            fixture.service.purchase(
+                activity(),
+                product(licensingPublicKey = null),
+                null,
+                outcomeCorrelation = CommerceOutcomeCorrelation("owned-checkout", "buyer", "checkout-journey"),
+            )
+        }
+        runCurrent()
+        launching.await()
+        // A recovery ends while the checkout's binding is written and awaiting.
+        fixture.service.recover()
+        finishLaunching.complete(Unit)
+        checkout.await()
+
+        val outcomes = emissions.filter {
+            it.first == ai.nuxie.sdk.events.SystemEventNames.PURCHASE_COMPLETED ||
+                it.first == ai.nuxie.sdk.events.SystemEventNames.PURCHASE_FAILED
+        }
+        assertEquals(listOf(ai.nuxie.sdk.events.SystemEventNames.PURCHASE_FAILED), outcomes.map { it.first })
+        assertEquals("already_owned", outcomes.single().second["reason"])
+        fixture.close()
+    }
+
+    @Test
+    fun aCheckoutsOwnProductMappingStartsNoRecovery() = runTest {
+        val store = RecordingEvidenceStore().apply { notifiesCatalogChanges = true }
+        val fixture = fixture(this, store = store)
+        fixture.billing.launchCode = BillingClient.BillingResponseCode.USER_CANCELED
+
+        assertEquals(PurchaseResult.Cancelled, fixture.service.purchase(activity(), product(licensingPublicKey = null), null))
+        runCurrent()
+
+        assertEquals("Only the checkout's own query asks Play", listOf(BillingClient.ProductType.INAPP), fixture.billing.queries)
+        fixture.close()
+    }
+
+    @Test
+    fun noOutboxWorkStartsBeforeTheCoreStarts() = runTest {
+        val actions = mutableListOf<String>()
+        val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
+        var coreBuilt = false
+        val fixture = fixture(
+            this,
+            actions = actions,
+            emissions = emissions,
+            startService = false,
+            profileReady = { coreBuilt },
+        )
+        val customer = fixture.core.identity.distinctId()
+        // An overdue entry the server accepts at once.
+        fixture.store.upsert(
+            owedRestoreEvidence(customer).copy(acknowledged = false, syncAttempts = 1, retryDueAtMillis = 1L),
+        )
+        fixture.synchronizer = { accepted(it.requester, it) }
+        runCurrent()
+        assertTrue("Nothing is sent before the core starts", fixture.requests.isEmpty())
+
+        coreBuilt = true
+        fixture.service.start()
+        runCurrent()
+
+        assertEquals(listOf("refresh-token"), fixture.requests.map { it.first })
+        assertTrue(
+            "The answer is reported as purchase synced",
+            emissions.any { it.first == ai.nuxie.sdk.events.SystemEventNames.PURCHASE_SYNCED },
+        )
+        assertTrue("Its managed completion runs", "ack" in actions)
+        assertTrue(fixture.store.load().getValue("refresh-token").acknowledged)
+        fixture.close()
+    }
+
+    @Test
     fun anAlreadyOwnedAnswerInAPurchaseUpdateIsReconciledLikeALaunchResult() = runTest {
         val fixture = fixture(this)
         fixture.core.identity.setDistinctId("buyer")
@@ -5546,6 +5636,10 @@ class PurchaseServiceTest {
         // The service's clock follows the test's virtual clock, so saved due
         // times and retry timers agree.
         nowMillis: () -> Long = { 1_800_000_000_000L + scope.testScheduler.currentTime },
+        /** Start the service as the core's start() does; a test can start it itself. */
+        startService: Boolean = true,
+        /** Whether the core is built far enough to refresh the profile. */
+        profileReady: () -> Boolean = { true },
     ): Fixture {
         val storageDirectory = temporaryFolder.newFolder("fixture-${fixtures.size}")
         val core = NuxieCore(
@@ -5638,8 +5732,12 @@ class PurchaseServiceTest {
             logDroppedExternalPurchase = logDroppedExternalPurchase,
             testStore = testStore,
             ioDispatcher = ioDispatcher,
-            refreshFeatureAuthority = { fixture.authorityRefreshes += 1 },
+            refreshFeatureAuthority = {
+                check(profileReady()) { "The profile is not built yet." }
+                fixture.authorityRefreshes += 1
+            },
         )
+        if (startService) service.start()
         fixture = Fixture(
             core,
             billing,
@@ -5719,9 +5817,16 @@ class PurchaseServiceTest {
             callback?.invoke(snapshot)
             return snapshot
         }
-        override suspend fun upsertProductMapping(mapping: StoredProductMapping): Boolean {
+        /** Invoke the catalog listener as the real stores do; off unless a test asks. */
+        var notifiesCatalogChanges = false
+        private var catalogListener: (suspend () -> Unit)? = null
+        override fun setProductMappingsChangedListener(listener: (suspend () -> Unit)?) {
+            catalogListener = listener
+        }
+        override suspend fun upsertProductMapping(mapping: StoredProductMapping, catalogChange: Boolean): Boolean {
             checkThread()
-            mappings[mapping.productIdentity] = mapping
+            val changed = mappings.put(mapping.productIdentity, mapping) != mapping
+            if (notifiesCatalogChanges && changed && catalogChange) catalogListener?.invoke()
             return true
         }
     }
@@ -5745,8 +5850,17 @@ class PurchaseServiceTest {
         val queryStartedFor = mutableMapOf<String, CompletableDeferred<Unit>>()
         val holdQueryOf = mutableMapOf<String, CompletableDeferred<Unit>>()
 
+        /** Signalled when a checkout launches; the next one is held until [holdLaunch] completes. */
+        var launchStarted: CompletableDeferred<Unit>? = null
+        var holdLaunch: CompletableDeferred<Unit>? = null
+
         override suspend fun launch(activity: Activity, request: CheckoutRequest): BillingResult {
             launched = request
+            launchStarted?.complete(Unit)
+            holdLaunch?.let { hold ->
+                holdLaunch = null
+                hold.await()
+            }
             return billingResult(launchCode)
         }
 

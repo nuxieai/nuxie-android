@@ -962,7 +962,7 @@ class PurchaseOutcomeCommitFixtureTest {
             },
             logDroppedExternalPurchase = { _, _, _ -> },
             purchaseCommitObserver = purchaseCommitObservations::add,
-        )
+        ).also { it.start() }
 
         init {
             core.featureInfo.onFeatureChange = { _, _, _, _ -> observeOverlay() }
@@ -1075,7 +1075,7 @@ class PurchaseOutcomeCommitFixtureTest {
 
         override suspend fun loadProductMappings(): List<StoredProductMapping> = mappings.values.toList()
 
-        override suspend fun upsertProductMapping(mapping: StoredProductMapping): Boolean {
+        override suspend fun upsertProductMapping(mapping: StoredProductMapping, catalogChange: Boolean): Boolean {
             mappings[mapping.productIdentity] = mapping
             return true
         }

@@ -142,7 +142,7 @@ class PurchaseConformanceTest {
             maxRetryDelayMillis = 10,
             outboxRetryInitialDelayMillis = 10,
             outboxRetryMaxDelayMillis = 10,
-        )
+        ).also { it.start() }
         service.onPurchasesUpdated(okUpdate(purchase))
 
         if (!retry.getValue("emit_on_failure").jsonPrimitive.boolean) {

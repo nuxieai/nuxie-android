@@ -533,6 +533,8 @@ internal class NuxieCore(
     /** Called once from Nuxie.setup after construction. */
     fun start(initialActivity: android.app.Activity? = null) {
         featureUsage.startRecovery()
+        // Outbox work begins only now that the whole core is built.
+        purchases.start()
         val activityForwarder = ActivityForwarder(deliver = forwardActivity)
         eventLog.subscribeCommittedWithAdmission(
             sampleGeneration = journeys::eventAdmissionGeneration,

@@ -589,11 +589,24 @@ internal class PurchaseService(
             scope.launch {
                 refreshOptimisticProjection()
                 // A changed catalog runs the Play recovery query and sends every
-                // unanswered entry, as launch, identify and reset do.
-                recover()
+                // unanswered entry, as launch, identify and reset do; before the
+                // core has started, its own launch recovery does that.
+                if (started) recover()
             }
         }
         initialProjectionRefresh = scope.launch { refreshOptimisticProjection() }
+    }
+
+    @Volatile private var started = false
+
+    /**
+     * The core's post-construction start: only now does outbox work begin
+     * (stored retries, recovery, sends), so an answer never reaches a part of
+     * the core that is not built yet.
+     */
+    fun start() {
+        if (started) return
+        started = true
         scope.launch { scheduleStoredRetries() }
     }
 
@@ -968,11 +981,8 @@ internal class PurchaseService(
         products[product.productIdentity()] = product.forJourneyCheckout(null)
         val owner = initiatingOwner
         val accountId = playAccountId(owner)
-        if (!evidenceStore.upsertProductMapping(product.toMapping()) ||
-            !evidenceStore.upsertBinding(
-                product.toBinding(accountId, owner, outcomeCorrelation?.eventId),
-            )
-        ) {
+        // The checkout's own product is no catalog change: it starts no recovery.
+        if (!evidenceStore.upsertProductMapping(product.toMapping(), catalogChange = false)) {
             return failed(
                 product,
                 IllegalStateException("Could not persist purchase catalog mapping."),
@@ -1009,6 +1019,17 @@ internal class PurchaseService(
                 )
             }
             val priorTokens = active.mapTo(mutableSetOf()) { it.purchaseToken }
+            // The checkout's binding names what Play already owned when it began, so
+            // none of that is ever taken for the checkout's own purchase.
+            if (!evidenceStore.upsertBinding(product.toBinding(accountId, owner, outcomeCorrelation?.eventId, priorTokens))) {
+                return@checkout failed(
+                    product,
+                    IllegalStateException("Could not persist purchase catalog mapping."),
+                    owner,
+                    PurchaseOutcomeSource.CHECKOUT,
+                    outcomeCorrelation?.eventId,
+                )
+            }
 
             val result = CompletableDeferred<PurchaseResult>()
             val pending = InFlightPurchase(
@@ -1711,7 +1732,11 @@ internal class PurchaseService(
             val knownProductIdentity = existingProductIdentity ?: product?.productIdentity()
             // Only a binding whose checkout still awaits its outcome correlates a
             // delivery with that checkout; any other binding gives catalog facts only.
-            val checkoutBindings = if (correlatesCheckout) bindings.filter { it.awaitingCheckout } else emptyList()
+            val checkoutBindings = if (correlatesCheckout) {
+                bindings.filter { it.awaitingCheckout && purchase.purchaseToken !in it.priorTokens }
+            } else {
+                emptyList()
+            }
             val accountBindings = checkoutBindings.filter { binding ->
                 binding.obfuscatedAccountId == purchase.obfuscatedAccountId &&
                     binding.storeProductId in purchase.products
@@ -2702,6 +2727,7 @@ internal class PurchaseService(
         accountId: String,
         owner: String,
         outcomeEventId: String? = null,
+        priorTokens: Set<String> = emptySet(),
     ) = StoredPurchaseBinding(
         obfuscatedAccountId = accountId,
         distinctId = owner,
@@ -2717,6 +2743,7 @@ internal class PurchaseService(
         licensingPublicKey = licensingPublicKey,
         nuxieManaged = settings.handlingMode == PurchaseHandlingMode.NUXIE_MANAGED,
         outcomeEventId = outcomeEventId,
+        priorTokens = priorTokens,
     )
 
     internal suspend fun rememberProduct(product: StoreProduct): Boolean =
