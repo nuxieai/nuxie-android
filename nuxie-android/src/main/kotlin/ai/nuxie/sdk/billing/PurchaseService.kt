@@ -753,7 +753,7 @@ internal class PurchaseService(
         val bindings = evidenceStore.loadBindings()
         return evidenceStore.load().values.filter { evidence ->
             evidence.authorityScope == purchaseStorageScope &&
-                evidence.isBuyersOwnUnsyncedPurchase(distinctId) &&
+                evidence.isBuyersOwnUnsyncedPurchase(distinctId, bindings, descriptors) &&
                 evidence.purchaseToken.isNotBlank() &&
                 evidence.packageName.isNotBlank() &&
                 evidence.storeProductIds.firstOrNull()?.isNotBlank() == true &&
@@ -1206,12 +1206,14 @@ internal class PurchaseService(
         // checkout receipt was accepted: only the server can move a purchase to
         // the restoring customer, and only its answer grants access.
         val retained = if (settled != null) emptyMap() else evidenceStore.load()
+        val bindings = evidenceStore.loadBindings()
+        val mappings = evidenceStore.loadProductMappings()
         val restorable = if (settled != null) emptyList() else {
             found.distinctBy { it.purchaseToken }.mapNotNull { purchase ->
                 retained[purchase.purchaseToken]?.takeIf {
                     purchase.state == StoredPurchaseState.PURCHASED &&
                         it.purchaseState == StoredPurchaseState.PURCHASED &&
-                        it.hasEligiblePurchaseSignature
+                        it.hasEligiblePurchaseSignature(bindings, mappings)
                 }
             }
         }
@@ -1222,7 +1224,7 @@ internal class PurchaseService(
         }
         val unverified = settled == null && found.any {
             it.state == StoredPurchaseState.PURCHASED &&
-                retained[it.purchaseToken]?.hasEligiblePurchaseSignature == false
+                retained[it.purchaseToken]?.hasEligiblePurchaseSignature(bindings, mappings) == false
         }
         val send = PurchaseSend.admit(PurchaseSyncReason.RESTORE, initiatingOwner, initiatingKind)
         val results = restorable.associate { evidence ->
@@ -1269,6 +1271,8 @@ internal class PurchaseService(
         results: Map<String, SyncResult>,
     ): RestoreResult {
         val evidenceByToken = evidenceStore.load()
+        val bindings = evidenceStore.loadBindings()
+        val mappings = evidenceStore.loadProductMappings()
         val taking = found.filter { it.state == StoredPurchaseState.PURCHASED }
             .map { it.purchaseToken }
             .distinct()
@@ -1280,7 +1284,7 @@ internal class PurchaseService(
                 ),
             )
             taking.any { results[it] == SyncResult.REFUSED } ||
-                claimed.any { !it.hasEligiblePurchaseSignature } -> RestoreResult.Failed(
+                claimed.any { !it.hasEligiblePurchaseSignature(bindings, mappings) } -> RestoreResult.Failed(
                 RestoreReconciliationException("A restored purchase could not be verified."),
             )
             taking.any { results[it] != SyncResult.ACCEPTED } -> RestoreResult.Failed(
@@ -1373,35 +1377,7 @@ internal class PurchaseService(
         val recoveryFollowUps = withProcessingDecision { effects ->
             val bindings = evidenceStore.loadBindings()
             val mappings = evidenceStore.loadProductMappings()
-            var normalizedAnyEvidence = false
-            val evidenceRecords = evidenceStore.load().values.mapNotNull { storedEvidence ->
-                if (!storedEvidence.signatureVerificationRequired &&
-                    hasConfiguredLicensingKey(storedEvidence, bindings, mappings)
-                ) {
-                    normalizedAnyEvidence = true
-                    // Read and written in one step, so the write is never based on
-                    // an admission the entry no longer holds.
-                    projectionRefresh.withLock {
-                        val current = evidenceStore.load()[storedEvidence.purchaseToken] ?: return@withLock null
-                        if (current.signatureVerificationRequired) {
-                            current
-                        } else {
-                            upsertEvidenceLocked(current.copy(signatureVerificationRequired = true))
-                        }
-                    }
-                } else {
-                    storedEvidence
-                }
-            }
-            if (normalizedAnyEvidence) {
-                // The projection published before normalization could demand
-                // signature verification for legacy evidence; republish so an
-                // unverified purchase cannot stay projected. A concurrent
-                // refresh may already have reserved the equivalent mutation;
-                // a barrier still orders recovery's return after it drains.
-                val restaged = projectionRefresh.withLock { stageOptimisticProjectionLocked() }
-                effects.publications.add(restaged ?: features.stagePublicationBarrier())
-            }
+            val evidenceRecords = evidenceStore.load().values
             evidenceRecords
                 .filter {
                     it.purchaseState == StoredPurchaseState.PURCHASED &&
@@ -1409,7 +1385,7 @@ internal class PurchaseService(
                         !it.buyerDistinctId.isNullOrBlank() &&
                         !it.refused &&
                         (it.synced || it.pendingSend != null) &&
-                        it.hasEligiblePurchaseSignature
+                        it.hasEligiblePurchaseSignature(bindings, mappings)
                 }
                 .forEach { effects.stageRetainedPurchaseCompletion(it) }
             evidenceRecords
@@ -1668,7 +1644,7 @@ internal class PurchaseService(
         // D2: evidence is durable before projection, facts, sync, acknowledge, or consume.
         // The observation is built over the entry as it stands and written in the
         // same step, so it is never based on an admission the entry no longer holds.
-        val evidence = projectionRefresh.withLock {
+        val committed = projectionRefresh.withLock {
             // Another customer's settled record is only the record of their purchase:
             // this customer's checkout starts the purchase's entry afresh.
             val existing = evidenceStore.load()[purchase.purchaseToken]?.takeUnless { it.givesWayTo(checkoutFlight?.owner) }
@@ -1715,10 +1691,15 @@ internal class PurchaseService(
                 ?: exactBinding?.distinctId
                 ?: currentOwner.takeIf { purchase.obfuscatedAccountId == playAccountId(it) }
                 ?: existing?.buyerDistinctId
+            // What the current catalog asks for, never a flag stored on the entry: any
+            // licensing key for this store product requires Play's signature.
             val licensingPublicKey = product?.licensingPublicKey ?: catalogBinding?.licensingPublicKey
                 ?: catalogMapping?.licensingPublicKey
-            val signatureVerificationRequired = existing?.signatureVerificationRequired == true ||
-                licensingPublicKey != null
+                ?: bindings.firstOrNull { it.storeProductId in purchase.products && it.licensingPublicKey != null }
+                    ?.licensingPublicKey
+                ?: mappings.firstOrNull { it.storeProductId in purchase.products && it.licensingPublicKey != null }
+                    ?.licensingPublicKey
+            val signatureVerificationRequired = licensingPublicKey != null
             val signatureVerified = existing?.signatureVerified == true ||
                 (licensingPublicKey != null && verifyPurchaseSignature(
                     licensingPublicKey,
@@ -1786,7 +1767,6 @@ internal class PurchaseService(
                 nuxieManaged = existing?.nuxieManaged
                     ?: matchingFlight?.nuxieManaged?.takeIf { isCheckoutOutcome }
                     ?: (settings.handlingMode == PurchaseHandlingMode.NUXIE_MANAGED),
-                signatureVerificationRequired = signatureVerificationRequired,
                 signatureVerified = signatureVerified,
                 authorityScope = purchaseStorageScope,
                 backendSyncedAtMillis = existing?.backendSyncedAtMillis,
@@ -1795,7 +1775,9 @@ internal class PurchaseService(
                     ?: exactBinding?.outcomeEventId,
             )
             upsertEvidenceLocked(evidenceCandidate, givesWayTo = checkoutFlight?.owner)
+                ?.let { stored -> stored to (stored.signatureVerified || !signatureVerificationRequired) }
         }
+        val evidence = committed?.first
         if (evidence == null) {
             val failedOutcome = PurchaseOutcome.Failed(
                 IllegalStateException("Could not persist purchase evidence."),
@@ -1834,7 +1816,7 @@ internal class PurchaseService(
             )
             return null
         }
-        if (!evidence.hasEligiblePurchaseSignature) {
+        if (committed.second != true) {
             val failedOutcome = PurchaseOutcome.Failed(
                 SecurityException("Play purchase signature is invalid."),
                 source,
@@ -2024,8 +2006,9 @@ internal class PurchaseService(
      */
     private suspend fun sendOnce(purchaseToken: String): SendAnswer {
         val evidence = evidenceStore.load()[purchaseToken] ?: return SendAnswer(null, SyncResult.UNAVAILABLE)
-        // A purchase whose required Play signature never verified is never sent.
-        if (!evidence.hasEligiblePurchaseSignature) return SendAnswer(null, SyncResult.UNAVAILABLE)
+        // A purchase whose Play signature the current catalog requires and that
+        // never verified is never sent.
+        if (!signatureEligible(evidence)) return SendAnswer(null, SyncResult.UNAVAILABLE)
         val send = evidence.pendingSend ?: return SendAnswer(null, SyncResult.UNAVAILABLE)
         val outcome = try {
             synchronizer.sync(
@@ -2239,6 +2222,8 @@ internal class PurchaseService(
             val attempted = projectionRefresh.withLock {
                 val current = evidenceStore.load()[evidence.purchaseToken] ?: evidence
                 if (!current.synced || !current.needsManagedCompletion) return@withLock null
+                // Nothing is acknowledged or consumed without the signature the catalog requires.
+                if (!signatureEligible(current)) return@withLock null
                 current.copy(completionAttempts = current.completionAttempts + 1)
                     .takeIf { evidenceStore.upsert(it) }
             } ?: return
@@ -2286,15 +2271,9 @@ internal class PurchaseService(
         }
 
 
-    private fun hasConfiguredLicensingKey(
-        evidence: PurchaseEvidence,
-        bindings: List<StoredPurchaseBinding>,
-        mappings: List<StoredProductMapping>,
-    ): Boolean = bindings.any {
-        it.licensingPublicKey != null && evidence.matchesProductIdentity(it.productIdentity)
-    } || mappings.any {
-        it.licensingPublicKey != null && evidence.matchesProductIdentity(it.productIdentity)
-    }
+    /** Whether [evidence]'s Play signature satisfies what the current catalog asks for. */
+    private suspend fun signatureEligible(evidence: PurchaseEvidence): Boolean =
+        evidence.hasEligiblePurchaseSignature(evidenceStore.loadBindings(), evidenceStore.loadProductMappings())
 
     private fun <T> selectFullProductMatch(
         candidates: List<T>,
@@ -2356,8 +2335,6 @@ internal class PurchaseService(
             syncedEventEmitted = candidate.syncedEventEmitted || current.syncedEventEmitted,
             syncedCustomerId = current.syncedCustomerId,
             nuxieManaged = candidate.nuxieManaged || current.nuxieManaged,
-            signatureVerificationRequired = candidate.signatureVerificationRequired ||
-                current.signatureVerificationRequired,
             signatureVerified = candidate.signatureVerified || current.signatureVerified,
             backendSyncedAtMillis = current.backendSyncedAtMillis,
             checkoutCompletionEventId = current.checkoutCompletionEventId

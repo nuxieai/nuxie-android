@@ -22,7 +22,9 @@ internal fun optimisticFeatureProjection(
 ): Map<String, OptimisticFeatureOverlay>? {
     val projected = linkedMapOf<String, OptimisticFeatureOverlay>()
     val accountId = playAccountId(distinctId)
-    val eligible = evidence.filter { it.isEligibleProjectionEvidence(distinctId, accountId, authorityScope) }
+    val eligible = evidence.filter {
+        it.isEligibleProjectionEvidence(distinctId, accountId, authorityScope, bindings, descriptors)
+    }
     for (purchase in eligible) {
         // A purchase whose descriptor is missing or grants nothing (an empty
         // Feature allowance list is schema-valid) contributes no overlay, but must
@@ -99,6 +101,8 @@ private fun <T> PurchaseEvidence.selectAllowanceSource(
  */
 internal fun PurchaseEvidence.isBuyersOwnUnsyncedPurchase(
     distinctId: String,
+    bindings: Collection<StoredPurchaseBinding>,
+    mappings: Collection<StoredProductMapping>,
     accountId: String = playAccountId(distinctId),
 ): Boolean {
     val send = pendingSend ?: return false
@@ -107,18 +111,36 @@ internal fun PurchaseEvidence.isBuyersOwnUnsyncedPurchase(
         send.reason != PurchaseSyncReason.RESTORE &&
         obfuscatedAccountId == accountId &&
         purchaseState == StoredPurchaseState.PURCHASED &&
-        hasEligiblePurchaseSignature
+        hasEligiblePurchaseSignature(bindings, mappings)
 }
 
 private fun PurchaseEvidence.isEligibleProjectionEvidence(
     distinctId: String,
     accountId: String,
     expectedAuthorityScope: String,
+    bindings: Collection<StoredPurchaseBinding>,
+    mappings: Collection<StoredProductMapping>,
 ): Boolean =
-    authorityScope == expectedAuthorityScope && isBuyersOwnUnsyncedPurchase(distinctId, accountId)
+    authorityScope == expectedAuthorityScope && isBuyersOwnUnsyncedPurchase(distinctId, bindings, mappings, accountId)
 
-internal val PurchaseEvidence.hasEligiblePurchaseSignature: Boolean
-    get() = !signatureVerificationRequired || signatureVerified
+/**
+ * Whether the current catalog asks for this purchase's Play signature: a
+ * licensing key on a checkout binding or catalog mapping of its store product.
+ * It is read from the catalog every time, never stored on the entry, so a key
+ * added after the purchase was recorded applies at once.
+ */
+internal fun PurchaseEvidence.requiresPurchaseSignature(
+    bindings: Collection<StoredPurchaseBinding>,
+    mappings: Collection<StoredProductMapping>,
+): Boolean =
+    bindings.any { it.licensingPublicKey != null && it.storeProductId in storeProductIds } ||
+        mappings.any { it.licensingPublicKey != null && it.storeProductId in storeProductIds }
+
+/** Its Play signature verified, or the current catalog does not ask for one. */
+internal fun PurchaseEvidence.hasEligiblePurchaseSignature(
+    bindings: Collection<StoredPurchaseBinding>,
+    mappings: Collection<StoredProductMapping>,
+): Boolean = signatureVerified || !requiresPurchaseSignature(bindings, mappings)
 
 private fun OptimisticFeatureOverlay.widen(other: OptimisticFeatureOverlay): OptimisticFeatureOverlay {
     val joinedType = deterministicFeatureType(type, other.type)

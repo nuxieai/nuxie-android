@@ -44,7 +44,6 @@ internal object ProjectionFixtureAdapters {
                 acknowledged = false,
                 firstSeenMillis = 1L,
                 catalogResolved = true,
-                signatureVerificationRequired = true,
                 signatureVerified = true,
                 authorityScope = AUTHORITY_SCOPE,
                 backendSyncedAtMillis = 1L.takeIf { backendSynced },

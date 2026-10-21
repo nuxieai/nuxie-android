@@ -356,7 +356,6 @@ class PurchaseServiceTest {
 
         assertEquals(PurchaseResult.Purchased, checkout.await())
         val retained = fixture.store.load().getValue("no-licensing-key")
-        assertFalse(retained.signatureVerificationRequired)
         assertFalse(retained.signatureVerified)
         assertTrue(fixture.core.featureInfo.isAllowed("pro"))
         fixture.close()
@@ -385,7 +384,6 @@ class PurchaseServiceTest {
 
         assertTrue(checkout.await() is PurchaseResult.Failed)
         val evidence = fixture.store.load().getValue("invalid-signature")
-        assertTrue(evidence.signatureVerificationRequired)
         assertFalse(evidence.signatureVerified)
         assertNull("An unverified purchase owes no send", evidence.pendingSend)
         assertTrue(fixture.purchaseEventCaptureAttempts.isEmpty())
@@ -2196,8 +2194,12 @@ class PurchaseServiceTest {
 
     @Test
     fun recoveryDoesNotProjectEvidenceWhoseRequiredSignatureWasNeverVerified() = runTest {
-        val fixture = fixture(this)
+        val fixture = fixture(this, verifyPurchaseSignature = { _, _, _ -> false })
         val owner = fixture.core.identity.distinctId()
+        // The catalog's licensing key requires Play's signature, which never verifies.
+        fixture.service.rememberProduct(
+            product(licensingPublicKey = "configured-key", allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+        )
         fixture.store.upsert(
             PurchaseEvidence(
                 purchaseToken = "unverified-token",
@@ -2209,7 +2211,6 @@ class PurchaseServiceTest {
                 acknowledged = false,
                 firstSeenMillis = 1L,
                 catalogResolved = true,
-                signatureVerificationRequired = true,
                 signatureVerified = false,
             ),
         )
@@ -2224,8 +2225,9 @@ class PurchaseServiceTest {
     }
 
     @Test
-    fun legacyEvidenceUsesStoredCatalogKeyToRequireVerificationDuringRecovery() = runTest {
-        val fixture = fixture(this)
+    fun anEntryStoredBeforeItsProductGainedALicensingKeyIsNotSentUnverified() = runTest {
+        val actions = mutableListOf<String>()
+        val fixture = fixture(this, actions = actions)
         fixture.service.rememberProduct(product(licensingPublicKey = "configured-key"))
         fixture.store.upsert(
             PurchaseEvidence(
@@ -2242,18 +2244,56 @@ class PurchaseServiceTest {
         )
         fixture.billing.failQueries = true
         fixture.synchronizer = {
-            assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+            actions += "sync"
             accepted(it.requester, it)
         }
 
+        // The current catalog's key requires the signature the entry never had.
         fixture.service.recover()
 
-        assertTrue(fixture.store.load().getValue("legacy-unverified").synced)
+        assertFalse("Nothing is sent", "sync" in actions)
+        assertFalse("Nothing is acknowledged", "ack" in actions)
+        assertNotNull(fixture.store.load().getValue("legacy-unverified").pendingSend)
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
         fixture.close()
     }
 
     @Test
-    fun recoveryRepublishesTheProjectionAfterNormalizingLegacyEvidence() = runTest {
+    fun aLaunchNeitherSendsNorFinishesAnEntryTheCatalogNowRequiresSignedFor() = runTest {
+        val actions = mutableListOf<String>()
+        // The entry was stored before its product had a licensing key; it never verified.
+        val store = RecordingEvidenceStore()
+        store.upsert(owedRestoreEvidence("stored-customer").copy(signatureVerified = false))
+        // The catalog now requires Play's signature for the product.
+        store.upsertProductMapping(
+            StoredProductMapping(
+                storeProductId = "play-pro",
+                nuxieProductId = "nuxie-pro",
+                productType = BillingClient.ProductType.SUBS,
+                consumable = false,
+                licensingPublicKey = "catalog-key",
+            ),
+        )
+
+        // The app starts with Billing unavailable; the launch's due send runs first.
+        val launched = fixture(this, store = store, actions = actions)
+        launched.billing.failQueries = true
+        launched.synchronizer = {
+            actions += "sync"
+            accepted(it.requester, it)
+        }
+        runCurrent()
+        launched.service.recover()
+
+        assertFalse("Nothing is sent", "sync" in actions)
+        assertFalse("Nothing is acknowledged", "ack" in actions)
+        assertFalse("Nothing is consumed", "consume" in actions)
+        assertNotNull(store.load().getValue("refresh-token").pendingSend)
+        launched.close()
+    }
+
+    @Test
+    fun anEntryStoredBeforeItsProductGainedALicensingKeyNeverUnlocksUnverified() = runTest {
         val fixture = fixture(this)
         val owner = fixture.core.identity.distinctId()
         fixture.store.upsert(
@@ -2278,27 +2318,16 @@ class PurchaseServiceTest {
                 allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)),
             ),
         )
-        // The buyer's own unanswered purchase unlocks early; its send at launch
-        // gets no answer.
+        // The current catalog's key requires the signature the entry never had,
+        // so it does not unlock early, before recovery or after it.
         fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
         runCurrent()
-        assertTrue(
-            "legacy evidence must project before normalization demands verification",
-            fixture.core.featureInfo.isAllowed("pro"),
-        )
-        // Play is unreachable, so recovery cannot verify the signature; only
-        // the normalization republish can retract the projected legacy grant.
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
         fixture.billing.failQueries = true
 
         fixture.service.recover()
 
-        assertTrue(
-            fixture.store.load().getValue("legacy-projected").signatureVerificationRequired,
-        )
-        assertFalse(
-            "normalized-unverified evidence must not stay projected",
-            fixture.core.featureInfo.isAllowed("pro"),
-        )
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
         fixture.close()
     }
 
@@ -3921,7 +3950,6 @@ class PurchaseServiceTest {
                 firstSeenMillis = 1L,
                 catalogResolved = true,
                 syncedEventEmitted = true,
-                signatureVerificationRequired = true,
                 signatureVerified = true,
                 authorityScope = "test-fixture",
             ),
@@ -4732,13 +4760,22 @@ class PurchaseServiceTest {
     @Test
     fun authenticatedRestoreFailsWhenAPurchaseItReturnedNeverVerified() = runTest {
         for (authenticated in listOf(true, false)) {
-            val fixture = fixture(this)
+            val fixture = fixture(this, verifyPurchaseSignature = { _, _, _ -> false })
             val owner = fixture.core.identity.distinctId()
+            // The catalog's licensing key requires Play's signature for the product.
+            fixture.store.upsertProductMapping(
+                StoredProductMapping(
+                    storeProductId = "play-pro",
+                    nuxieProductId = "nuxie-pro",
+                    productType = BillingClient.ProductType.SUBS,
+                    consumable = false,
+                    licensingPublicKey = "catalog-key",
+                ),
+            )
             val accepted = retainedRestoreEvidence(owner)
             // Play returns it, but its required signature never verified, so it is never sent.
             val unverified = owedRestoreEvidence(owner).copy(
                 purchaseToken = "unverified-token",
-                signatureVerificationRequired = true,
                 signatureVerified = false,
             )
             fixture.store.upsert(accepted)

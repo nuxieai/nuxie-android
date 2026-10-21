@@ -465,9 +465,16 @@ class PurchaseFeatureUseTest {
     )
 
     @Test
-    fun unverifiedRequiredSignatureEvidenceIsNotEligible() = assertDisqualified(
-        evidence(signatureVerificationRequired = true, signatureVerified = false),
-    )
+    fun unverifiedRequiredSignatureEvidenceIsNotEligible() = runTest {
+        val fixture = fallbackFixture()
+        // The current catalog's licensing key requires the signature.
+        fixture.store.upsertProductMapping(featureDescriptor().copy(licensingPublicKey = "catalog-key"))
+        fixture.store.upsert(evidence(signatureVerified = false))
+
+        assertEquals(null, fixture.use())
+        assertTrue(fixture.transport.requests.none { it.url.path == "/feature/consume" })
+        fixture.core.stop()
+    }
 
     @Test
     fun noLicensingKeyEvidenceUsesThePendingPurchaseSpendPathWhenUnverified() = runTest {
@@ -479,9 +486,7 @@ class PurchaseFeatureUseTest {
                 canonicalJourneyProfileResponse()
             }
         }
-        fixture.store.upsert(
-            evidence(signatureVerificationRequired = false, signatureVerified = false),
-        )
+        fixture.store.upsert(evidence(signatureVerified = false))
 
         assertNotNull(fixture.use())
         assertEquals(1, fixture.transport.requests.count { it.url.path == "/feature/consume" })
@@ -623,7 +628,6 @@ class PurchaseFeatureUseTest {
         refused: Boolean = false,
         synced: Boolean = false,
         backendSyncedAtMillis: Long? = null,
-        signatureVerificationRequired: Boolean = false,
         signatureVerified: Boolean = true,
         context: StoredPurchaseContext? = null,
     ) = PurchaseEvidence(
@@ -646,7 +650,6 @@ class PurchaseFeatureUseTest {
         catalogResolved = true,
         nuxieManaged = nuxieManaged,
         backendSyncedAtMillis = backendSyncedAtMillis,
-        signatureVerificationRequired = signatureVerificationRequired,
         signatureVerified = signatureVerified,
         context = context,
     )

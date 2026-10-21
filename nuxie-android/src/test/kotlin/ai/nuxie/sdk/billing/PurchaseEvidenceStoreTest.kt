@@ -219,7 +219,6 @@ class PurchaseEvidenceStoreTest {
                 syncAttempts = 1,
                 completionAttempts = 2,
                 firstSeenMillis = 123L,
-                signatureVerificationRequired = true,
                 signatureVerified = true,
                 authorityScope = "authority-scope",
                 backendSyncedAtMillis = 456L,
