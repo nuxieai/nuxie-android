@@ -209,11 +209,6 @@ internal class PurchaseService(
     }
 
 
-    private data class StagedWithdrawal(
-        val persisted: Boolean,
-        val publication: FeatureInfo.Mutation?,
-    )
-
     private data class StagedAtomicUse(
         val evidence: PurchaseEvidence?,
         val access: FeatureAccess?,
@@ -555,17 +550,13 @@ internal class PurchaseService(
     /** Process-lifetime terminal identities; guarded by [processing]. */
     private val completedPurchaseCommits = mutableMapOf<PurchaseCommitIdentity, Unit>()
     /**
-     * Owed sends withdrawn because Play no longer owns the purchase, kept in
-     * memory too so the early unlock stops even if the durable write failed.
+     * What Play reported most recently: each purchase token with the product
+     * type of the query that reported it, or null when only a purchase update
+     * delivered it. In memory only, recomputed on every query, and empty after
+     * launch until the first one, so stored entries unlock nothing early before
+     * Play has reported them. Guarded by itself.
      */
-    private val withdrawnTokens: MutableSet<String> =
-        Collections.newSetFromMap(ConcurrentHashMap())
-    /**
-     * Purchases Play stopped reporting, kept in memory so their entries are
-     * not sent even if the durable withdrawal failed, until Play reports them again.
-     */
-    private val unreportedTokens: MutableSet<String> =
-        Collections.newSetFromMap(ConcurrentHashMap())
+    private val playReported = mutableMapOf<String, String?>()
     private val usageCoordinationLock = Any()
     /** The one send in flight per purchase token; guarded by [usageCoordinationLock]. */
     private val sending = mutableMapOf<String, CompletableDeferred<SendAnswer>>()
@@ -677,7 +668,9 @@ internal class PurchaseService(
                 }
                 val stagedUse = projectionRefresh.withLock {
                     val current = evidenceStore.load()[evidence.purchaseToken]
-                    if (current == null || current.purchaseToken in withdrawnTokens ||
+                    // The server accepted the claimed spend: its answer stands even if
+                    // Play's report changed meanwhile.
+                    if (current == null ||
                         !current.isBuyersOwnUnsyncedPurchase(distinctId) ||
                         !current.matchesAtomicUsePayload(evidence)
                     ) {
@@ -741,7 +734,7 @@ internal class PurchaseService(
         return evidenceStore.load().values.filter { evidence ->
             evidence.authorityScope == purchaseStorageScope &&
                 evidence.isBuyersOwnUnsyncedPurchase(distinctId) &&
-                evidence.purchaseToken !in withdrawnTokens &&
+                reportedByPlay(evidence.purchaseToken) &&
                 evidence.purchaseToken.isNotBlank() &&
                 evidence.packageName.isNotBlank() &&
                 evidence.storeProductIds.firstOrNull()?.isNotBlank() == true &&
@@ -932,7 +925,7 @@ internal class PurchaseService(
             )
         }
         val queried = try {
-            billing.queryActive(product.productType)
+            queryPlay(product.productType)
         } catch (failure: Throwable) {
             ensureCheckoutIntakeOpen()
             throw failure
@@ -1008,7 +1001,7 @@ internal class PurchaseService(
             inFlight.remove(product.storeProductId, pending)
             val owned = if (launch.responseCode == BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED) {
                 // Play says this account already owns the product: find that purchase.
-                (runCatching { billing.queryActive(product.productType) }.getOrNull() as? ActivePurchasesResult.Success)
+                (runCatching { queryPlay(product.productType) }.getOrNull() as? ActivePurchasesResult.Success)
                     ?.purchases?.ownedPurchaseOf(product)
             } else {
                 null
@@ -1111,11 +1104,10 @@ internal class PurchaseService(
             emitRestoreOutcome(result, initiatingOwner, outcomeCorrelation?.eventId)
             return result
         }
-        val withdrawalSnapshot = withProcessingDecision { missingWithdrawalSnapshot() }
         val found = mutableListOf<PlayPurchase>()
         for (type in listOf(BillingClient.ProductType.SUBS, BillingClient.ProductType.INAPP)) {
             val query = try {
-                billing.queryActive(type)
+                queryPlay(type)
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
                 // Connection setup can fail before Play supplies a query response.
@@ -1132,17 +1124,10 @@ internal class PurchaseService(
                 }
             }
         }
+        refreshOptimisticProjection()
         // Null means Play owns purchases this Restore must ask the server about.
         val settled: RestoreResult? = withProcessingDecision { effects ->
-            val withdrawal = stageMissingWithdrawal(
-                activeTokens = found.mapTo(mutableSetOf()) { it.purchaseToken },
-                withdrawalSnapshot = withdrawalSnapshot,
-            )
-            withdrawal.publication?.let(effects.publications::add)
             when {
-                !withdrawal.persisted -> RestoreResult.Failed(
-                    IllegalStateException("Could not durably withdraw missing purchase evidence."),
-                )
                 found.isEmpty() -> RestoreResult.NoPurchases
                 else -> {
                     found.distinctBy { it.purchaseToken }.forEach { purchase ->
@@ -1202,7 +1187,7 @@ internal class PurchaseService(
                     },
                 ),
             )
-            expectedOwnerDistinctId != null -> strictRestoreOutcome(found, initiatingOwner, results)
+            expectedOwnerDistinctId != null -> strictRestoreOutcome(found, results)
             else -> RestoreResult.Restored
         }
         emitRestoreOutcome(outcome, initiatingOwner, outcomeCorrelation?.eventId)
@@ -1210,48 +1195,37 @@ internal class PurchaseService(
     }
 
     /**
-     * Signed Experience restore routes may advance only after every owned Play
-     * token is durable, server-verified by this Restore, exactly
-     * catalog-resolved, and locally completed. The public host restore API
-     * reports Restored once the server restored at least one purchase;
-     * authenticated routes opt into this stricter decision by passing their
-     * presentation owner.
+     * A signed Experience Restore route advances only when the server accepted
+     * (200) every purchase that took part in this Restore: any refusal or
+     * missing answer fails it. Each must also be durable, exactly
+     * catalog-resolved, and completed with Play. The decision reads the
+     * Restore's own answers, never the owner a purchase has after them. The
+     * public host Restore reports Restored once the server accepted at least one.
      */
     private suspend fun strictRestoreOutcome(
         found: List<PlayPurchase>,
-        initiatingOwner: String,
         results: Map<String, SyncResult>,
     ): RestoreResult {
         val evidenceByToken = evidenceStore.load()
-        if (found.any { it.purchaseToken !in evidenceByToken }) {
-            return RestoreResult.Failed(
+        val claimed = results.keys.mapNotNull(evidenceByToken::get)
+        return when {
+            found.any { it.purchaseToken !in evidenceByToken } -> RestoreResult.Failed(
                 RestoreReconciliationException(
                     "A restored purchase could not be retained for reconciliation.",
                 ),
             )
-        }
-        // A refusal clears the refused purchase's owner, so the Restore's own
-        // answers are read before selecting purchases by the owner each has now.
-        if (results.values.any { it == SyncResult.REFUSED }) {
-            return RestoreResult.Failed(
+            results.values.any { it == SyncResult.REFUSED } -> RestoreResult.Failed(
                 RestoreReconciliationException("A restored purchase could not be verified."),
             )
-        }
-        val selected = found.mapNotNull { evidenceByToken[it.purchaseToken] }
-            .filter { it.ownerDistinctId == initiatingOwner }
-        return when {
-            selected.isEmpty() -> RestoreResult.NoPurchases
-            selected.any { !it.catalogResolved } -> RestoreResult.Failed(
+            results.values.any { it != SyncResult.ACCEPTED } -> RestoreResult.Failed(
+                RestoreReconciliationException("Restore is waiting for purchase verification."),
+            )
+            claimed.any { !it.catalogResolved } -> RestoreResult.Failed(
                 RestoreReconciliationException(
                     "A restored purchase did not match one exact signed Product.",
                 ),
             )
-            selected.any {
-                !it.synced || results[it.purchaseToken] != SyncResult.ACCEPTED
-            } -> RestoreResult.Failed(
-                RestoreReconciliationException("Restore is waiting for purchase verification."),
-            )
-            selected.any { it.needsManagedCompletion() } -> RestoreResult.Failed(
+            claimed.any { it.needsManagedCompletion() } -> RestoreResult.Failed(
                 RestoreReconciliationException("Restore is waiting for Google Play completion."),
             )
             else -> RestoreResult.Restored
@@ -1284,6 +1258,7 @@ internal class PurchaseService(
             }
             return
         }
+        recordPlayUpdate(update.purchases.orEmpty())
         processPurchases(
             update.purchases.orEmpty(),
             PurchaseOutcomeSource.PURCHASES_UPDATED_STREAM,
@@ -1293,34 +1268,14 @@ internal class PurchaseService(
     /** Billing connect and app foreground share one recovery lane. */
     suspend fun recover() {
         if (testStore != null) return
-        refreshOptimisticProjection()
-        val withdrawalSnapshot = withProcessingDecision { missingWithdrawalSnapshot() }
-        val active = mutableListOf<PlayPurchase>()
-        var allQueriesSucceeded = true
-        for (type in listOf(BillingClient.ProductType.SUBS, BillingClient.ProductType.INAPP)) {
-            val result = runCatching { billing.queryActive(type) }.getOrNull()
-            if (result is ActivePurchasesResult.Success) {
-                active += result.purchases
-            } else {
-                allQueriesSucceeded = false
-            }
-        }
+        val active = refreshPlayReport()
         val purchaseFollowUps = withProcessingDecision { effects ->
-            val prepared = active.mapNotNull {
+            active.mapNotNull {
                 commitPurchaseOutcome(
                     classifyPurchaseObservation(it, PurchaseOutcomeSource.STARTUP_RECOVERY),
                     effects,
                 )
             }
-            val activeTokens = active.mapTo(mutableSetOf()) { it.purchaseToken }
-            if (allQueriesSucceeded) {
-                val withdrawal = stageMissingWithdrawal(activeTokens, withdrawalSnapshot)
-                withdrawal.publication?.let(effects.publications::add)
-                if (!withdrawal.persisted) {
-                    throw IllegalStateException("Could not durably withdraw missing purchase evidence.")
-                }
-            }
-            prepared
         }
         purchaseFollowUps.forEach { finishPurchase(it) }
         // Each entry gets one attempt per recovery: those Play reported above were just sent.
@@ -1440,10 +1395,6 @@ internal class PurchaseService(
         effects: ProcessingEffects,
     ): PurchaseEvidence? {
         val identity = PurchaseCommitIdentity.Evidence(observation.purchase.purchaseToken)
-        // Play reports the purchase again: its entry may be sent again.
-        if (unreportedTokens.remove(observation.purchase.purchaseToken)) {
-            withdrawnTokens -= observation.purchase.purchaseToken
-        }
         if (completedPurchaseCommits.containsKey(identity)) return null
         purchaseCommitOperations[identity]?.let { ongoing ->
             effects.purchaseCommitWaits += ongoing
@@ -1844,53 +1795,26 @@ internal class PurchaseService(
         }
     }
 
-    private sealed interface ClaimRoute {
-        data class Entry(val send: PurchaseSend) : ClaimRoute
-        data object Direct : ClaimRoute
-    }
-
     /**
      * Ask the server for a purchase for a Restore or an already-owned checkout.
-     * Another customer's purchase is written into the outbox as the claim
-     * before it is sent, so a failed send is retried; the claimant's own unsent
-     * entry takes the claim's reason; a purchase with no entry and no answer
-     * admits the claim. Only the claimant's own answered purchase is asked
-     * again by one direct send, never retried on its own.
+     * The claim is written into the outbox as the claimant's entry before it is
+     * sent, so a claim that gets no answer is retried like any other entry,
+     * also after a relaunch. One entry per purchase: the claim, the newer
+     * intent, takes over whatever entry the purchase had.
      */
     private suspend fun claim(purchaseToken: String, claim: PurchaseSend): SyncResult {
-        val route = withContext(NonCancellable) {
+        // The customer changed during the Restore: the claim is not made.
+        if (claim.distinctId != distinctId()) return SyncResult.UNAVAILABLE
+        val admitted = withContext(NonCancellable) {
             projectionRefresh.withLock {
-                val current = evidenceStore.load()[purchaseToken] ?: return@withLock null
-                val owed = current.pendingSend
-                // Whose purchase this is: its unsent entry's requester, else the
-                // owner the server last named, else the customer whose checkout made it.
-                val holder = owed?.distinctId ?: current.ownerDistinctId ?: current.buyerDistinctId
-                val admitsClaim = (holder != null && holder != claim.distinctId) ||
-                    (owed == null && !current.synced && !current.refused)
-                when {
-                    admitsClaim -> ClaimRoute.Entry(claim).takeIf {
-                        evidenceStore.upsert(current.copy(pendingSend = claim, syncAttempts = 0)).also { admitted ->
-                            if (admitted) withdrawnTokens -= purchaseToken
-                        }
-                    }
-                    owed != null -> owed.copy(reason = claim.reason.strongest(owed.reason)).let { upgraded ->
-                        ClaimRoute.Entry(upgraded).takeIf {
-                            evidenceStore.upsert(current.copy(pendingSend = upgraded))
-                        }
-                    }
-                    else -> ClaimRoute.Direct
-                }
-            }
-        } ?: return SyncResult.UNAVAILABLE
-        return when (route) {
-            is ClaimRoute.Entry -> sendOwed(purchaseToken, expected = route.send)
-            // The customer changed during the Restore: the claim is not sent.
-            ClaimRoute.Direct -> if (claim.distinctId != distinctId()) {
-                SyncResult.UNAVAILABLE
-            } else {
-                sendDirect(purchaseToken, claim)
+                val current = evidenceStore.load()[purchaseToken] ?: return@withLock false
+                evidenceStore.upsert(current.copy(pendingSend = claim, syncAttempts = 0))
             }
         }
+        if (!admitted) return SyncResult.UNAVAILABLE
+        // A claim of the buyer's own purchase replaces an entry that unlocked early.
+        refreshOptimisticProjection()
+        return sendOwed(purchaseToken, expected = claim)
     }
 
     /**
@@ -1909,15 +1833,6 @@ internal class PurchaseService(
             val owed = evidenceStore.load()[purchaseToken]?.pendingSend ?: return SyncResult.UNAVAILABLE
             if (answer.send == owed) return answer.result
             if (expected != null && owed != expected) return SyncResult.UNAVAILABLE
-        }
-    }
-
-    /** A claim of the claimant's own answered purchase: sent once, never retried on its own. */
-    private suspend fun sendDirect(purchaseToken: String, claim: PurchaseSend): SyncResult {
-        while (true) {
-            val (answer, owned) = sendInSlot(purchaseToken) { sendOnce(purchaseToken, claim) }
-                ?: return SyncResult.UNAVAILABLE
-            if (owned) return answer.result
         }
     }
 
@@ -1984,19 +1899,15 @@ internal class PurchaseService(
     }
 
     /**
-     * Send the token's owed entry, or [claim] instead of it, once and apply the
-     * server's answer. A 200, a 409 or a 400 answers the send; anything else
-     * (transport, 5xx, 401, 403) keeps an entry for another attempt.
+     * Send the token's owed entry once and apply the server's answer. A 200, a
+     * 409 or a 400 answers the send; anything else (transport, 5xx, 401, 403)
+     * keeps the entry for another attempt.
      */
-    private suspend fun sendOnce(purchaseToken: String, claim: PurchaseSend? = null): SendAnswer {
+    private suspend fun sendOnce(purchaseToken: String): SendAnswer {
         val evidence = evidenceStore.load()[purchaseToken] ?: return SendAnswer(null, SyncResult.UNAVAILABLE)
         // A purchase whose required Play signature never verified is never sent.
         if (!evidence.hasEligiblePurchaseSignature) return SendAnswer(null, SyncResult.UNAVAILABLE)
-        // Play stopped reporting it and the withdrawal was not written: the
-        // entry still on disk is not sent until Play reports the purchase again.
-        if (claim == null && purchaseToken in unreportedTokens) return SendAnswer(null, SyncResult.UNAVAILABLE)
-        val send = claim ?: evidence.pendingSend ?: return SendAnswer(null, SyncResult.UNAVAILABLE)
-        val isEntry = claim == null
+        val send = evidence.pendingSend ?: return SendAnswer(null, SyncResult.UNAVAILABLE)
         val outcome = try {
             synchronizer.sync(
                 evidence.copy(pendingSend = send),
@@ -2010,16 +1921,16 @@ internal class PurchaseService(
         }
         return when (outcome) {
             is PurchaseSyncOutcome.Rejected -> if (outcome.refused) {
-                answerRefusal(evidence, send, isEntry)
+                answerRefusal(evidence, send)
                 SendAnswer(send, SyncResult.REFUSED)
             } else {
-                if (isEntry) recordFailedSend(purchaseToken, send)
+                recordFailedSend(purchaseToken, send)
                 SendAnswer(send, SyncResult.UNAVAILABLE)
             }
             is PurchaseSyncOutcome.Accepted -> {
-                val result = answerAcceptance(evidence, send, outcome.response, isEntry)
+                val result = answerAcceptance(evidence, send, outcome.response)
                 // A 200 whose body the SDK cannot use keeps the entry, like any failed send.
-                if (result != SyncResult.ACCEPTED && isEntry) recordFailedSend(purchaseToken, send)
+                if (result != SyncResult.ACCEPTED) recordFailedSend(purchaseToken, send)
                 SendAnswer(send, result)
             }
         }
@@ -2043,7 +1954,6 @@ internal class PurchaseService(
         attempted: PurchaseEvidence,
         send: PurchaseSend,
         response: NuxieApi.PurchaseResponse,
-        isEntry: Boolean,
     ): SyncResult {
         val catalog = response.catalogProduct
         if (catalog == null && !attempted.catalogResolved) return SyncResult.UNAVAILABLE
@@ -2070,9 +1980,9 @@ internal class PurchaseService(
                     catalogResolved = current.catalogResolved || catalog != null,
                     ownerDistinctId = send.distinctId,
                     refused = false,
-                    // A direct claim leaves any entry admitted meanwhile.
-                    pendingSend = current.pendingSend.takeUnless { isEntry && it == send },
-                    syncAttempts = if (isEntry && current.pendingSend == send) 0 else current.syncAttempts,
+                    // An entry admitted while this send was out stays owed.
+                    pendingSend = current.pendingSend.takeUnless { it == send },
+                    syncAttempts = if (current.pendingSend == send) 0 else current.syncAttempts,
                     syncedCustomerId = response.customerId,
                     backendSyncedAtMillis = nowMillis(),
                 )
@@ -2107,21 +2017,20 @@ internal class PurchaseService(
     private suspend fun answerRefusal(
         attempted: PurchaseEvidence,
         send: PurchaseSend,
-        isEntry: Boolean,
     ) {
         val publication = withContext(NonCancellable) {
             projectionRefresh.withLock {
                 val current = evidenceStore.load()[attempted.purchaseToken] ?: return@withLock null
                 val owner = current.ownerDistinctId.takeUnless { it == send.distinctId }
-                val owed = current.pendingSend.takeUnless { isEntry && it == send }
+                val owed = current.pendingSend.takeUnless { it == send }
                 val answered = current.copy(
                     pendingSend = owed,
                     syncAttempts = if (owed == null) 0 else current.syncAttempts,
                     ownerDistinctId = owner,
                     refused = current.refused || (owner == null && owed == null),
                 )
-                // A refusal that cannot be written still ends the early unlock here.
-                if (!evidenceStore.upsert(answered)) withdrawnTokens += attempted.purchaseToken
+                // A refusal that cannot be written leaves the entry unanswered: it is sent again.
+                evidenceStore.upsert(answered)
                 // Access is whatever the profile requested below says; an earlier
                 // 200's Features hold only until it lands.
                 stageOptimisticProjectionLocked()
@@ -2199,7 +2108,7 @@ internal class PurchaseService(
      * proving the token absent can turn ITEM_NOT_OWNED into success.
      */
     private suspend fun reconcilePriorConsume(purchaseToken: String): Boolean =
-        when (val active = billing.queryActive(BillingClient.ProductType.INAPP)) {
+        when (val active = queryPlay(BillingClient.ProductType.INAPP)) {
             is ActivePurchasesResult.Success -> active.purchases.none {
                 it.purchaseToken == purchaseToken
             }
@@ -2283,56 +2192,8 @@ internal class PurchaseService(
                 ?: candidate.pinnedFeatureAllowances,
         )
         if (!evidenceStore.upsert(merged)) return null
-        // A purchase Play owns again owes a send again.
-        if (merged.pendingSend != null && current?.pendingSend == null) withdrawnTokens -= merged.purchaseToken
         return merged
     }
-
-    private suspend fun missingWithdrawalSnapshot(): Map<String, PurchaseEvidence> =
-        projectionRefresh.withLock {
-            val currentDistinctId = distinctId()
-            evidenceStore.load().values
-                .filter { it.isMissingWithdrawalCandidate(currentDistinctId) }
-                .associateBy { it.purchaseToken }
-        }
-
-    /** The buyer's own owed purchase Play may have stopped owning (a refund before any sync). */
-    private fun PurchaseEvidence.isMissingWithdrawalCandidate(currentDistinctId: String): Boolean =
-        !synced &&
-            pendingSend?.let {
-                it.distinctId == currentDistinctId && it.reason != PurchaseSyncReason.RESTORE
-            } == true &&
-            purchaseState == StoredPurchaseState.PURCHASED &&
-            (nuxieManaged || !consumable)
-
-    /**
-     * Withdraw the owed send of a purchase Play no longer reports, ending its
-     * early unlock. Play reporting it again admits a new send.
-     */
-    private suspend fun stageMissingWithdrawal(
-        activeTokens: Set<String>,
-        withdrawalSnapshot: Map<String, PurchaseEvidence>,
-    ): StagedWithdrawal =
-        withContext(NonCancellable) {
-            projectionRefresh.withLock {
-                val currentDistinctId = distinctId()
-                val revalidated = evidenceStore.load().values
-                    .filter { evidence ->
-                        evidence.isMissingWithdrawalCandidate(currentDistinctId) &&
-                            evidence.purchaseToken !in activeTokens &&
-                            withdrawalSnapshot[evidence.purchaseToken] == evidence
-                    }
-                val missing = synchronized(usageCoordinationLock) {
-                    val protectedTokens = purchaseUsageClaims + sending.keys
-                    revalidated.filter { it.purchaseToken !in protectedTokens }.also {
-                        withdrawnTokens += it.map(PurchaseEvidence::purchaseToken)
-                        unreportedTokens += it.map(PurchaseEvidence::purchaseToken)
-                    }
-                }
-                val persisted = missing.map { evidenceStore.upsert(it.copy(pendingSend = null)) }.all { it }
-                StagedWithdrawal(persisted, stageOptimisticProjectionLocked())
-            }
-        }
 
     private fun scheduleSendRetry(token: String, attempts: Int) {
         if (sendRetryJobs[token]?.isActive == true) return
@@ -2658,6 +2519,46 @@ internal class PurchaseService(
         productType,
     )
 
+    /**
+     * Ask Play for its active purchases of both types and republish the early
+     * unlock from what it reports. Returns the purchases Play reported.
+     */
+    internal suspend fun refreshPlayReport(): List<PlayPurchase> {
+        val active = mutableListOf<PlayPurchase>()
+        for (type in listOf(BillingClient.ProductType.SUBS, BillingClient.ProductType.INAPP)) {
+            val result = runCatching { queryPlay(type) }.getOrNull()
+            if (result is ActivePurchasesResult.Success) active += result.purchases
+        }
+        refreshOptimisticProjection()
+        return active
+    }
+
+    /** Ask Play for its active purchases of [productType], recording what it reports. */
+    private suspend fun queryPlay(@BillingClient.ProductType productType: String): ActivePurchasesResult =
+        billing.queryActive(productType).also { result ->
+            if (result is ActivePurchasesResult.Success) {
+                synchronized(playReported) {
+                    // This query is Play's latest word on its type, and on any
+                    // purchase only an update reported.
+                    playReported.entries.removeAll { (_, type) -> type == null || type == productType }
+                    result.purchases.forEach { playReported[it.purchaseToken] = productType }
+                }
+            }
+        }
+
+    /** Play delivered these purchases: it reports them until a query of their type says otherwise. */
+    private fun recordPlayUpdate(purchases: List<PlayPurchase>) {
+        synchronized(playReported) {
+            purchases.forEach { purchase ->
+                val type = purchase.products.firstNotNullOfOrNull { inFlight[it]?.product?.productType }
+                if (playReported[purchase.purchaseToken] == null) playReported[purchase.purchaseToken] = type
+            }
+        }
+    }
+
+    private fun reportedByPlay(purchaseToken: String): Boolean =
+        synchronized(playReported) { purchaseToken in playReported }
+
     private suspend fun refreshOptimisticProjection() {
         val publication = projectionRefresh.withLock { stageOptimisticProjectionLocked() }
         features.publishStaged(publication)
@@ -2727,9 +2628,8 @@ internal class PurchaseService(
         return optimisticFeatureProjection(
             distinctId = currentDistinctId,
             authorityScope = purchaseStorageScope,
-            evidence = evidence.filter {
-                it.purchaseToken !in withdrawnTokens
-            },
+            // The early unlock needs Play to report the purchase in its latest query.
+            evidence = evidence.filter { reportedByPlay(it.purchaseToken) },
             descriptors = descriptors,
             bindings = bindings,
         )

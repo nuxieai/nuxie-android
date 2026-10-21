@@ -279,7 +279,7 @@ class PurchaseEvidenceStoreTest {
     }
 
     @Test
-    fun aPreviousEntryRevokedBeforeTheServerAnsweredOwesNoSend(): Unit = kotlinx.coroutines.runBlocking {
+    fun aPreviousEntryRevokedBeforeTheServerAnsweredMigratesAsAnOrdinaryUnansweredEntry(): Unit = kotlinx.coroutines.runBlocking {
         val directory = Files.createTempDirectory("nuxie-purchase-evidence").toFile()
         try {
             // Written when Play stopped reporting a purchase the server never answered.
@@ -293,7 +293,11 @@ class PurchaseEvidenceStoreTest {
 
             val refunded = FilePurchaseEvidenceStore(directory).load().getValue("refunded")
 
-            assertEquals("Only a fresh Play observation admits it again", null, refunded.pendingSend)
+            // Whether it unlocks early depends only on Play's latest report.
+            assertEquals(
+                PurchaseSend(PurchaseSyncReason.SYNC, "requester", CustomerKind.IDENTIFIED),
+                refunded.pendingSend,
+            )
             assertEquals(null, refunded.ownerDistinctId)
             assertFalse(refunded.refused)
         } finally {

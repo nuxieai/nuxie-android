@@ -99,6 +99,8 @@ class PurchaseFeatureUseTest {
         val use = async(Dispatchers.Default) { fixture.use() }
         assertTrue(fixture.transport.firstRequestStarted.await(5, TimeUnit.SECONDS))
 
+        // Play no longer reports the purchase.
+        fixture.reportedByPlay.clear()
         assertEquals(RestoreResult.NoPurchases, fixture.service.restorePurchases())
         assertNotNull("A claimed spend keeps its owed send", fixture.store.load().getValue("token-1").pendingSend)
 
@@ -152,7 +154,7 @@ class PurchaseFeatureUseTest {
 
     @Test
     fun waitingCallerRechecksExactlyOneAfterClaimHandoff() = runBlocking {
-        val fixture = concurrentFixture(firstStatus = 503)
+        val fixture = concurrentFixture(firstStatus = 503, reportedByPlay = mutableSetOf("token-1", "token-2"))
         val first = async(Dispatchers.Default) { runCatching { fixture.use() } }
         assertTrue(fixture.transport.firstRequestStarted.await(5, TimeUnit.SECONDS))
         fixture.store.observeNextLoad()
@@ -206,7 +208,7 @@ class PurchaseFeatureUseTest {
 
     @Test
     fun multipleEligiblePurchasesFallBackInsteadOfChoosingFirst() = runTest {
-        val fixture = fallbackFixture()
+        val fixture = fallbackFixture(reportedByPlay = mutableSetOf("token-1", "token-2"))
         fixture.store.upsert(evidence(token = "token-1"))
         fixture.store.upsert(evidence(token = "token-2"))
 
@@ -226,8 +228,9 @@ class PurchaseFeatureUseTest {
     )
 
     @Test
-    fun revokedEvidenceIsNotEligible() = assertDisqualified(
-        evidence(withdrawn = true),
+    fun anOwedPurchasePlayDoesNotReportIsNotEligible() = assertDisqualified(
+        // Its entry is still owed, but Play's latest query does not report it.
+        evidence(token = "not-reported-by-play"),
     )
 
     @Test
@@ -429,11 +432,12 @@ class PurchaseFeatureUseTest {
             PurchaseSyncOutcome.Rejected()
         },
         billing: PlayBillingGateway = NoopBilling,
+        reportedByPlay: MutableSet<String> = mutableSetOf("token-1"),
     ): PurchaseService {
         kotlinx.coroutines.runBlocking { store.upsertProductMapping(featureDescriptor()) }
         return PurchaseService(
             ioDispatcher = kotlinx.coroutines.Dispatchers.Unconfined,
-            billing = billing,
+            billing = ReportingBilling(billing, reportedByPlay),
             evidenceStore = store,
             synchronizer = synchronizer,
             features = core.features,
@@ -446,7 +450,10 @@ class PurchaseFeatureUseTest {
             api = core.api,
             purchaseStorageScope = "scope-a",
             capturePurchaseSynced = capture,
-        )
+        ).also {
+            // The launch query: the early unlock needs Play to report the purchase.
+            kotlinx.coroutines.runBlocking { it.refreshPlayReport() }
+        }
     }
 
     private fun evidence(
@@ -457,8 +464,6 @@ class PurchaseFeatureUseTest {
         storeProductIds: List<String> = listOf("play-credit-pack"),
         purchaseState: StoredPurchaseState = StoredPurchaseState.PURCHASED,
         nuxieManaged: Boolean = true,
-        /** Play stopped owning it, so its owed send was withdrawn. */
-        withdrawn: Boolean = false,
         refused: Boolean = false,
         synced: Boolean = false,
         backendSyncedAtMillis: Long? = null,
@@ -479,7 +484,7 @@ class PurchaseFeatureUseTest {
         ownerDistinctId = buyerDistinctId.takeIf { synced || backendSyncedAtMillis != null },
         refused = refused,
         pendingSend = PurchaseSend(PurchaseSyncReason.PURCHASE, buyerDistinctId, CustomerKind.ANONYMOUS)
-            .takeUnless { withdrawn || refused || synced || backendSyncedAtMillis != null },
+            .takeUnless { refused || synced || backendSyncedAtMillis != null },
         acknowledged = false,
         firstSeenMillis = 1_784_462_300_000L,
         catalogResolved = true,
@@ -509,11 +514,11 @@ class PurchaseFeatureUseTest {
         fixture.core.stop()
     }
 
-    private fun fallbackFixture(): FallbackFixture {
+    private fun fallbackFixture(reportedByPlay: MutableSet<String> = mutableSetOf("token-1")): FallbackFixture {
         val transport = FakeTransport()
         val core = core(transport)
         val store = InMemoryPurchaseEvidenceStore()
-        return FallbackFixture(core, transport, store, service(core, store))
+        return FallbackFixture(core, transport, store, service(core, store, reportedByPlay = reportedByPlay))
     }
 
     private suspend fun syncFixture(outcome: PurchaseSyncOutcome): SyncFixture {
@@ -537,11 +542,20 @@ class PurchaseFeatureUseTest {
         )
     }
 
-    private fun concurrentFixture(firstStatus: Int): ConcurrentFixture {
+    private fun concurrentFixture(
+        firstStatus: Int,
+        reportedByPlay: MutableSet<String> = mutableSetOf("token-1"),
+    ): ConcurrentFixture {
         val transport = ControlledAtomicTransport(firstStatus)
         val core = core(transport)
         val store = ObservingEvidenceStore(evidence())
-        return ConcurrentFixture(core, transport, store, service(core, store))
+        return ConcurrentFixture(
+            core,
+            transport,
+            store,
+            service(core, store, reportedByPlay = reportedByPlay),
+            reportedByPlay,
+        )
     }
 
     private data class FallbackFixture(
@@ -579,6 +593,8 @@ class PurchaseFeatureUseTest {
         val transport: ControlledAtomicTransport,
         val store: ObservingEvidenceStore,
         val service: PurchaseService,
+        /** The tokens Play reports to its next query. */
+        val reportedByPlay: MutableSet<String>,
     ) {
         suspend fun use() = service.useFeatureWithPendingPurchase(
             distinctId = "customer-a",
@@ -697,6 +713,32 @@ class PurchaseFeatureUseTest {
         val eventId: String,
         val distinctId: String,
     )
+
+    /** Play reports [reported] as active one-time purchases, besides what [delegate] reports. */
+    private class ReportingBilling(
+        private val delegate: PlayBillingGateway,
+        private val reported: MutableSet<String>,
+    ) : PlayBillingGateway by delegate {
+        override suspend fun queryActive(productType: String): ActivePurchasesResult {
+            val result = delegate.queryActive(productType)
+            if (result !is ActivePurchasesResult.Success || productType != BillingClient.ProductType.INAPP) return result
+            val known = result.purchases.mapTo(mutableSetOf()) { it.purchaseToken }
+            return ActivePurchasesResult.Success(
+                result.purchases + (reported - known).map { token ->
+                    PlayPurchase(
+                        purchaseToken = token,
+                        packageName = "com.example.app",
+                        products = listOf("play-credit-pack"),
+                        state = StoredPurchaseState.PURCHASED,
+                        acknowledged = false,
+                        obfuscatedAccountId = playAccountId("customer-a"),
+                        originalJson = "{}",
+                        signature = "",
+                    )
+                },
+            )
+        }
+    }
 
     private object NoopBilling : PlayBillingGateway {
         override suspend fun launch(activity: Activity, request: CheckoutRequest): BillingResult = ok()
