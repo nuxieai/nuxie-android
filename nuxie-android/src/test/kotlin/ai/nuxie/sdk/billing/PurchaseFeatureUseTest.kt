@@ -177,6 +177,38 @@ class PurchaseFeatureUseTest {
     }
 
     @Test
+    fun aSupersededCommandAnswerReturnsItsResultButChangesNoFeatureAuthority() = runBlocking {
+        val fixture = concurrentFixture(firstStatus = 200)
+        val use = async(Dispatchers.Default) { runCatching { fixture.use() } }
+        assertTrue(fixture.transport.firstRequestStarted.await(5, TimeUnit.SECONDS))
+
+        // While the command is out, recovery changes what the entry sends (a new
+        // admission), and a newer profile gives the wallet its current balance.
+        val entry = fixture.store.load().getValue("token-1")
+        fixture.store.upsert(entry.copy(offerId = "launch", pendingSend = checkNotNull(entry.pendingSend).readmitted()))
+        fixture.core.features.hydrateProfile(
+            "customer-a",
+            Json.parseToJsonElement(
+                """{"features":[{"id":"credits","type":"creditSystem","balance":7,"unlimited":false}]}""",
+            ).jsonObject,
+        )
+        assertEquals(7.0, fixture.core.features.getCached("credits", null)!!.balance!!, 0.0)
+        // What the app sees now: the profile's balance, plus the early unlock of the still-owed entry.
+        val published = fixture.core.featureInfo.balance("credits")
+        fixture.transport.releaseFirst.countDown()
+
+        // The server consumed the Feature: the caller gets the command's result. Its
+        // answer is superseded, so it changes no Feature authority.
+        val result = checkNotNull(use.await().getOrThrow())
+        assertTrue(result.success)
+        assertEquals(1.0, result.authoritativeAccess!!.balance!!, 0.0)
+        assertEquals("The newer authority stands", 7.0, fixture.core.features.getCached("credits", null)!!.balance!!, 0.0)
+        assertEquals(published, fixture.core.featureInfo.balance("credits"))
+        assertNotNull("The newer admission stays owed", fixture.store.load().getValue("token-1").pendingSend)
+        fixture.core.stop()
+    }
+
+    @Test
     fun aSendHeldBackByAFeatureCommandCountsAFailedAttemptAndIsRetried() = runBlocking {
         // The launch sent the entry once without an answer; it is due again in a second.
         val fixture = concurrentFixture(firstStatus = 503, outboxRetryMillis = 1_000)

@@ -216,6 +216,30 @@ internal class FeatureService(
         }
     }
 
+    /**
+     * What a purchase-backed Feature command's result gives its caller, without
+     * changing any Feature authority or cache: for a command whose answer was
+     * superseded or could not be saved, which only asks for the profile again.
+     */
+    internal fun authoritativeUseResultAccess(
+        result: NuxieApi.FeatureCheckResult,
+        requestedFeatureId: String,
+        distinctId: String,
+        expectedScope: AuthoritativeUseScope,
+    ): FeatureAccess {
+        if (identity.distinctId() != distinctId || result.customerId != distinctId ||
+            expectedScope.distinctId != distinctId
+        ) {
+            throw kotlinx.coroutines.CancellationException()
+        }
+        return synchronized(lock) {
+            if (cacheDistinctId != distinctId || scopeGeneration != expectedScope.generation) {
+                throw kotlinx.coroutines.CancellationException()
+            }
+            authoritativeAccess(result, requestedFeatureId)
+        }
+    }
+
     /** Apply an ordinary server-confirmed usage balance without consuming the overlay. */
     suspend fun applyAuthoritativeUsageBalance(featureId: String, balance: Double, entityId: String?) {
         applyAuthoritativeUsageBalance(featureId, balance, entityId, identity.captureScope())
