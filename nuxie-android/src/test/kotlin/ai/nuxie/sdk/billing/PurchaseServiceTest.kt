@@ -4518,6 +4518,157 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun aRefusalThatCannotBeSavedStillEndsTheEarlyUnlockAndIsSentAgain() = runTest {
+        val fixture = fixture(this, initialRetryDelayMillis = 10, maxRetryDelayMillis = 10)
+        // The buyer's own checkout: no answer yet, so it unlocks early.
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
+        val checkout = async {
+            fixture.service.purchase(
+                activity(),
+                product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+                null,
+            )
+        }
+        runCurrent()
+        val bought = playPurchase("unsaved-refusal").forCheckout(fixture)
+        fixture.service.onPurchasesUpdated(okUpdate(bought))
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+
+        // The server refuses it, and saving that answer fails.
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(bought)
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected(refused = true) }
+        fixture.store.rejectEvidenceUpsert = { it.purchaseToken == "unsaved-refusal" && it.pendingSend == null }
+        fixture.service.recover()
+
+        assertFalse("Any answer ends the early unlock at once", fixture.core.featureInfo.isAllowed("pro"))
+        assertNotNull("Unsaved, the entry stays owed", fixture.store.load().getValue("unsaved-refusal").pendingSend)
+
+        // Once saving works, the entry is sent again and its answer saved.
+        fixture.store.rejectEvidenceUpsert = null
+        advanceTimeBy(100)
+        runCurrent()
+        val answered = fixture.store.load().getValue("unsaved-refusal")
+        assertNull(answered.pendingSend)
+        assertTrue(answered.refused)
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
+    fun authenticatedRestoreFailsWhenAPurchaseItReturnedNeverVerified() = runTest {
+        for (authenticated in listOf(true, false)) {
+            val fixture = fixture(this)
+            val owner = fixture.core.identity.distinctId()
+            val accepted = retainedRestoreEvidence(owner)
+            // Play returns it, but its required signature never verified, so it is never sent.
+            val unverified = owedRestoreEvidence(owner).copy(
+                purchaseToken = "unverified-token",
+                signatureVerificationRequired = true,
+                signatureVerified = false,
+            )
+            fixture.store.upsert(accepted)
+            fixture.store.upsert(unverified)
+            fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+                playPurchase(accepted.purchaseToken, obfuscatedAccountId = accountHash(owner)).copy(acknowledged = true),
+                playPurchase(unverified.purchaseToken, obfuscatedAccountId = accountHash(owner)).copy(acknowledged = true),
+            )
+            fixture.synchronizer = { accepted(owner, it) }
+
+            val result = fixture.service.restorePurchases(
+                expectedOwnerDistinctId = owner.takeIf { authenticated },
+            )
+
+            if (authenticated) {
+                assertTrue("Every purchase Play returned takes part: $result", result is RestoreResult.Failed)
+            } else {
+                assertEquals("The host API reports a partial restore as restored", RestoreResult.Restored, result)
+            }
+            assertEquals(listOf(accepted.purchaseToken), fixture.requests.map { it.first })
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun aStaleAnswerLeavesTheEntryANewerClaimAdmitted() = runTest {
+        val fixture = fixture(this)
+        val owner = fixture.core.identity.distinctId()
+        fixture.store.upsert(retainedRestoreEvidence(owner))
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("refresh-token", obfuscatedAccountId = accountHash(owner)).copy(acknowledged = true),
+        )
+        val firstSendStarted = CompletableDeferred<Unit>()
+        val answerTheFirstSend = CompletableDeferred<Unit>()
+        var sends = 0
+        fixture.synchronizer = {
+            sends += 1
+            if (sends == 1) {
+                firstSendStarted.complete(Unit)
+                answerTheFirstSend.await()
+                PurchaseSyncOutcome.Rejected(refused = true)
+            } else {
+                accepted(owner, it)
+            }
+        }
+
+        val first = async { fixture.service.restorePurchases() }
+        runCurrent()
+        firstSendStarted.await()
+        // A second Restore admits a newer claim, identical but for its admission,
+        // while the first claim's send is still out.
+        val second = async { fixture.service.restorePurchases() }
+        runCurrent()
+        answerTheFirstSend.complete(Unit)
+
+        assertTrue(first.await() is RestoreResult.Failed)
+        assertEquals(
+            "The first refusal was for a replaced entry: the newer claim is still sent",
+            RestoreResult.Restored,
+            second.await(),
+        )
+        assertEquals(
+            listOf(PurchaseSyncReason.RESTORE, PurchaseSyncReason.RESTORE),
+            fixture.requests.map { it.second.reason },
+        )
+        val restored = fixture.store.load().getValue("refresh-token")
+        assertEquals(owner, restored.ownerDistinctId)
+        assertNull(restored.pendingSend)
+        fixture.close()
+    }
+
+    @Test
+    fun eachKeptEntryIsSentAgainAtItsOwnDueTime() = runTest {
+        val fixture = fixture(this, initialRetryDelayMillis = 30_000, maxRetryDelayMillis = 3_600_000)
+        val customer = fixture.core.identity.distinctId()
+        // One entry has already failed six times; the other has never been sent.
+        fixture.store.upsert(owedRestoreEvidence(customer).copy(purchaseToken = "waiting", syncAttempts = 6))
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("waiting", obfuscatedAccountId = accountHash(customer)).copy(acknowledged = true),
+            playPurchase("fresh", obfuscatedAccountId = accountHash(customer)).copy(acknowledged = true),
+        )
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
+        fun sends(token: String) = fixture.requests.count { it.first == token }
+
+        fixture.service.recover()
+        assertEquals(1, sends("fresh"))
+        assertEquals(1, sends("waiting"))
+
+        // Ten seconds later a launch sends both again; "fresh" fails a second time,
+        // so it is next due 60 s after that failure, not 30 s after the first.
+        advanceTimeBy(10_000)
+        fixture.service.recover()
+        assertEquals(2, sends("fresh"))
+        advanceTimeBy(59_999)
+        runCurrent()
+        assertEquals("Not before its own due time", 2, sends("fresh"))
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(3, sends("fresh"))
+        assertEquals("The other entry waits out its own longer delay", 2, sends("waiting"))
+        fixture.close()
+    }
+
+    @Test
     fun authenticatedRestoreWaitsForBackendVerification() = runTest {
         val fixture = fixture(this)
         val owner = fixture.core.identity.distinctId()
