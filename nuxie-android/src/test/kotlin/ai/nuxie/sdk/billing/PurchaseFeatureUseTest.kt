@@ -191,6 +191,54 @@ class PurchaseFeatureUseTest {
     }
 
     @Test
+    fun aCatalogThatBecomesUnreadableMidSessionLetsNoUnsignedPurchaseThrough() = runBlocking {
+        val directory = temporaryFolder.newFolder()
+        val store = FilePurchaseEvidenceStore(directory)
+        // An owed purchase whose product needs Play's signature, which it never verified.
+        assertTrue(store.upsert(evidence(signatureVerified = false)))
+        assertTrue(
+            store.upsertProductMapping(
+                StoredProductMapping(
+                    storeProductId = "play-credit-pack",
+                    nuxieProductId = "credit-pack-signed",
+                    productType = BillingClient.ProductType.INAPP,
+                    consumable = false,
+                    licensingPublicKey = "licensing-key",
+                ),
+            ),
+        )
+        val billing = RecordingBilling()
+        val sent = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val core = core(FakeTransport())
+        val service = service(
+            core,
+            store,
+            synchronizer = PurchaseSynchronizer { evidence, _ ->
+                sent += evidence.purchaseToken
+                PurchaseSyncOutcome.Accepted(purchaseResponse("customer-a"))
+            },
+            billing = billing,
+        )
+        // The catalog requires the signature, so the launch does not send it.
+        withTimeout(5_000) { while ((store.load().getValue("token-1").syncAttempts) < 1) delay(10) }
+        assertTrue(sent.isEmpty())
+
+        // The catalog becomes unreadable mid-session, and Play delivers the purchase again.
+        File(directory, "purchase-catalog.json").writeText("[broken")
+        val entries = File(directory, "purchase-evidence.json").readBytes()
+        service.recover()
+        delay(100)
+
+        assertTrue("Without the catalog its signature requirement is not dropped: nothing is sent", sent.isEmpty())
+        assertEquals("Nor is it completed with Play", 0, billing.acknowledgeCalls + billing.consumeCalls)
+        assertTrue(
+            "The outbox is off: nothing is written",
+            entries.contentEquals(File(directory, "purchase-evidence.json").readBytes()),
+        )
+        core.stop()
+    }
+
+    @Test
     fun aDueEntryASpendHoldsCountsAFailedAttemptAndMovesOn() = runBlocking {
         val fixture = concurrentFixture(firstStatus = 200, outboxRetryMillis = 500)
         // The launch sent the entry and it got no answer, so it is due again in 500 ms.

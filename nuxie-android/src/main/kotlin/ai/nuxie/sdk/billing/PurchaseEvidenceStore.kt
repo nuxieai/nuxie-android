@@ -310,6 +310,14 @@ internal interface PurchaseEvidenceStore {
     /** False when the store cannot be read (it fails closed): it cannot save either. */
     suspend fun isReadable(): Boolean = true
     /**
+     * The same reads, telling a store that cannot be read apart from an empty
+     * one: null when it cannot be read. The outbox reads only through these, so
+     * a failed read is never taken for an empty store.
+     */
+    suspend fun loadOrNull(): Map<String, PurchaseEvidence>? = load()
+    suspend fun loadBindingsOrNull(): List<StoredPurchaseBinding>? = loadBindings()
+    suspend fun loadProductMappingsOrNull(): List<StoredProductMapping>? = loadProductMappings()
+    /**
      * At launch, before any outbox work. A file that was read but does not
      * decode is corrupt: it is moved aside to a quarantine name, never read
      * again, and an empty file takes its place. False only when a file cannot
@@ -448,6 +456,16 @@ internal class FilePurchaseEvidenceStore(
 
     /** An unreadable store reads as empty: nothing unlocks early and nothing is sent. */
     override suspend fun load(): Map<String, PurchaseEvidence> = onIo { synchronized(lock) { readUnlocked().orEmpty() } }
+
+    override suspend fun loadOrNull(): Map<String, PurchaseEvidence>? = onIo { synchronized(lock) { readUnlocked() } }
+
+    override suspend fun loadBindingsOrNull(): List<StoredPurchaseBinding>? = onIo {
+        synchronized(lock) { loadBindingsUnlocked() }
+    }
+
+    override suspend fun loadProductMappingsOrNull(): List<StoredProductMapping>? = onIo {
+        synchronized(lock) { loadMappingsUnlocked() }
+    }
 
     /** An unreadable store is never written: its file stays exactly as it is. */
     override suspend fun upsert(evidence: PurchaseEvidence): Boolean = onIo {
