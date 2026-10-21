@@ -144,6 +144,49 @@ class PurchaseFeatureUseTest {
     }
 
     @Test
+    fun aClaimThatWaitedIsDroppedOnceAnotherCustomersRestoreTookThePurchase() = runBlocking {
+        val transport = ControlledAtomicTransport(firstStatus = 200)
+        val core = core(transport)
+        val store = ObservingEvidenceStore(evidence())
+        val claims = java.util.concurrent.CopyOnWriteArrayList<Pair<String, PurchaseSyncReason>>()
+        val service = service(
+            core,
+            store,
+            synchronizer = PurchaseSynchronizer { _, request ->
+                claims += request.distinctId to request.reason
+                if (request.distinctId == "customer-b") {
+                    PurchaseSyncOutcome.Accepted(purchaseResponse("customer-b"))
+                } else {
+                    PurchaseSyncOutcome.Rejected()
+                }
+            },
+        )
+        withTimeout(5_000) { while ((store.load()["token-1"]?.syncAttempts ?: 0) < 1) delay(10) }
+
+        // A spend holds the purchase, and customer A's Restore claim queues behind it.
+        val use = async(Dispatchers.Default) { runCatching { service.useFeatureWithPendingPurchase("customer-a", "credits", 1.0, null, null) } }
+        assertTrue(transport.firstRequestStarted.await(5, TimeUnit.SECONDS))
+        val restoreA = async(Dispatchers.Default) { service.restorePurchases() }
+        delay(500)
+        // Customer B becomes current, and B's Restore claims the same purchase.
+        core.identity.setDistinctId("customer-b")
+        val restoreB = async(Dispatchers.Default) { service.restorePurchases() }
+        delay(500)
+        transport.releaseFirst.countDown()
+
+        use.await()
+        restoreA.await()
+        assertEquals(RestoreResult.Restored, restoreB.await())
+        assertEquals(
+            "A's claim from before it waited never reaches the server",
+            listOf("customer-b" to PurchaseSyncReason.RESTORE),
+            claims.filter { it.second == PurchaseSyncReason.RESTORE },
+        )
+        assertEquals("customer-b", store.load().getValue("token-1").ownerDistinctId)
+        core.stop()
+    }
+
+    @Test
     fun aDueEntryASpendHoldsCountsAFailedAttemptAndMovesOn() = runBlocking {
         val fixture = concurrentFixture(firstStatus = 200, outboxRetryMillis = 500)
         // The launch sent the entry and it got no answer, so it is due again in 500 ms.
