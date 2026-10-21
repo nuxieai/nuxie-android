@@ -1108,11 +1108,16 @@ internal class PurchaseService(
         ownerKind: CustomerKind,
         outcomeEventId: String?,
     ): PurchaseResult {
+        // As on iOS: the failed checkout's correlation goes first, so reconciling the
+        // owned purchase carries no checkout context and captures no completion; the
+        // checkout's only outcome is the already-owned failure below.
+        clearOutcomeCorrelation(outcomeEventId)
         withProcessingDecision { effects ->
             commitPurchaseOutcome(
                 classifyPurchaseObservation(owned, PurchaseOutcomeSource.STARTUP_RECOVERY),
                 effects,
                 admitsSend = false,
+                correlatesCheckout = false,
             )
         }
         if (distinctId() == owner && evidenceStore.load().containsKey(owned.purchaseToken)) {
@@ -1463,13 +1468,14 @@ internal class PurchaseService(
         observation: PlayPurchaseObservation,
         effects: ProcessingEffects,
         admitsSend: Boolean = true,
+        correlatesCheckout: Boolean = true,
     ): PurchaseEvidence? {
         val identity = PurchaseCommitIdentity.Evidence(observation.purchase.purchaseToken)
         purchaseCommitOperations[identity]?.let { ongoing ->
             effects.purchaseCommitWaits += ongoing
             return null
         }
-        return commitStoreOutcome(observation.purchase, observation.source, effects, admitsSend)
+        return commitStoreOutcome(observation.purchase, observation.source, effects, admitsSend, correlatesCheckout)
     }
 
     /** The sole interpreter for conclusions from every purchase source. */
@@ -1631,15 +1637,19 @@ internal class PurchaseService(
      * [admitsSend] is false for a purchase a claim (Restore or already owned)
      * observes: the claim is admitted as its entry, so the observation writes
      * no send of its own and nothing it finds unlocks early first.
+     * [correlatesCheckout] is false for the purchase an already-owned checkout
+     * reconciles: it is no checkout's outcome, so no checkout binding, outcome
+     * event or completion is attached to it.
      */
     private suspend fun commitStoreOutcome(
         purchase: PlayPurchase,
         source: PurchaseOutcomeSource,
         effects: ProcessingEffects,
         admitsSend: Boolean = true,
+        correlatesCheckout: Boolean = true,
     ): PurchaseEvidence? {
         val matchingFlight = purchase.products.firstNotNullOfOrNull(inFlight::get)
-        val isCheckoutOutcome = matchingFlight?.matches(purchase) == true
+        val isCheckoutOutcome = correlatesCheckout && matchingFlight?.matches(purchase) == true
         val checkoutFlight = matchingFlight?.takeIf { isCheckoutOutcome }
         // D2: evidence is durable before projection, facts, sync, acknowledge, or consume.
         // The observation is built over the entry as it stands and written in the
@@ -1669,7 +1679,9 @@ internal class PurchaseService(
                     }.singleOrNull()?.value
                 }
             val knownProductIdentity = existingProductIdentity ?: product?.productIdentity()
-            val accountBindings = bindings.filter { binding ->
+            // Checkout bindings correlate a delivery with the checkout that made it.
+            val checkoutBindings = if (correlatesCheckout) bindings else emptyList()
+            val accountBindings = checkoutBindings.filter { binding ->
                 binding.obfuscatedAccountId == purchase.obfuscatedAccountId &&
                     binding.storeProductId in purchase.products
             }
@@ -1677,7 +1689,7 @@ internal class PurchaseService(
                 it.productIdentity
             }
             val catalogBinding = exactBinding ?: selectFullProductMatch(
-                bindings.filter { it.storeProductId in purchase.products },
+                checkoutBindings.filter { it.storeProductId in purchase.products },
                 knownProductIdentity,
             ) { it.productIdentity }
             val catalogMapping = selectFullProductMatch(
@@ -1833,7 +1845,7 @@ internal class PurchaseService(
         }
 
         val identity = PurchaseCommitIdentity.Evidence(evidence.purchaseToken)
-        val needsCompletionCapture = evidence.buyerDistinctId == distinctId() &&
+        val needsCompletionCapture = correlatesCheckout && evidence.buyerDistinctId == distinctId() &&
             !evidence.completionEmitted
         val operation = if (needsCompletionCapture) effects.beginPurchaseCommit(identity) else null
         if (needsCompletionCapture && operation == null) return null
@@ -2559,7 +2571,18 @@ internal class PurchaseService(
                 properties["error"] = outcome.reason.message ?: outcome.reason.javaClass.simpleName
                 captureOrEmitPurchaseOutcome(
                     SystemEventNames.PURCHASE_FAILED,
-                    properties,
+                    // An already-owned checkout reports what iOS reports for it.
+                    if (outcome.reason is PurchaseAlreadyOwnedException) {
+                        linkedMapOf<String, Any?>(
+                            "product_id" to product.productId,
+                            "placement_id" to product.placementId,
+                            "store_product_id" to product.storeProductId,
+                            "reason" to "already_owned",
+                            "test_store" to outcome.testStore,
+                        ).filterValues { it != null }
+                    } else {
+                        properties
+                    },
                     outcomeEventId,
                     initiatingOwner,
                 )

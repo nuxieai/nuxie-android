@@ -5025,6 +5025,54 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun anAlreadyOwnedCheckoutReportsOnlyItsFailure() = runTest {
+        val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
+        val fixture = fixture(this, emissions = emissions)
+        fixture.core.identity.setDistinctId("buyer")
+        fixture.synchronizer = { accepted(it.requester, it) }
+        // Play owns the product for this account, but the device kept no record of it.
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("owned-token", obfuscatedAccountId = accountHash("buyer")),
+        )
+        fixture.billing.launchCode = BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED
+        val pro = product(licensingPublicKey = null)
+
+        val result = fixture.service.purchase(
+            activity(),
+            pro,
+            null,
+            outcomeCorrelation = CommerceOutcomeCorrelation("owned-checkout", "buyer", "checkout-journey"),
+        )
+
+        assertTrue("$result", (result as PurchaseResult.Failed).cause is PurchaseAlreadyOwnedException)
+        val outcomes = emissions.filter {
+            it.first == ai.nuxie.sdk.events.SystemEventNames.PURCHASE_COMPLETED ||
+                it.first == ai.nuxie.sdk.events.SystemEventNames.PURCHASE_FAILED
+        }
+        assertEquals(
+            "The checkout's only outcome is the already-owned failure, as on iOS",
+            listOf(
+                ai.nuxie.sdk.events.SystemEventNames.PURCHASE_FAILED to mapOf<String, Any?>(
+                    "product_id" to pro.productId,
+                    "placement_id" to pro.placementId,
+                    "store_product_id" to pro.storeProductId,
+                    "reason" to "already_owned",
+                    "test_store" to false,
+                ),
+            ),
+            outcomes,
+        )
+        assertEquals("Under the checkout's outcome correlation", listOf("owned-checkout"), fixture.purchaseCompletionEventIds)
+        assertEquals(
+            "The owned purchase is still sent as the customer's purchase claim",
+            listOf("owned-token" to PurchaseSyncRequest(PurchaseSyncReason.PURCHASE, "buyer", CustomerKind.IDENTIFIED)),
+            fixture.requests.toList(),
+        )
+        assertNull(fixture.store.load().getValue("owned-token").checkoutCompletionEventId)
+        fixture.close()
+    }
+
+    @Test
     fun anAlreadyOwnedAnswerInAPurchaseUpdateIsReconciledLikeALaunchResult() = runTest {
         val fixture = fixture(this)
         fixture.core.identity.setDistinctId("buyer")
