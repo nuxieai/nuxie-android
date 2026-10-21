@@ -30,8 +30,9 @@ class NuxieConfiguration(val apiKey: String) {
     var beforeSend: ((NuxieEvent) -> NuxieEvent?)? = null
 
     /**
-     * Enables no-charge Test Store checkout for development with a pk_test_ key.
-     * The host application must be debuggable; release applications reject setup.
+     * Enables no-charge Test Store checkout with a pk_test_ key, on any service.
+     * A purchase grants the Product's Features without revenue. The host
+     * application must be debuggable; release applications reject setup.
      */
     var testStoreEnabled: Boolean = false
 

@@ -57,6 +57,11 @@ import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 
+/** The server grants every Test Store purchase, with no Feature access to apply. */
+private val grantedTestStore = TestStoreGranting { _, _, _ ->
+    kotlinx.serialization.json.buildJsonObject { put("success", kotlinx.serialization.json.JsonPrimitive(true)) }
+}
+
 @RunWith(RobolectricTestRunner::class)
 @OptIn(ExperimentalCoroutinesApi::class)
 class PurchaseServiceTest {
@@ -2452,7 +2457,7 @@ class PurchaseServiceTest {
         val fixture = fixture(this, actions = actions, testStore = NuxieTestStore(object : TestStoreChoices {
             override suspend fun purchase(product: StoreProduct) = TestStorePurchaseChoice.PURCHASED
             override suspend fun restore() = TestStoreRestoreChoice.RESTORED
-        }))
+        }, grantedTestStore))
         val owner = fixture.core.identity.distinctId()
         val retained = PurchaseEvidence(
             purchaseToken = "real-token", packageName = "com.example.app",
@@ -2485,7 +2490,7 @@ class PurchaseServiceTest {
             val store = NuxieTestStore(object : TestStoreChoices {
                 override suspend fun purchase(product: StoreProduct) = choice
                 override suspend fun restore() = TestStoreRestoreChoice.RESTORED
-            })
+            }, grantedTestStore)
             val fixture = fixture(this, emissions = emissions, testStore = store)
             fixture.settings.delegate = object : NuxiePurchaseDelegate {
                 override suspend fun purchase(product: StoreProduct): PurchaseResult = error("Delegate called")
@@ -2522,13 +2527,36 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun testStorePurchaseUnlocksTheFeaturesTheServerGranted() = runTest {
+        val grants = mutableListOf<String>()
+        val store = NuxieTestStore(object : TestStoreChoices {
+            override suspend fun purchase(product: StoreProduct) = TestStorePurchaseChoice.PURCHASED
+            override suspend fun restore() = TestStoreRestoreChoice.RESTORED
+        }) { catalogProductId, _, _ ->
+            grants += catalogProductId
+            Json.parseToJsonElement(
+                """{"success":true,"customer_id":"customer-1","features":[{"id":"feature_pro","ext_id":"pro","type":"boolean","allowed":true,"balance":null,"unlimited":false}]}""",
+            ).jsonObject
+        }
+        val fixture = fixture(this, testStore = store)
+        val boolean = product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN)))
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+
+        assertEquals(PurchaseResult.Purchased, fixture.service.purchase(activity(), boolean, null))
+
+        assertEquals(listOf(boolean.productId), grants)
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+        assertTrue(fixture.store.load().isEmpty())
+    }
+
+    @Test
     fun correlatedTestStoreOutcomesRetainCustomerAcrossIdentityChanges() = runTest {
         for (choice in TestStorePurchaseChoice.entries) {
             val decision = CompletableDeferred<TestStorePurchaseChoice>()
             val fixture = fixture(this, testStore = NuxieTestStore(object : TestStoreChoices {
                 override suspend fun purchase(product: StoreProduct) = decision.await()
                 override suspend fun restore() = TestStoreRestoreChoice.RESTORED
-            }))
+            }, grantedTestStore))
             val owner = fixture.core.identity.distinctId()
             val pending = async {
                 fixture.service.purchase(activity(), product(), null,
@@ -2547,7 +2575,7 @@ class PurchaseServiceTest {
             val fixture = fixture(this, testStore = NuxieTestStore(object : TestStoreChoices {
                 override suspend fun purchase(product: StoreProduct) = TestStorePurchaseChoice.PURCHASED
                 override suspend fun restore() = decision.await()
-            }))
+            }, grantedTestStore))
             val owner = fixture.core.identity.distinctId()
             val pending = async {
                 fixture.service.restorePurchases(
@@ -2569,7 +2597,7 @@ class PurchaseServiceTest {
             val fixture = fixture(this, emissions = emissions, testStore = NuxieTestStore(object : TestStoreChoices {
                 override suspend fun purchase(product: StoreProduct) = TestStorePurchaseChoice.PURCHASED
                 override suspend fun restore() = choice
-            }))
+            }, grantedTestStore))
             fixture.settings.delegate = object : NuxiePurchaseDelegate {
                 override suspend fun purchase(product: StoreProduct): PurchaseResult = error("Delegate called")
                 override suspend fun restorePurchases(): RestoreResult = error("Delegate called")

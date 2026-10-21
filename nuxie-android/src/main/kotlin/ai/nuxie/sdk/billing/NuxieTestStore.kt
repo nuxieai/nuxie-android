@@ -1,8 +1,10 @@
 package ai.nuxie.sdk.billing
 
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.JsonObject
 
 internal enum class TestStorePurchaseChoice { PURCHASED, PENDING, CANCELLED, FAILED }
 internal enum class TestStoreRestoreChoice { RESTORED, NO_PURCHASES, FAILED }
@@ -14,9 +16,16 @@ internal interface TestStoreChoices {
     suspend fun restore(): TestStoreRestoreChoice
 }
 
+/** Asks the server to grant a Test Store purchase; answers with the `/purchase` body carrying access. */
+internal fun interface TestStoreGranting {
+    suspend fun grant(catalogProductId: String, transactionId: String, distinctId: String): JsonObject
+}
+
 internal data class TestStorePurchaseResponse(
     val result: PurchaseResult,
     val transactionId: String? = null,
+    /** The server's `/purchase` answer for a granted purchase. */
+    val access: JsonObject? = null,
 )
 
 internal data class TestStoreRestoreResponse(
@@ -24,8 +33,15 @@ internal data class TestStoreRestoreResponse(
     val products: List<StoreProduct> = emptyList(),
 )
 
-/** In-memory, customer-scoped purchases with no Play transaction or verification evidence. */
-internal class NuxieTestStore(private val choices: TestStoreChoices) {
+/**
+ * Customer-scoped purchases with no Play transaction or verification evidence.
+ * A purchase asks the server to grant the Product's Features, as RevenueCat's
+ * Test Store does; without that grant it fails.
+ */
+internal class NuxieTestStore(
+    private val choices: TestStoreChoices,
+    private val granting: TestStoreGranting,
+) {
     private val mutex = Mutex()
     private val purchases = mutableMapOf<String, MutableMap<String, StoreProduct>>()
 
@@ -34,10 +50,18 @@ internal class NuxieTestStore(private val choices: TestStoreChoices) {
         // initiating customer is retained even if the SDK identity changes.
         return when (if (activity == null) choices.purchase(product) else choices.purchase(product, activity)) {
             TestStorePurchaseChoice.PURCHASED -> {
+                val transactionId = "nuxie-test-${UUID.randomUUID()}"
+                val access = try {
+                    granting.grant(product.productId, transactionId, distinctId)
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (failure: Exception) {
+                    return TestStorePurchaseResponse(PurchaseResult.Failed(failure))
+                }
                 mutex.withLock {
                     purchases.getOrPut(distinctId) { linkedMapOf() }[product.productId] = product
                 }
-                TestStorePurchaseResponse(PurchaseResult.Purchased, "nuxie-test-${UUID.randomUUID()}")
+                TestStorePurchaseResponse(PurchaseResult.Purchased, transactionId, access)
             }
             TestStorePurchaseChoice.PENDING -> TestStorePurchaseResponse(PurchaseResult.Pending)
             TestStorePurchaseChoice.CANCELLED -> TestStorePurchaseResponse(PurchaseResult.Cancelled)

@@ -8,14 +8,15 @@ acknowledgement, and restore qualification. Passing one does not qualify the oth
 
 | Mode | Configuration | What it proves |
 | --- | --- | --- |
-| Nuxie Test Store | `testStoreEnabled = BuildConfig.DEBUG`, development environment, public test key | Signed preview display, native choice UI, purchase/restore outcomes and Journey routing; no Play transaction |
-| Google Play license test | `testStoreEnabled = false`, development environment, public test key, Nuxie-managed purchases | Real Play catalog and sheet, verified test purchase, durable recovery and store finalization |
+| Nuxie Test Store | `testStoreEnabled = BuildConfig.DEBUG`, public test key | Signed preview display, native choice UI, purchase/restore outcomes, granted Feature access and Journey routing; no Play transaction |
+| Google Play license test | `testStoreEnabled = false`, public test key, Nuxie-managed purchases | Real Play catalog and sheet, verified test purchase, durable recovery and store finalization |
 | Production candidate | `testStoreEnabled = false`, production configuration | Must be qualified separately with release configuration and approved purchase procedures |
 
 See [Test Store setup](../README.md#development-test-store) for all seven choices
 and the shipped release lint guard. Await `Nuxie.shutdownAndAwait()` before changing
-modes. Test Store history is in memory, customer-scoped and separate from native
-commerce evidence. A simulated purchase cannot stand in for a Play token.
+modes. A Test Store purchase grants its Product's Features on the server without
+revenue; its local restore history is in memory, customer-scoped and separate from
+native commerce evidence. A simulated purchase cannot stand in for a Play token.
 
 ## Prepare a Play license test
 
@@ -40,7 +41,6 @@ commerce evidence. A simulated purchase cannot stand in for a Play token.
 
 ```kotlin
 val configuration = NuxieConfiguration("pk_test_YOUR_KEY").apply {
-    environment = NuxieEnvironment.DEVELOPMENT
     testStoreEnabled = false
     purchaseHandlingMode = PurchaseHandlingMode.NUXIE_MANAGED
 }
