@@ -152,13 +152,25 @@ private data class StoredPurchaseBindingKey(
  * One owed `/purchase` send: the outbox entry for a purchase token. Its reason,
  * requester and customer kind are recorded when the send is admitted and are
  * never recomputed, so every retry, including after a restart, sends exactly
- * what was admitted.
+ * what was admitted. Every admission gets a fresh [admissionId]; each send
+ * carries the id it sent, and an answer changes the entry only while the id
+ * still matches.
  */
 internal data class PurchaseSend(
     val reason: PurchaseSyncReason,
     val distinctId: String,
     val customerKind: CustomerKind,
-)
+    /** [UNRECORDED_ADMISSION_ID] for an entry stored before admission ids. */
+    val admissionId: String = UNRECORDED_ADMISSION_ID,
+) {
+    companion object {
+        const val UNRECORDED_ADMISSION_ID = "unrecorded"
+
+        /** A new admission: this send with a fresh admission id. */
+        fun admit(reason: PurchaseSyncReason, distinctId: String, customerKind: CustomerKind) =
+            PurchaseSend(reason, distinctId, customerKind, java.util.UUID.randomUUID().toString())
+    }
+}
 
 /** Minimal Play evidence retained until /purchase and managed completion succeed. */
 internal data class PurchaseEvidence(
@@ -351,6 +363,7 @@ internal class FilePurchaseEvidenceStore(
                     "reason" to JsonPrimitive(send.reason.wireValue),
                     "distinctId" to JsonPrimitive(send.distinctId),
                     "customerKind" to JsonPrimitive(send.customerKind.wireValue),
+                    "admissionId" to JsonPrimitive(send.admissionId),
                 )))
             }
             evidence.context?.let { put("context", encodeContext(it)) }
@@ -469,7 +482,12 @@ internal class FilePurchaseEvidenceStore(
         val kind = raw.string("customerKind")?.let { value ->
             CustomerKind.entries.firstOrNull { it.wireValue == value }
         } ?: CustomerKind.IDENTIFIED
-        return PurchaseSend(reason, raw.string("distinctId") ?: return null, kind)
+        return PurchaseSend(
+            reason,
+            raw.string("distinctId") ?: return null,
+            kind,
+            raw.string("admissionId") ?: PurchaseSend.UNRECORDED_ADMISSION_ID,
+        )
     }
 
     private fun encodeBinding(binding: StoredPurchaseBinding): JsonObject = JsonObject(

@@ -22,6 +22,8 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -34,6 +36,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -109,6 +112,48 @@ class PurchaseFeatureUseTest {
         val accepted = fixture.store.load().getValue("token-1")
         assertTrue(accepted.synced)
         assertFalse(accepted.refused)
+        fixture.core.stop()
+    }
+
+    @Test
+    fun restoreWaitsForAClaimedSpendBeforeTakingOverItsEntry() = runBlocking {
+        val fixture = concurrentFixture(firstStatus = 200)
+        val use = async(Dispatchers.Default) { runCatching { fixture.use() } }
+        assertTrue(fixture.transport.firstRequestStarted.await(5, TimeUnit.SECONDS))
+
+        // A Restore claims the same purchase while the spend holds it.
+        val restore = async(Dispatchers.Default) { fixture.service.restorePurchases() }
+        val tookOver = withTimeoutOrNull(1_000) {
+            while (fixture.store.load().getValue("token-1").pendingSend?.reason != PurchaseSyncReason.RESTORE) {
+                delay(10)
+            }
+        }
+        assertNull("The claim waits for the spend", tookOver)
+        fixture.transport.releaseFirst.countDown()
+
+        val spent = use.await()
+        assertTrue("The server consumed the Feature: ${spent.exceptionOrNull()}", spent.getOrNull() != null)
+        restore.await()
+        fixture.core.stop()
+    }
+
+    @Test
+    fun aDueEntryASpendHoldsCountsAFailedAttemptAndMovesOn() = runBlocking {
+        val fixture = concurrentFixture(firstStatus = 200, outboxRetryMillis = 500)
+        // The entry gets no answer, so it is due again in 500 ms.
+        fixture.service.recover()
+        assertEquals(1, fixture.store.load().getValue("token-1").syncAttempts)
+
+        val use = async(Dispatchers.Default) { runCatching { fixture.use() } }
+        assertTrue(fixture.transport.firstRequestStarted.await(5, TimeUnit.SECONDS))
+        // The spend holds the purchase when the entry falls due.
+        assertEquals(1, fixture.store.load().getValue("token-1").syncAttempts)
+        val movedOn = withTimeoutOrNull(3_000) {
+            while (fixture.store.load().getValue("token-1").syncAttempts < 2) delay(10)
+        }
+        assertNotNull("The due entry it could not send counts one more attempt", movedOn)
+        fixture.transport.releaseFirst.countDown()
+        assertNotNull(use.await().getOrNull())
         fixture.core.stop()
     }
 
@@ -433,6 +478,7 @@ class PurchaseFeatureUseTest {
         },
         billing: PlayBillingGateway = NoopBilling,
         reportedByPlay: MutableSet<String> = mutableSetOf("token-1"),
+        outboxRetryMillis: Long = 30_000,
     ): PurchaseService {
         kotlinx.coroutines.runBlocking { store.upsertProductMapping(featureDescriptor()) }
         return PurchaseService(
@@ -450,6 +496,8 @@ class PurchaseFeatureUseTest {
             api = core.api,
             purchaseStorageScope = "scope-a",
             capturePurchaseSynced = capture,
+            outboxRetryInitialDelayMillis = outboxRetryMillis,
+            outboxRetryMaxDelayMillis = outboxRetryMillis * 4,
         ).also {
             // The launch query: the early unlock needs Play to report the purchase.
             kotlinx.coroutines.runBlocking { it.refreshPlayReport() }
@@ -545,6 +593,7 @@ class PurchaseFeatureUseTest {
     private fun concurrentFixture(
         firstStatus: Int,
         reportedByPlay: MutableSet<String> = mutableSetOf("token-1"),
+        outboxRetryMillis: Long = 30_000,
     ): ConcurrentFixture {
         val transport = ControlledAtomicTransport(firstStatus)
         val core = core(transport)
@@ -553,7 +602,7 @@ class PurchaseFeatureUseTest {
             core,
             transport,
             store,
-            service(core, store, reportedByPlay = reportedByPlay),
+            service(core, store, reportedByPlay = reportedByPlay, outboxRetryMillis = outboxRetryMillis),
             reportedByPlay,
         )
     }
