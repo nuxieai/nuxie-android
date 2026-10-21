@@ -4849,6 +4849,55 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun aStaleAcceptanceOnlyAsksForAProfileAndGrantsNothing() = runTest {
+        val fixture = fixture(this)
+        fixture.core.identity.setDistinctId("customer-a")
+        fixture.store.upsert(owedRestoreEvidence("customer-a", kind = CustomerKind.IDENTIFIED))
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(
+            playPurchase("refresh-token", obfuscatedAccountId = accountHash("customer-a")).copy(acknowledged = true),
+        )
+        val firstSendStarted = CompletableDeferred<Unit>()
+        val answerTheFirstSend = CompletableDeferred<Unit>()
+        var sends = 0
+        fixture.synchronizer = {
+            sends += 1
+            if (sends == 1) {
+                firstSendStarted.complete(Unit)
+                answerTheFirstSend.await()
+                // Its 200 grants "pro".
+                accepted("customer-a", it)
+            } else {
+                PurchaseSyncOutcome.Rejected()
+            }
+        }
+        // A's entry is out.
+        val launch = async { fixture.service.recover() }
+        runCurrent()
+        firstSendStarted.await()
+
+        // B's Restore takes the entry over mid-send.
+        fixture.core.identity.setDistinctId("customer-b")
+        fixture.core.featureInfo.publish(fixture.core.features.handleUserChange("customer-a", "customer-b"))
+        val restore = async { fixture.service.restorePurchases() }
+        runCurrent()
+        assertEquals("customer-b", fixture.store.load().getValue("refresh-token").pendingSend?.distinctId)
+
+        // Back to A when A's old 200 arrives.
+        fixture.core.identity.setDistinctId("customer-a")
+        fixture.core.featureInfo.publish(fixture.core.features.handleUserChange("customer-b", "customer-a"))
+        val refreshesBefore = fixture.authorityRefreshes
+        answerTheFirstSend.complete(Unit)
+        launch.await()
+
+        assertFalse("A stale 200 publishes no Features and holds none", fixture.core.featureInfo.isAllowed("pro"))
+        assertEquals("It only asks for A's profile", refreshesBefore + 1, fixture.authorityRefreshes)
+        assertEquals("B's claim is still owed", "customer-b", fixture.store.load().getValue("refresh-token").pendingSend?.distinctId)
+        restore.await()
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+        fixture.close()
+    }
+
+    @Test
     fun authenticatedRestoreWaitsForBackendVerification() = runTest {
         val fixture = fixture(this)
         val owner = fixture.core.identity.distinctId()
