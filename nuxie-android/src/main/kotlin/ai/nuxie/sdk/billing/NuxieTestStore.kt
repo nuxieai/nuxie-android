@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.billing
 
+import ai.nuxie.sdk.network.NuxieApi
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
@@ -45,20 +46,34 @@ internal class NuxieTestStore(
     private val mutex = Mutex()
     private val purchases = mutableMapOf<String, MutableMap<String, StoreProduct>>()
 
+    /**
+     * A grant whose outcome is unknown (the server may have committed it) keeps
+     * its transaction ID, so the customer's next Purchased of the same Product
+     * replays that grant instead of granting again.
+     */
+    private val unsettledTransactionIds = mutableMapOf<Pair<String, String>, String>()
+
     suspend fun purchase(product: StoreProduct, distinctId: String, activity: android.app.Activity? = null): TestStorePurchaseResponse {
         // Do not hold storage ownership while waiting for a human choice. The
         // initiating customer is retained even if the SDK identity changes.
         return when (if (activity == null) choices.purchase(product) else choices.purchase(product, activity)) {
             TestStorePurchaseChoice.PURCHASED -> {
-                val transactionId = "nuxie-test-${UUID.randomUUID()}"
+                val attempt = distinctId to product.productId
+                val transactionId = mutex.withLock {
+                    unsettledTransactionIds.getOrPut(attempt) { "nuxie-test-${UUID.randomUUID()}" }
+                }
                 val access = try {
                     granting.grant(product.productId, transactionId, distinctId)
                 } catch (cancellation: CancellationException) {
                     throw cancellation
                 } catch (failure: Exception) {
+                    if (failure is NuxieApi.TestStoreGrantRefusedException) {
+                        mutex.withLock { unsettledTransactionIds.remove(attempt) }
+                    }
                     return TestStorePurchaseResponse(PurchaseResult.Failed(failure))
                 }
                 mutex.withLock {
+                    unsettledTransactionIds.remove(attempt)
                     purchases.getOrPut(distinctId) { linkedMapOf() }[product.productId] = product
                 }
                 TestStorePurchaseResponse(PurchaseResult.Purchased, transactionId, access)
