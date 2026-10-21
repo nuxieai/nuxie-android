@@ -88,7 +88,7 @@ class PurchaseFeatureUseTest {
         fixture.store.upsert(evidence(packageName = "com.example.replaced"))
         fixture.transport.releaseFirst.countDown()
 
-        assertTrue(use.await().isFailure)
+        assertNotNull("The server consumed the Feature: its result reaches the caller", use.await().getOrNull())
         val replacement = fixture.store.load().getValue("token-1")
         assertEquals("com.example.replaced", replacement.packageName)
         assertFalse(replacement.synced)
@@ -154,6 +154,23 @@ class PurchaseFeatureUseTest {
         assertNotNull("The due entry it could not send counts one more attempt", movedOn)
         fixture.transport.releaseFirst.countDown()
         assertNotNull(use.await().getOrNull())
+        fixture.core.stop()
+    }
+
+    @Test
+    fun aConsumedCommandReturnsItsResultEvenWhenANewerAdmissionReplacedItsEntry() = runBlocking {
+        val fixture = concurrentFixture(firstStatus = 200)
+        val use = async(Dispatchers.Default) { runCatching { fixture.use() } }
+        assertTrue(fixture.transport.firstRequestStarted.await(5, TimeUnit.SECONDS))
+
+        // While the command is out, a newer admission takes the purchase's entry.
+        val newer = PurchaseSend.admit(PurchaseSyncReason.RESTORE, "customer-a", CustomerKind.IDENTIFIED)
+        fixture.store.upsert(fixture.store.load().getValue("token-1").copy(pendingSend = newer))
+        fixture.transport.releaseFirst.countDown()
+
+        val result = use.await()
+        assertNotNull("The server consumed the Feature: ${result.exceptionOrNull()}", result.getOrNull())
+        assertEquals("The newer admission stays owed", newer, fixture.store.load().getValue("token-1").pendingSend)
         fixture.core.stop()
     }
 
