@@ -175,6 +175,26 @@ class PurchaseFeatureUseTest {
     }
 
     @Test
+    fun aSendHeldBackByAFeatureCommandCountsAFailedAttemptAndIsRetried() = runBlocking {
+        val fixture = concurrentFixture(firstStatus = 503, outboxRetryMillis = 300)
+        val use = async(Dispatchers.Default) { runCatching { fixture.use() } }
+        assertTrue(fixture.transport.firstRequestStarted.await(5, TimeUnit.SECONDS))
+
+        // A launch while the command holds the purchase cannot send its entry.
+        fixture.service.recover()
+        assertEquals("Held back, it counts a failed attempt", 1, fixture.store.load().getValue("token-1").syncAttempts)
+
+        // The command fails, so it does not settle the entry: the retry sends it.
+        fixture.transport.releaseFirst.countDown()
+        assertTrue(use.await().isFailure)
+        val retried = withTimeoutOrNull(3_000) {
+            while (fixture.store.load().getValue("token-1").syncAttempts < 2) delay(10)
+        }
+        assertNotNull("Its retry was scheduled by its own due time", retried)
+        fixture.core.stop()
+    }
+
+    @Test
     fun concurrentSpendWaitsThenReevaluatesAfterTheFirstSucceeds() = runBlocking {
         val fixture = concurrentFixture(firstStatus = 200)
         val first = async(Dispatchers.Default) { fixture.use() }

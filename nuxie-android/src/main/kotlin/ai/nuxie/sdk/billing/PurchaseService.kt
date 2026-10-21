@@ -1883,7 +1883,7 @@ internal class PurchaseService(
     private suspend fun sendOwed(purchaseToken: String, expected: PurchaseSend? = null): SyncResult {
         while (true) {
             val (answer, owned) = sendInSlot(purchaseToken) { sendOnce(purchaseToken) }
-                ?: return SyncResult.UNAVAILABLE
+                ?: return heldBack(purchaseToken)
             if (expected != null && answer.send == expected) return answer.result
             // This caller had the slot and nothing was sent: there is nothing to wait for.
             if (owned && (expected == null || answer.send == null)) return answer.result
@@ -1948,6 +1948,16 @@ internal class PurchaseService(
         synchronized(usageCoordinationLock) {
             if (sending[purchaseToken] === operation) sending.remove(purchaseToken)
         }
+    }
+
+    /**
+     * A purchase-backed Feature command holds the purchase, so its entry cannot
+     * be sent now: that counts one more failed attempt and schedules the entry's
+     * retry by its own due time, in case the command's answer does not settle it.
+     */
+    private suspend fun heldBack(purchaseToken: String): SyncResult {
+        evidenceStore.load()[purchaseToken]?.pendingSend?.let { recordFailedSend(purchaseToken, it) }
+        return SyncResult.UNAVAILABLE
     }
 
     /** Send every entry kept after a failed send again now. */
@@ -2309,11 +2319,8 @@ internal class PurchaseService(
             delay(outboxRetryDelay(attempts))
             // ConcurrentMap's own remove(key, value): available on every supported API level.
             (sendRetryJobs as java.util.concurrent.ConcurrentMap<String, Job>).remove(token, coroutineContext[Job])
-            val due = evidenceStore.load()[token]?.pendingSend ?: return@launch
-            val held = synchronized(usageCoordinationLock) { token in purchaseUsageClaims }
-            // A due entry a purchase-backed spend holds cannot be sent now: it
-            // counts one more failed attempt, so its time moves on.
-            if (held) recordFailedSend(token, due) else sendOwed(token)
+            // A held-back send counts a failed attempt in sendOwed itself.
+            if (evidenceStore.load()[token]?.pendingSend != null) sendOwed(token)
         }
     }
 
