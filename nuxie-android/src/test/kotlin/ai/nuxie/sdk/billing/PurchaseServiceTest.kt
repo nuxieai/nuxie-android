@@ -5073,6 +5073,75 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun aRecoveryAfterAnAlreadyOwnedCheckoutEmitsNoCompletion() = runTest {
+        val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
+        val fixture = fixture(this, emissions = emissions)
+        fixture.core.identity.setDistinctId("buyer")
+        fixture.synchronizer = { accepted(it.requester, it) }
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("owned-token", obfuscatedAccountId = accountHash("buyer")),
+        )
+        fixture.billing.launchCode = BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED
+        fixture.service.purchase(
+            activity(),
+            product(licensingPublicKey = null),
+            null,
+            outcomeCorrelation = CommerceOutcomeCorrelation("owned-checkout", "buyer", "checkout-journey"),
+        )
+
+        // A launch recovery finds the purchase again: it carries no checkout's context.
+        fixture.service.recover()
+
+        assertFalse(
+            "No completion counts as a conversion for a checkout Play refused as already owned",
+            emissions.any { it.first == ai.nuxie.sdk.events.SystemEventNames.PURCHASE_COMPLETED },
+        )
+        fixture.close()
+    }
+
+    @Test
+    fun aCheckoutsBindingGivesNoContextOnceTheCheckoutHasEnded() = runTest {
+        val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
+        val fixture = fixture(this, emissions = emissions)
+        val customer = fixture.core.identity.distinctId()
+        fixture.synchronizer = { accepted(it.requester, it) }
+        // The customer cancels a checkout; its binding stays only as catalog facts.
+        fixture.billing.launchCode = BillingClient.BillingResponseCode.USER_CANCELED
+        assertEquals(PurchaseResult.Cancelled, fixture.service.purchase(activity(), product(licensingPublicKey = null), null))
+        assertFalse(fixture.store.loadBindings().single().awaitingCheckout)
+
+        // A purchase of that product for the customer's account turns up in a scan.
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("elsewhere-token", obfuscatedAccountId = accountHash(customer)),
+        )
+        fixture.service.recover()
+
+        assertEquals(listOf("elsewhere-token"), fixture.requests.map { it.first }.distinct())
+        assertNull("No checkout made it", fixture.store.load().getValue("elsewhere-token").buyerDistinctId)
+        assertFalse(emissions.any { it.first == ai.nuxie.sdk.events.SystemEventNames.PURCHASE_COMPLETED })
+        fixture.close()
+    }
+
+    @Test
+    fun aPurchaseALaunchScanFindsEmitsNoCompletion() = runTest {
+        val emissions = mutableListOf<Pair<String, Map<String, Any?>>>()
+        val fixture = fixture(this, emissions = emissions)
+        val customer = fixture.core.identity.distinctId()
+        fixture.synchronizer = { accepted(it.requester, it) }
+        // Play owns a purchase of this customer's account that no checkout on this device made.
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("scanned-token", obfuscatedAccountId = accountHash(customer)),
+        )
+
+        fixture.service.recover()
+        fixture.service.recover()
+
+        assertEquals("It is still sent", listOf("scanned-token"), fixture.requests.map { it.first }.distinct())
+        assertFalse(emissions.any { it.first == ai.nuxie.sdk.events.SystemEventNames.PURCHASE_COMPLETED })
+        fixture.close()
+    }
+
+    @Test
     fun anAlreadyOwnedAnswerInAPurchaseUpdateIsReconciledLikeALaunchResult() = runTest {
         val fixture = fixture(this)
         fixture.core.identity.setDistinctId("buyer")
