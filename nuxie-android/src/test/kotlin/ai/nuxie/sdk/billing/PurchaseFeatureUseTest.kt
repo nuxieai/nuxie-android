@@ -317,7 +317,7 @@ class PurchaseFeatureUseTest {
         val firstCore = core(FakeTransport())
         service(firstCore, FilePurchaseEvidenceStore(directory), ownedOnPlay = mutableSetOf())
         withTimeout(5_000) {
-            while (quarantinedFiles(directory, "purchase-evidence").none { first.contentEquals(it.readBytes()) }) delay(10)
+            while (quarantinedBytes(directory).none { first.contentEquals(it) }) delay(10)
         }
         firstCore.stop()
 
@@ -326,11 +326,11 @@ class PurchaseFeatureUseTest {
         val secondCore = core(FakeTransport())
         service(secondCore, FilePurchaseEvidenceStore(directory), ownedOnPlay = mutableSetOf())
         withTimeout(5_000) {
-            while (quarantinedFiles(directory, "purchase-evidence").map { it.readBytes() }.let { files ->
-                    files.size != 1 || !second.contentEquals(files.single())
-                }
-            ) delay(10)
+            while (quarantinedBytes(directory).let { files -> files.size != 1 || !second.contentEquals(files.single()) }) {
+                delay(10)
+            }
         }
+        assertEquals("Only the newest quarantined file is kept", 1, quarantinedFiles(directory, "purchase-evidence").size)
         secondCore.stop()
     }
 
@@ -378,6 +378,10 @@ class PurchaseFeatureUseTest {
         )
         return file.readBytes()
     }
+
+    /** The quarantined entries files' bytes; one deleted while it is read is skipped. */
+    private fun quarantinedBytes(directory: File): List<ByteArray> =
+        quarantinedFiles(directory, "purchase-evidence").mapNotNull { runCatching { it.readBytes() }.getOrNull() }
 
     private fun quarantinedFiles(directory: File, store: String): List<File> =
         directory.listFiles().orEmpty().filter { it.name.startsWith("$store.unreadable-") && it.name.endsWith(".json") }
