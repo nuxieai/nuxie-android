@@ -1387,6 +1387,83 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun aFinishIsRecordedOnTheEntryThatHoldsThePurchaseNow() = runTest {
+        val fixture = fixture(this)
+        val customer = fixture.core.identity.distinctId()
+        val purchase = playPurchase("finish-token", obfuscatedAccountId = accountHash(customer))
+        fixture.synchronizer = { evidence ->
+            if (evidence.requester == customer) accepted(customer, evidence) else PurchaseSyncOutcome.Rejected()
+        }
+        // The server accepts the purchase; its acknowledgement with Play is out.
+        val acknowledging = CompletableDeferred<Unit>()
+        val finishAcknowledging = CompletableDeferred<Unit>()
+        fixture.billing.acknowledgeStarted = acknowledging
+        fixture.billing.holdAcknowledge = finishAcknowledging
+        val delivery = async { fixture.service.onPurchasesUpdated(okUpdate(purchase)) }
+        runCurrent()
+        acknowledging.await()
+
+        // Another customer's Restore admits a new claim for the purchase meanwhile
+        // (its send waits for the one still finishing).
+        fixture.core.identity.setDistinctId("customer-b")
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(purchase)
+        val restore = async { fixture.service.restorePurchases() }
+        runCurrent()
+        val claim = fixture.store.load().getValue("finish-token").pendingSend
+        assertEquals(PurchaseSyncReason.RESTORE, claim?.reason)
+        assertEquals("customer-b", claim?.distinctId)
+
+        // The finish is a fact about the purchase: it is recorded on the entry
+        // that holds the purchase now, whatever its admission.
+        finishAcknowledging.complete(Unit)
+        delivery.await()
+        restore.await()
+        val entry = fixture.store.load().getValue("finish-token")
+        assertTrue(entry.acknowledged)
+        assertEquals("The claim stays owed", claim, entry.pendingSend)
+        assertEquals("customer-b", fixture.requests.last().second.distinctId)
+        fixture.close()
+    }
+
+    @Test
+    fun aCapturedCompletionIsRecordedOnTheEntryThatHoldsThePurchaseNow() = runTest {
+        val capturing = CompletableDeferred<Unit>()
+        val finishCapturing = CompletableDeferred<Unit>()
+        val fixture = fixture(this, capturePurchaseEventOverride = { _, _, _, _ ->
+            capturing.complete(Unit)
+            finishCapturing.await()
+            true
+        })
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
+        // The checkout's completion is being captured.
+        val checkout = async { fixture.service.purchase(activity(), product(licensingPublicKey = null), null) }
+        runCurrent()
+        val purchase = playPurchase("completion-token").forCheckout(fixture)
+        val delivery = async { fixture.service.onPurchasesUpdated(okUpdate(purchase)) }
+        runCurrent()
+        capturing.await()
+
+        // Another customer's Restore admits a new claim for the purchase meanwhile.
+        fixture.core.identity.setDistinctId("customer-b")
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(purchase)
+        fixture.service.restorePurchases()
+        val claim = fixture.store.load().getValue("completion-token").pendingSend
+        assertEquals(PurchaseSyncReason.RESTORE, claim?.reason)
+        assertEquals("customer-b", claim?.distinctId)
+
+        // The captured completion is a fact about the purchase: it is recorded on
+        // the entry that holds the purchase now, whatever its admission.
+        finishCapturing.complete(Unit)
+        delivery.await()
+        checkout.await()
+        val entry = fixture.store.load().getValue("completion-token")
+        assertTrue(entry.completionEmitted)
+        assertEquals("customer-b", entry.pendingSend?.distinctId)
+        assertEquals(PurchaseSyncReason.RESTORE, entry.pendingSend?.reason)
+        fixture.close()
+    }
+
+    @Test
     fun aLaterDeliveryReadsTheEntryNotAnEarlierCommit() = runTest {
         val actions = mutableListOf<String>()
         val fixture = fixture(this, actions = actions)
@@ -5425,8 +5502,17 @@ class PurchaseServiceTest {
             return ActivePurchasesResult.Success(answer)
         }
 
+        /** Signalled when an acknowledgement starts; the next one is held until [holdAcknowledge] completes. */
+        var acknowledgeStarted: CompletableDeferred<Unit>? = null
+        var holdAcknowledge: CompletableDeferred<Unit>? = null
+
         override suspend fun acknowledge(purchaseToken: String): BillingResult {
             actions += "ack"
+            acknowledgeStarted?.complete(Unit)
+            holdAcknowledge?.let { hold ->
+                holdAcknowledge = null
+                hold.await()
+            }
             return billingResult(
                 if (acknowledgeCodes.isEmpty()) BillingClient.BillingResponseCode.OK
                 else acknowledgeCodes.removeAt(0),
