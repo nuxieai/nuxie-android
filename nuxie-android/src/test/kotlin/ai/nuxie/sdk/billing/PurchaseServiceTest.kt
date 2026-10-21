@@ -1247,6 +1247,70 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun aLaterDeliveryReadsTheEntryNotAnEarlierCommit() = runTest {
+        val actions = mutableListOf<String>()
+        val fixture = fixture(this, actions = actions)
+        fun count(action: String) = actions.count { it == action }
+        // The checkout commits and delivers its completion, but its send gets no answer.
+        fixture.synchronizer = {
+            actions += "sync"
+            PurchaseSyncOutcome.Rejected()
+        }
+        val checkout = async { fixture.service.purchase(activity(), product(), null) }
+        runCurrent()
+        val purchase = playPurchase("redelivered").forCheckout(fixture)
+        fixture.service.onPurchasesUpdated(okUpdate(purchase))
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        assertEquals(1, count("sync"))
+
+        // Play delivers it again in the same process. Its entry is unanswered, so
+        // it is sent: no earlier commit stands in for the entry.
+        fixture.synchronizer = {
+            actions += "sync"
+            accepted(it.requester, it)
+        }
+        fixture.service.onPurchasesUpdated(okUpdate(purchase))
+        assertEquals(2, count("sync"))
+        assertNull(fixture.store.load().getValue("redelivered").pendingSend)
+        val acknowledged = count("ack")
+
+        // Answered, it is the purchase's record: a further delivery reads its flags
+        // and sends, finishes and delivers nothing again.
+        fixture.service.onPurchasesUpdated(okUpdate(purchase))
+        assertEquals(2, count("sync"))
+        assertEquals(acknowledged, count("ack"))
+        assertEquals(1, count(ai.nuxie.sdk.events.SystemEventNames.PURCHASE_COMPLETED))
+        fixture.close()
+    }
+
+    @Test
+    fun anotherCustomersSettledRecordGivesWayToThisCustomersCheckout() = runTest {
+        val fixture = fixture(this)
+        fixture.core.identity.setDistinctId("customer-b")
+        // Customer A's purchase is only a record here: answered, acknowledged with
+        // Play, and its checkout completion delivered.
+        fixture.store.upsert(retainedRestoreEvidence("customer-a"))
+        fixture.synchronizer = { accepted(it.requester, it) }
+
+        // Play delivers that purchase to B's checkout.
+        val checkout = async { fixture.service.purchase(activity(), product(), null) }
+        runCurrent()
+        fixture.service.onPurchasesUpdated(okUpdate(playPurchase("refresh-token").forCheckout(fixture)))
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+
+        assertEquals(
+            "B's checkout starts the purchase's entry afresh and sends it as B's purchase",
+            listOf("refresh-token" to PurchaseSyncRequest(PurchaseSyncReason.PURCHASE, "customer-b", CustomerKind.IDENTIFIED)),
+            fixture.requests.toList(),
+        )
+        val entry = fixture.store.load().getValue("refresh-token")
+        assertEquals("customer-b", entry.ownerDistinctId)
+        assertEquals("customer-b", entry.buyerDistinctId)
+        assertTrue(entry.completionEmitted)
+        fixture.close()
+    }
+
+    @Test
     fun failedPurchaseEventCaptureRetriesTheSameCommitBeforeProjectionOrSync() = runTest {
         val actions = mutableListOf<String>()
         val captureResults = mutableListOf(false, true)
@@ -3366,13 +3430,6 @@ class PurchaseServiceTest {
                     runCurrent()
                     assertEquals(name, 2, bodies.size)
                 }
-                "retry_unrecorded" -> {
-                    fixture.store.upsert(unrecordedEntry("departed-customer"))
-                    fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
-                        playPurchase("outbox-token", obfuscatedAccountId = accountHash("departed-customer")),
-                    )
-                    fixture.service.recover()
-                }
                 else -> error("Unknown outbox producer $producer in $name")
             }
             drivenProducers += producer
@@ -3389,29 +3446,6 @@ class PurchaseServiceTest {
             fixture.close()
         }
         assertEquals(sends.map { it.getValue("producer").jsonPrimitive.content }.toSet(), drivenProducers)
-    }
-
-    /** A stored entry written before its kind and reason were recorded, decoded by the real store. */
-    private suspend fun unrecordedEntry(requester: String): PurchaseEvidence {
-        val directory = temporaryFolder.newFolder()
-        val writer = FilePurchaseEvidenceStore(directory, Dispatchers.Unconfined)
-        assertTrue(writer.upsert(
-            owedRestoreEvidence(requester).copy(
-                purchaseToken = "outbox-token",
-                productType = BillingClient.ProductType.INAPP,
-                obfuscatedAccountId = accountHash(requester),
-            ),
-        ))
-        val file = File(directory, "purchase-evidence.json")
-        val stored = Json.parseToJsonElement(file.readText()).jsonObject
-        val entry = stored.getValue("outbox-token").jsonObject
-        val send = entry.getValue("pendingSend").jsonObject
-        file.writeText(JsonObject(stored + ("outbox-token" to JsonObject(
-            entry + ("pendingSend" to JsonObject(send - "reason" - "customerKind")),
-        ))).toString())
-        val decoded = FilePurchaseEvidenceStore(directory, Dispatchers.Unconfined).load().getValue("outbox-token")
-        assertEquals(PurchaseSend(PurchaseSyncReason.SYNC, requester, CustomerKind.IDENTIFIED), decoded.pendingSend)
-        return decoded
     }
 
     @Test

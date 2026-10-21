@@ -160,7 +160,7 @@ internal data class PurchaseSend(
     val reason: PurchaseSyncReason,
     val distinctId: String,
     val customerKind: CustomerKind,
-    /** [UNRECORDED_ADMISSION_ID] for an entry stored before admission ids. */
+    /** Every stored send has one; [UNRECORDED_ADMISSION_ID] marks a send built without an admission. */
     val admissionId: String = UNRECORDED_ADMISSION_ID,
 ) {
     companion object {
@@ -172,7 +172,14 @@ internal data class PurchaseSend(
     }
 }
 
-/** Minimal Play evidence retained until /purchase and managed completion succeed. */
+/**
+ * One Play purchase's durable outbox entry, keyed by its purchase token: the
+ * only purchase state the SDK keeps. Once the server answers it, it stays as
+ * the purchase's record with its own flags (answered, acknowledged or consumed
+ * with Play, checkout completion delivered), so a later delivery of the same
+ * purchase reads them instead of sending, finishing or delivering again. It
+ * stores no signed purchase: what is sent is the token and its Play facts.
+ */
 internal data class PurchaseEvidence(
     val purchaseToken: String,
     val packageName: String,
@@ -224,6 +231,29 @@ internal data class PurchaseEvidence(
 ) {
     /** The server accepted this purchase for its owner. */
     val synced: Boolean get() = ownerDistinctId != null
+
+    /** Accepted and still to be acknowledged or consumed with Play by Nuxie. */
+    val needsManagedCompletion: Boolean
+        get() = nuxieManaged && catalogResolved && if (consumable) !consumed else !acknowledged
+
+    /**
+     * Only the purchase's record: the server answered it (it is never sent
+     * again), it is done with Play, and its checkout completion is delivered or
+     * not owed. These flags, not any state kept beside the entry, decide what a
+     * later delivery of the purchase still does.
+     */
+    val isSettled: Boolean
+        get() = pendingSend == null && (synced || refused) &&
+            !(synced && needsManagedCompletion) &&
+            (completionEmitted || buyerDistinctId == null || refused)
+
+    /**
+     * Another customer's settled record is only the record of their purchase,
+     * so it gives way to [requester]'s checkout: the entry starts afresh.
+     * Any other entry of another customer stays theirs.
+     */
+    fun givesWayTo(requester: String?): Boolean =
+        requester != null && isSettled && (ownerDistinctId ?: buyerDistinctId) != requester
 }
 
 internal interface PurchaseEvidenceStore {
@@ -413,9 +443,11 @@ internal class FilePurchaseEvidenceStore(
     )
 
     /**
-     * A row written before the outbox (it has no `refused`; its answer was in
-     * `synced` and `permanentlyRejected`) is not migrated: it is ignored, and
-     * the next write drops it.
+     * Only the current format is read. A row in a previous SDK's format (one
+     * written before the outbox has no `refused`; one whose owed send lacks its
+     * reason, kind or admission) is not migrated: it is ignored, and the next
+     * write drops it. Play redelivers what it still owns, which then goes
+     * through the outbox normally.
      */
     private fun decodeEvidence(raw: JsonObject): PurchaseEvidence? = runCatching {
         PurchaseEvidence(
@@ -433,7 +465,7 @@ internal class FilePurchaseEvidenceStore(
             buyerDistinctId = raw.string("buyerDistinctId"),
             ownerDistinctId = raw.string("ownerDistinctId"),
             refused = (raw["refused"] as? JsonPrimitive)?.booleanOrNull ?: return null,
-            pendingSend = (raw["pendingSend"] as? JsonObject)?.let(::decodeSend),
+            pendingSend = raw["pendingSend"]?.let { (it as? JsonObject)?.let(::decodeSend) ?: return null },
             context = (raw["context"] as? JsonObject)?.let(::decodeContext),
             pinnedFeatureAllowances = (raw["pinnedFeatureAllowances"] as? JsonArray)
                 ?.mapNotNull(::decodeAllowance),
@@ -457,23 +489,15 @@ internal class FilePurchaseEvidenceStore(
         )
     }.getOrNull()
 
-    /**
-     * An entry stored before its reason and kind were recorded reads as a sync
-     * for a signed-in customer: the server merges only owners declared
-     * anonymous, so such a customer can be moved but never merged away.
-     */
+    /** An owed send records its reason, requester, kind and admission; one without any of them is not read. */
     private fun decodeSend(raw: JsonObject): PurchaseSend? {
-        val reason = raw.string("reason")?.let { value ->
-            PurchaseSyncReason.entries.firstOrNull { it.wireValue == value }
-        } ?: PurchaseSyncReason.SYNC
-        val kind = raw.string("customerKind")?.let { value ->
-            CustomerKind.entries.firstOrNull { it.wireValue == value }
-        } ?: CustomerKind.IDENTIFIED
+        val reason = PurchaseSyncReason.entries.firstOrNull { it.wireValue == raw.string("reason") } ?: return null
+        val kind = CustomerKind.entries.firstOrNull { it.wireValue == raw.string("customerKind") } ?: return null
         return PurchaseSend(
-            reason,
-            raw.string("distinctId") ?: return null,
-            kind,
-            raw.string("admissionId") ?: PurchaseSend.UNRECORDED_ADMISSION_ID,
+            reason = reason,
+            distinctId = raw.string("distinctId") ?: return null,
+            customerKind = kind,
+            admissionId = raw.string("admissionId") ?: return null,
         )
     }
 
