@@ -857,6 +857,67 @@ class FeatureServiceTest {
     }
 
     @Test
+    fun aCheckWhoseBalanceSourceHoldRetiredMidCheckDoesNotOverwriteIt() = runBlocking {
+        val checkStarted = CountDownLatch(1)
+        val releaseCheck = CountDownLatch(1)
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    checkStarted.countDown()
+                    assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                    // The check of "exports" answers with its balance source, the wallet.
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "credit-wallet",
+                            requiredBalance = 2.0,
+                            balance = "50",
+                            type = "creditSystem",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    profileResponse("[]")
+                }
+            }
+        }
+        core = core(transport)
+        val customer = core.identity.distinctId()
+        core.features.hydrateProfile(customer, Json.parseToJsonElement("""{"features":[]}""").jsonObject)
+        // A 200 holds the wallet until a profile requested after it lands.
+        core.features.publishStaged(
+            core.features.stagePurchaseAnswer(
+                customer,
+                Json.parseToJsonElement(
+                    """{"success":true,"features":[{"id":"credit-wallet","type":"creditSystem","allowed":true,"unlimited":false,"balance":10}]}""",
+                ).jsonObject,
+                emptyMap(),
+            ),
+        )
+        val purchaseRevision = core.features.capturePurchaseRevision()
+        val profileRevision = core.features.reserveAuthoritativeRevision()
+        val check = async(Dispatchers.Default) {
+            runCatching { core.features.checkWithCache("exports", requiredBalance = 2.0, forceRefresh = true) }
+        }
+        assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
+        // The newer profile lands with the wallet at 3 and retires its hold.
+        core.features.hydrateProfile(
+            customer,
+            Json.parseToJsonElement(
+                profile("""[{"id":"credit-wallet","type":"creditSystem","balance":3,"unlimited":false}]"""),
+            ).jsonObject,
+            snapshotPurchaseRevision = purchaseRevision,
+            snapshotAuthoritativeRevision = profileRevision,
+        )
+
+        releaseCheck.countDown()
+        assertTrue("The check is discarded", check.await().exceptionOrNull() is CancellationException)
+        assertEquals("The newer profile's wallet stands", 3.0, core.features.getCached("credit-wallet", null)!!.balance!!, 0.0)
+        core.stop()
+    }
+
+    @Test
     fun aCachedCheckThatBeganBeforeA200HoldRetiredReturnsTheProfilesAnswer() = runBlocking {
         val checkStarted = CountDownLatch(1)
         val releaseCheck = CountDownLatch(1)
