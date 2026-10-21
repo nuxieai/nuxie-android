@@ -159,7 +159,8 @@ class PurchaseFeatureUseTest {
 
     @Test
     fun aConsumedCommandReturnsItsResultEvenWhenANewerAdmissionReplacedItsEntry() = runBlocking {
-        val fixture = concurrentFixture(firstStatus = 200)
+        val captured = mutableListOf<String>()
+        val fixture = concurrentFixture(firstStatus = 200, capture = { name, _, _, _ -> captured += name; true })
         val use = async(Dispatchers.Default) { runCatching { fixture.use() } }
         assertTrue(fixture.transport.firstRequestStarted.await(5, TimeUnit.SECONDS))
 
@@ -171,6 +172,7 @@ class PurchaseFeatureUseTest {
         val result = use.await()
         assertNotNull("The server consumed the Feature: ${result.exceptionOrNull()}", result.getOrNull())
         assertEquals("The newer admission stays owed", newer, fixture.store.load().getValue("token-1").pendingSend)
+        assertTrue("A superseded answer is not captured as purchase synced", captured.isEmpty())
         fixture.core.stop()
     }
 
@@ -673,6 +675,7 @@ class PurchaseFeatureUseTest {
         firstStatus: Int,
         ownedOnPlay: MutableSet<String> = mutableSetOf("token-1"),
         outboxRetryMillis: Long = 30_000,
+        capture: suspend (String, Map<String, Any?>, String, String) -> Boolean = { _, _, _, _ -> true },
     ): ConcurrentFixture {
         val transport = ControlledAtomicTransport(firstStatus)
         val core = core(transport)
@@ -681,7 +684,7 @@ class PurchaseFeatureUseTest {
             core,
             transport,
             store,
-            service(core, store, ownedOnPlay = ownedOnPlay, outboxRetryMillis = outboxRetryMillis),
+            service(core, store, capture = capture, ownedOnPlay = ownedOnPlay, outboxRetryMillis = outboxRetryMillis),
             ownedOnPlay,
         )
     }

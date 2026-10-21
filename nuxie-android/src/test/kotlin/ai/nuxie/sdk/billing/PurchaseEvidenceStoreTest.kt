@@ -232,7 +232,7 @@ class PurchaseEvidenceStoreTest {
     }
 
     @Test
-    fun anEntryWrittenBeforeTheOutboxIsIgnoredAndDroppedOnTheNextWrite(): Unit = kotlinx.coroutines.runBlocking {
+    fun anEntryInAPreviousFormatIsIgnoredAndDroppedOnTheNextWrite(): Unit = kotlinx.coroutines.runBlocking {
         val directory = Files.createTempDirectory("nuxie-purchase-evidence").toFile()
         try {
             // The format before the outbox: the answer in `synced` and
@@ -242,6 +242,17 @@ class PurchaseEvidenceStoreTest {
                     """"purchaseState":"PURCHASED","syncAttributionDistinctId":"requester","ownerDistinctId":"guessed-owner",""" +
                     """"acknowledged":true,"consumed":false,"synced":$synced,"permanentlyRejected":$rejected,""" +
                     """"revoked":$revoked,"syncAttempts":3,"completionAttempts":0,"firstSeenMillis":1}"""
+            // An owed send in a previous format: no reason, kind or admission.
+            fun unrecorded(token: String, missing: String) =
+                """"$token":{"purchaseToken":"$token","packageName":"com.example.app","storeProductIds":["pro"],""" +
+                    """"purchaseState":"PURCHASED","refused":false,"acknowledged":true,"consumed":false,""" +
+                    """"pendingSend":{""" + mapOf(
+                        "reason" to "sync",
+                        "distinctId" to "requester",
+                        "customerKind" to "identified",
+                        "admissionId" to "admission",
+                    ).filterKeys { it != missing }.entries.joinToString(",") { """"${it.key}":"${it.value}"""" } +
+                    """},"syncAttempts":3,"completionAttempts":0,"firstSeenMillis":1}"""
             val file = File(directory, "purchase-evidence.json")
             file.writeText(
                 "{" + listOf(
@@ -249,6 +260,9 @@ class PurchaseEvidenceStoreTest {
                     previous("refused", synced = false, rejected = true),
                     previous("unanswered", synced = false, rejected = false),
                     previous("refunded", synced = false, rejected = false, revoked = true),
+                    unrecorded("no-reason", "reason"),
+                    unrecorded("no-kind", "customerKind"),
+                    unrecorded("no-admission", "admissionId"),
                 ).joinToString(",") + "}",
             )
             val store = FilePurchaseEvidenceStore(directory)
