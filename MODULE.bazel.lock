@@ -251,7 +251,7 @@
     "//scripts/bazel:repositories.bzl%runtime_artifacts": {
       "general": {
         "bzlTransitiveDigest": "c90df7C6ArWzfjos3c05uVGyYMxu4gI1zxLXthRpGtU=",
-        "usagesDigest": "kL1bjXon3f7bTs+lp0Vsrn0Uj7IQ3EjSo3EEAljqDR8=",
+        "usagesDigest": "cINWm1F6bXpXvhFu69dwhrlh+0D4lxopQru09yjrcdU=",
         "recordedInputs": [],
         "generatedRepoSpecs": {
           "nuxie_runtime_android": {

@@ -3,16 +3,29 @@
 The Nuxie Android SDK is the device half of Nuxie's new-user-experience
 engine. Apps trigger moments; signed Experiences decide what happens.
 
-## Status
+## Installation
 
-This is a pre-release greenfield rebuild. The
-[Nuxie iOS SDK](https://github.com/nuxieai/nuxie-ios) is the reference
-implementation. The specification lives in the `nuxie-dev` repository at
-`specs/android-sdk/overview.md`.
+In `settings.gradle.kts`, enable the standard Android and Maven Central repositories:
 
-Maintainers can stage and qualify the Maven artifact using the
-[publication guide](docs/publishing.md). Maven Central availability is still
-pending; local publication does not establish a public release.
+```kotlin
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+```
+
+Add the SDK to your app's `build.gradle.kts`:
+
+```kotlin
+dependencies {
+    implementation("ai.nuxie:nuxie-android:1.0.0")
+}
+```
+
+Maintainers can use the [publication guide](docs/publishing.md) to prepare and
+publish subsequent releases.
 
 ## Requirements
 

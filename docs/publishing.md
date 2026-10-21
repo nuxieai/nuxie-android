@@ -11,7 +11,7 @@ From this repository, stage the publication and build an independent consumer:
 
 ```sh
 scripts/bazel/sdk.sh prepare --output build/maven-repository
-python3 scripts/test-maven-consumer.py --version 0.1.0
+python3 scripts/test-maven-consumer.py --version 1.0.0
 ```
 
 Use the version in the root Gradle build. Staged files live under
@@ -39,10 +39,10 @@ temporary GnuPG home:
 
 ```sh
 scripts/bazel/sdk.sh prepare --output build/maven-repository --sign
-python3 scripts/bundle-maven-release.py --version 0.1.0 \
+python3 scripts/bundle-maven-release.py --version 1.0.0 \
   --public-key /absolute/path/to/release-public-key.asc \
   --fingerprint FULL_RELEASE_KEY_FINGERPRINT \
-  --output build/distributions/nuxie-android-0.1.0-central.zip
+  --output build/distributions/nuxie-android-1.0.0-central.zip
 ```
 
 Bundle verification requires GnuPG on PATH. Supply the independently known full
@@ -65,10 +65,10 @@ After the SDK change passes native readiness and merges, create and push the
 must match. With the release signing environment present, run:
 
 ```sh
-python3 scripts/publish-maven-release.py prepare --version 0.1.0 \
+python3 scripts/publish-maven-release.py prepare --version 1.0.0 \
   --public-key /absolute/path/to/release-public-key.asc \
   --fingerprint FULL_RELEASE_KEY_FINGERPRINT \
-  --output-directory build/releases/0.1.0
+  --output-directory build/releases/1.0.0
 ```
 
 Preparation checks the remote tag and main ancestry, rejects a dirty checkout or
@@ -81,11 +81,11 @@ Provide the Central user-token username and password as
 `NUXIE_CENTRAL_USERNAME` and `NUXIE_CENTRAL_PASSWORD`, then run:
 
 ```sh
-python3 scripts/publish-maven-release.py upload build/releases/0.1.0/release.json
-python3 scripts/publish-maven-release.py status build/releases/0.1.0/deployment.json
-python3 scripts/publish-maven-release.py publish build/releases/0.1.0/deployment.json
-python3 scripts/publish-maven-release.py status build/releases/0.1.0/deployment.json
-python3 scripts/publish-maven-release.py qualify-public build/releases/0.1.0/deployment.json
+python3 scripts/publish-maven-release.py upload build/releases/1.0.0/release.json
+python3 scripts/publish-maven-release.py status build/releases/1.0.0/deployment.json
+python3 scripts/publish-maven-release.py publish build/releases/1.0.0/deployment.json
+python3 scripts/publish-maven-release.py status build/releases/1.0.0/deployment.json
+python3 scripts/publish-maven-release.py qualify-public build/releases/1.0.0/deployment.json
 ```
 
 Upload requests Central validation with `USER_MANAGED`. Publish proceeds only
@@ -100,7 +100,7 @@ deployment name in the Central Portal, then recover with:
 
 ```sh
 python3 scripts/publish-maven-release.py recover-upload \
-  build/releases/0.1.0/deployment.json --deployment-id DEPLOYMENT_UUID
+  build/releases/1.0.0/deployment.json --deployment-id DEPLOYMENT_UUID
 ```
 
 Recovery checks that Central's deployment identity matches the saved attempt.
