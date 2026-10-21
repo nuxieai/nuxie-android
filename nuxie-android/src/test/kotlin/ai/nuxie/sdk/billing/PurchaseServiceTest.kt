@@ -4957,6 +4957,44 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun anOlderQuerysAnswerCannotReAddAPurchaseANewerQueryDropped() = runTest {
+        val fixture = fixture(this)
+        val customer = fixture.core.identity.distinctId()
+        fixture.service.rememberProduct(
+            product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+        )
+        runCurrent()
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
+        val purchase = playPurchase("dropped-token", obfuscatedAccountId = accountHash(customer))
+        fixture.service.onPurchasesUpdated(okUpdate(purchase))
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+
+        // An older query is out, holding Play's answer that still had the purchase.
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(purchase)
+        val olderOut = CompletableDeferred<Unit>()
+        val answerTheOlder = CompletableDeferred<Unit>()
+        fixture.billing.queryStartedFor[BillingClient.ProductType.INAPP] = olderOut
+        fixture.billing.holdQueryOf[BillingClient.ProductType.INAPP] = answerTheOlder
+        val older = async { fixture.service.recover() }
+        runCurrent()
+        olderOut.await()
+
+        // A newer query finds it gone (a refund, say).
+        fixture.billing.active[BillingClient.ProductType.INAPP] = emptyList()
+        fixture.service.refreshPlayReport()
+        assertFalse(fixture.core.featureInfo.isAllowed("pro"))
+
+        // The older answer arrives last: the purchase stays dropped.
+        answerTheOlder.complete(Unit)
+        older.await()
+        assertFalse(
+            "An older query's answer cannot re-add what a newer report dropped",
+            fixture.core.featureInfo.isAllowed("pro"),
+        )
+        fixture.close()
+    }
+
+    @Test
     fun authenticatedRestoreWaitsForBackendVerification() = runTest {
         val fixture = fixture(this)
         val owner = fixture.core.identity.distinctId()
@@ -5277,7 +5315,10 @@ class PurchaseServiceTest {
         val failQueryTypes = mutableSetOf<String>()
         var queryStarted: CompletableDeferred<Unit>? = null
         var releaseQueries: CompletableDeferred<Unit>? = null
-        /** One product type's query: signalled when it starts, held until released, answering what Play had then. */
+        /**
+         * The next query of one product type: signalled when it starts, held until
+         * released, answering what Play had then. Each applies to one query only.
+         */
         val queryStartedFor = mutableMapOf<String, CompletableDeferred<Unit>>()
         val holdQueryOf = mutableMapOf<String, CompletableDeferred<Unit>>()
 
@@ -5298,8 +5339,8 @@ class PurchaseServiceTest {
                 )
             }
             val answer = active[productType].orEmpty()
-            queryStartedFor[productType]?.complete(Unit)
-            holdQueryOf[productType]?.await()
+            queryStartedFor.remove(productType)?.complete(Unit)
+            holdQueryOf.remove(productType)?.await()
             return ActivePurchasesResult.Success(answer)
         }
 
