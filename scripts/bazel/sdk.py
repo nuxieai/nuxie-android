@@ -146,6 +146,7 @@ def dependencies():
         ("org.jetbrains.kotlin", "kotlin-stdlib", versions["kotlin"], "compile"),
         ("androidx.sqlite", "sqlite-framework", versions["sqlite"], "runtime"),
         ("androidx.browser", "browser", versions["browser"], "runtime"),
+        ("com.google.android.material", "material", versions["material"], "runtime"),
         ("org.jetbrains.kotlinx", "kotlinx-serialization-json", versions["serialization-json"], "runtime"),
     ]
 

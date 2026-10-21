@@ -1,5 +1,5 @@
 package ai.nuxie.sdk
 
 internal object SdkVersion {
-    const val VALUE = "0.1.1"
+    const val VALUE = "0.1.2"
 }

@@ -26,6 +26,7 @@ SDK_DEPS = [
     "@sdk_maven//:androidx_browser_browser",
     "@sdk_maven//:androidx_sqlite_sqlite_framework",
     "@sdk_maven//:com_android_billingclient_billing",
+    "@sdk_maven//:com_google_android_material_material",
     "@sdk_maven//:org_jetbrains_annotations",
     "@sdk_maven//:org_jetbrains_kotlinx_kotlinx_coroutines_android",
     "@sdk_maven//:org_jetbrains_kotlinx_kotlinx_coroutines_core_jvm",
