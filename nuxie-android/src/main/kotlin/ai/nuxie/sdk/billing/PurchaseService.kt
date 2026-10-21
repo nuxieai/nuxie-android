@@ -797,7 +797,10 @@ internal class PurchaseService(
                 val access = stagedUse.access ?: throw kotlinx.coroutines.CancellationException()
                 // Saved: the answer is reported as purchase synced, still holding the
                 // purchase so no other pass reports it too.
-                (stagedUse.entry as? EntryAnswer.Answered)?.let { reportCommandPurchaseSynced(it.evidence, send) }
+                (stagedUse.entry as? EntryAnswer.Answered)?.let {
+                    recordAnsweredAdmission(send.admissionId, SyncResult.ACCEPTED)
+                    reportCommandPurchaseSynced(it.evidence, send)
+                }
                 releasePurchaseUsageClaim(evidence.purchaseToken)
                 // Answered: the purchase completes with Play. Not saved, or a newer
                 // admission: the profile decides, and the entry is sent again.
@@ -1362,9 +1365,11 @@ internal class PurchaseService(
                 retained[it.purchaseToken]?.hasEligiblePurchaseSignature(bindings, mappings) == false
         }
         val send = PurchaseSend.admit(PurchaseSyncReason.RESTORE, initiatingOwner, initiatingKind)
-        val results = restorable.associate { evidence ->
-            evidence.purchaseToken to claim(evidence, send)
-        }
+        // A dropped claim (its customer is no longer current, or its entry was
+        // answered or admitted again before it went out) is not counted.
+        val claimed = restorable.associate { evidence -> evidence.purchaseToken to claim(evidence, send) }
+        val results = claimed.mapNotNull { (token, result) -> result?.let { token to it } }.toMap()
+        val dropped = claimed.filterValues { it == null }.keys
         val outcome = when {
             settled != null -> settled
             unretained && results.values.none { it == SyncResult.ACCEPTED } -> RestoreResult.Failed(
@@ -1375,7 +1380,7 @@ internal class PurchaseService(
             unverified && results.values.none { it == SyncResult.ACCEPTED } -> RestoreResult.Failed(
                 RestoreReconciliationException("A restored purchase could not be verified."),
             )
-            restorable.isEmpty() -> RestoreResult.NoPurchases
+            results.isEmpty() -> RestoreResult.NoPurchases
             // Owned by another account only when every claim was refused; any claim
             // still unanswered leaves the Restore unconfirmed, whatever the others said.
             results.values.none { it == SyncResult.ACCEPTED } -> RestoreResult.Failed(
@@ -1387,7 +1392,7 @@ internal class PurchaseService(
                     },
                 ),
             )
-            expectedOwnerDistinctId != null -> strictRestoreOutcome(found, results)
+            expectedOwnerDistinctId != null -> strictRestoreOutcome(found.filter { it.purchaseToken !in dropped }, results)
             else -> RestoreResult.Restored
         }
         emitRestoreOutcome(outcome, initiatingOwner, outcomeCorrelation?.eventId)
@@ -1796,7 +1801,12 @@ internal class PurchaseService(
         correlatesCheckout: Boolean = true,
     ): PurchaseEvidence? {
         val matchingFlight = purchase.products.firstNotNullOfOrNull(inFlight::get)
-        val isCheckoutOutcome = correlatesCheckout && matchingFlight?.matches(purchase) == true
+        // A purchase already tied to one checkout is never another checkout's result:
+        // an earlier checkout's late approval never takes a newer checkout in flight.
+        // An entry's checkout, once set, never changes.
+        val tiedCheckout = evidenceStore.load()[purchase.purchaseToken]?.checkoutId
+        val isCheckoutOutcome = correlatesCheckout && matchingFlight?.matches(purchase) == true &&
+            (tiedCheckout == null || tiedCheckout == matchingFlight.checkoutId)
         val checkoutFlight = matchingFlight?.takeIf { isCheckoutOutcome }
         // D2: evidence is durable before projection, facts, sync, acknowledge, or consume.
         // The observation is built over the entry as it stands and written in the
@@ -1835,7 +1845,9 @@ internal class PurchaseService(
             }
             val accountBindings = checkoutBindings.filter { binding ->
                 binding.obfuscatedAccountId == purchase.obfuscatedAccountId &&
-                    binding.storeProductId in purchase.products
+                    binding.storeProductId in purchase.products &&
+                    // Likewise only its own checkout's binding matches a tied purchase.
+                    (existing?.checkoutId == null || binding.checkoutId == existing.checkoutId)
             }
             val exactBinding = selectFullProductMatch(accountBindings, knownProductIdentity) {
                 it.productIdentity
@@ -2066,10 +2078,11 @@ internal class PurchaseService(
      * also after a relaunch. One entry per purchase: the claim, the newer
      * intent, takes over whatever entry the purchase had.
      */
-    private suspend fun claim(evidence: PurchaseEvidence, requested: PurchaseSend): SyncResult {
+    /** A claim's answer, or null when it was dropped (an obsolete claim never reaches the server). */
+    private suspend fun claim(evidence: PurchaseEvidence, requested: PurchaseSend): SyncResult? {
         val purchaseToken = evidence.purchaseToken
         // The customer changed during the Restore: the claim is not made.
-        if (requested.distinctId != distinctId()) return SyncResult.UNAVAILABLE
+        if (requested.distinctId != distinctId()) return null
         // Each purchase's claim is its own admission.
         val claim = PurchaseSend.admit(requested.reason, requested.distinctId, requested.customerKind)
         // While the outbox is off the claim is sent once, unsaved.
@@ -2088,7 +2101,7 @@ internal class PurchaseService(
                     saveEntry(current.copy(pendingSend = claim, syncAttempts = 0, retryDueAtMillis = null))
                 }
             }
-        } ?: return SyncResult.UNAVAILABLE
+        } ?: return null
         if (!admitted) return if (outboxOff) sendUnsaved(evidence, claim) else SyncResult.UNAVAILABLE
         // A claim of the buyer's own purchase replaces an entry that unlocked early.
         refreshOptimisticProjection()
@@ -2099,7 +2112,7 @@ internal class PurchaseService(
      * Send [purchaseToken]'s owed entry: the outbox drain. A caller waiting on
      * its own entry ([expected]) gets that entry's answer.
      */
-    private suspend fun sendOwed(purchaseToken: String, expected: PurchaseSend? = null): SyncResult {
+    private suspend fun sendOwed(purchaseToken: String, expected: PurchaseSend? = null): SyncResult? {
         while (true) {
             val (answer, owned) = sendInSlot(purchaseToken) { sendOnce(purchaseToken) }
                 ?: return heldBack(purchaseToken)
@@ -2108,11 +2121,30 @@ internal class PurchaseService(
             if (owned && (expected == null || answer.send == null)) return answer.result
             // Another send went first. Send ours if it is still owed and that
             // send was not this same entry.
-            val owed = evidenceStore.load()[purchaseToken]?.pendingSend ?: return SyncResult.UNAVAILABLE
+            val owed = evidenceStore.load()[purchaseToken]?.pendingSend
+            if (expected != null) {
+                // The entry was answered or admitted again meanwhile: the expected send
+                // is dropped, and its caller gets the answer its admission already got
+                // this session, or nothing.
+                if (owed != expected) return answeredAdmission(expected.admissionId)
+                continue
+            }
+            if (owed == null) return SyncResult.UNAVAILABLE
             if (answer.send == owed) return answer.result
-            if (expected != null && owed != expected) return SyncResult.UNAVAILABLE
         }
     }
+
+    /** Answers saved this session, by the admission they answered; the oldest go first. */
+    private val answeredAdmissions = object : LinkedHashMap<String, SyncResult>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, SyncResult>?): Boolean = size > 64
+    }
+
+    private fun recordAnsweredAdmission(admissionId: String, result: SyncResult) {
+        synchronized(answeredAdmissions) { answeredAdmissions[admissionId] = result }
+    }
+
+    private fun answeredAdmission(admissionId: String): SyncResult? =
+        synchronized(answeredAdmissions) { answeredAdmissions[admissionId] }
 
     /**
      * Run [body] as the token's one send in flight, or wait for the send already
@@ -2409,6 +2441,7 @@ internal class PurchaseService(
         features.publishStaged(publication)
         if (entry is EntryAnswer.Kept) scheduleSendRetry(purchaseToken, send, entry.dueAtMillis)
         if (answer != PurchaseAnswer.Failed && send.distinctId == distinctId()) refreshFeatureAuthority()
+        if (entry is EntryAnswer.Answered) recordAnsweredAdmission(send.admissionId, answer.result)
         return when (entry) {
             is EntryAnswer.Answered -> when (answer) {
                 is PurchaseAnswer.Accepted, is PurchaseAnswer.AcceptedFeatureUse -> {
