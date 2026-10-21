@@ -5121,6 +5121,68 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun aCheckoutWhoseOutboxTurnsOffBeforeItsSendIsStillSentOnceWithItsCompletion() = runTest {
+        val actions = mutableListOf<String>()
+        val fixture = fixture(this, actions = actions)
+        val customer = fixture.core.identity.distinctId()
+        val sent = mutableListOf<String>()
+        fixture.synchronizer = { evidence ->
+            sent += evidence.purchaseToken
+            accepted(customer, evidence)
+        }
+        val checkout = async { fixture.service.purchase(activity(), product(), null) }
+        runCurrent()
+        // The delivery's entry is saved; then, just before its send, a write elsewhere
+        // fails and the outbox turns off.
+        fixture.store.onEveryLoad = {
+            if (Thread.currentThread().stackTrace.any { it.methodName == "finishPurchase" }) {
+                fixture.store.onEveryLoad = null
+                fixture.store.failAllWrites = true
+                assertFalse(fixture.service.rememberProduct(product(storeProductId = "play-other")))
+            }
+        }
+        fixture.service.onPurchasesUpdated(okUpdate(playPurchase("late-off").forCheckout(fixture)))
+        assertEquals(PurchaseResult.Purchased, checkout.await())
+        runCurrent()
+
+        assertEquals("The purchase is still sent once", listOf("late-off"), sent)
+        assertEquals("Its completion was captured in the session", 1, actions.count { it == SystemEventNames.PURCHASE_COMPLETED })
+        assertFalse("While off it is not completed with Play", "ack" in actions || "consume" in actions)
+        fixture.close()
+    }
+
+    @Test
+    fun aRecoveryForAnotherCustomerKeepsTheBindingsRequester() = runTest {
+        val fixture = fixture(this)
+        // Customer A's checkout binding still awaits its purchase.
+        fixture.core.identity.setDistinctId("customer-a")
+        fixture.store.upsertBinding(product().bindingFor("customer-a").copy(awaitingCheckout = true))
+        // Customer B becomes current, and a recovery query delivers A's purchase.
+        fixture.core.identity.setDistinctId("customer-b")
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("a-token", obfuscatedAccountId = accountHash("customer-a")),
+        )
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
+
+        fixture.service.recover()
+
+        assertEquals(
+            "It is sent for A, whose checkout the binding names",
+            listOf("customer-a"),
+            fixture.requests.map { it.second.distinctId }.distinct(),
+        )
+        assertFalse(
+            "No completion under B",
+            fixture.purchaseEventDistinctIds.contains("customer-b"),
+        )
+        // A's binding ends only with A's completion.
+        val completedForA = fixture.purchaseEventDistinctIds.contains("customer-a")
+        val bindingAwaits = fixture.store.loadBindings().single().awaitingCheckout
+        assertEquals(!completedForA, bindingAwaits)
+        fixture.close()
+    }
+
+    @Test
     fun noTimerSendsWhileTheOutboxIsOff() = runTest {
         val clock = { 1_800_000_000_000L + testScheduler.currentTime }
         val store = RecordingEvidenceStore()
@@ -6008,6 +6070,8 @@ class PurchaseServiceTest {
         var afterNextLoad: ((Map<String, PurchaseEvidence>) -> Unit)? = null
         /** Runs once, after the next load took its snapshot, and may hold that load. */
         var holdNextLoad: (suspend () -> Unit)? = null
+        /** Runs after every load took its snapshot, until cleared. */
+        var onEveryLoad: (suspend () -> Unit)? = null
         var afterNextMappingsLoad: (suspend (List<StoredProductMapping>) -> Unit)? = null
         /** Runs before each evidence write, and may hold it. */
         var beforeUpsert: (suspend (PurchaseEvidence) -> Unit)? = null
@@ -6021,6 +6085,7 @@ class PurchaseServiceTest {
             val hold = holdNextLoad
             holdNextLoad = null
             hold?.invoke()
+            onEveryLoad?.invoke()
             return snapshot
         }
         override suspend fun upsert(evidence: PurchaseEvidence): Boolean {
