@@ -15,10 +15,11 @@ import java.security.MessageDigest
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
@@ -329,7 +330,12 @@ internal class FilePurchaseEvidenceStore(
     private val json = Json { ignoreUnknownKeys = true }
     @Volatile private var productMappingsChangedListener: (suspend () -> Unit)? = null
 
-    override suspend fun isReadable(): Boolean = onIo { synchronized(lock) { readUnlocked() != null } }
+    /** Each of the store's files must read: entries, checkout bindings and the catalog. */
+    override suspend fun isReadable(): Boolean = onIo {
+        synchronized(lock) {
+            readUnlocked() != null && loadBindingsUnlocked() != null && loadMappingsUnlocked() != null
+        }
+    }
 
     /** An unreadable store reads as empty: nothing unlocks early and nothing is sent. */
     override suspend fun load(): Map<String, PurchaseEvidence> = onIo { synchronized(lock) { readUnlocked().orEmpty() } }
@@ -343,13 +349,14 @@ internal class FilePurchaseEvidenceStore(
         }
     }
 
+    /** Unreadable bindings read as empty and are never written over. */
     override suspend fun loadBindings(): List<StoredPurchaseBinding> = onIo {
-        synchronized(lock) { loadBindingsUnlocked() }
+        synchronized(lock) { loadBindingsUnlocked().orEmpty() }
     }
 
     override suspend fun upsertBinding(binding: StoredPurchaseBinding): Boolean = onIo {
         synchronized(lock) {
-            val entries = loadBindingsUnlocked().associateByTo(linkedMapOf()) {
+            val entries = (loadBindingsUnlocked() ?: return@synchronized false).associateByTo(linkedMapOf()) {
                 StoredPurchaseBindingKey(it.obfuscatedAccountId, it.productIdentity)
             }
             entries[StoredPurchaseBindingKey(binding.obfuscatedAccountId, binding.productIdentity)] = binding
@@ -365,14 +372,16 @@ internal class FilePurchaseEvidenceStore(
         }
     }
 
+    /** An unreadable catalog reads as empty and is never written over. */
     override suspend fun loadProductMappings(): List<StoredProductMapping> = onIo {
-        synchronized(lock) { loadMappingsUnlocked() }
+        synchronized(lock) { loadMappingsUnlocked().orEmpty() }
     }
 
     override suspend fun upsertProductMapping(mapping: StoredProductMapping, catalogChange: Boolean): Boolean = onIo {
         productMappingInstallationLock.withLock {
             val upsert = synchronized(lock) {
-                val entries = loadMappingsUnlocked().associateByTo(linkedMapOf()) { it.productIdentity }
+                val entries = (loadMappingsUnlocked() ?: return@synchronized MappingUpsert.FAILED)
+                    .associateByTo(linkedMapOf()) { it.productIdentity }
                 // The same mapping again changes nothing: no write and no catalog change.
                 if (entries[mapping.productIdentity] == mapping) return@synchronized MappingUpsert.UNCHANGED
                 entries[mapping.productIdentity] = mapping
@@ -395,25 +404,65 @@ internal class FilePurchaseEvidenceStore(
 
     private suspend fun <T> onIo(block: suspend () -> T): T = withContext(ioDispatcher) { block() }
 
-    private fun loadBindingsUnlocked(): List<StoredPurchaseBinding> = runCatching {
-        if (!bindingsFile.exists()) emptyList() else {
-            json.parseToJsonElement(bindingsFile.readText()).jsonArray.mapNotNull {
-                val decoded = (it as? JsonObject)?.let(::decodeBinding)
-                if (decoded == null) Log.w("NuxieBilling", "Invalid purchase bindings row was ignored.")
-                decoded
+    /**
+     * The checkout bindings, or null when they cannot be read: a file that does
+     * not parse, or a row with a field that does not decode to its type. Either
+     * fails closed, as the entries do: nothing is written over the file.
+     */
+    private fun loadBindingsUnlocked(): List<StoredPurchaseBinding>? =
+        when (val read = readRowsUnlocked(bindingsFile, ::decodeBinding)) {
+            is RowsRead.Read -> read.rows
+            is RowsRead.Unparsable -> null.also { Log.w("NuxieBilling", "Could not read purchase bindings.", read.cause) }
+            is RowsRead.Malformed -> null.also {
+                Log.w(
+                    "NuxieBilling",
+                    "Invalid purchase bindings row; the store stays closed until it reads.",
+                    null,
+                    Log.status("row", read.row),
+                    Log.sensitive("field", read.field),
+                )
             }
         }
-    }.onFailure { Log.w("NuxieBilling", "Could not read purchase bindings.", it) }.getOrDefault(emptyList())
 
-    private fun loadMappingsUnlocked(): List<StoredProductMapping> = runCatching {
-        if (!catalogFile.exists()) emptyList() else {
-            json.parseToJsonElement(catalogFile.readText()).jsonArray.mapNotNull {
-                val decoded = (it as? JsonObject)?.let(::decodeMapping)
-                if (decoded == null) Log.w("NuxieBilling", "Invalid purchase catalog row was ignored.")
-                decoded
+    /** The catalog mappings, or null when they cannot be read, as for the bindings. */
+    private fun loadMappingsUnlocked(): List<StoredProductMapping>? =
+        when (val read = readRowsUnlocked(catalogFile, ::decodeMapping)) {
+            is RowsRead.Read -> read.rows
+            is RowsRead.Unparsable -> null.also { Log.w("NuxieBilling", "Could not read purchase catalog.", read.cause) }
+            is RowsRead.Malformed -> null.also {
+                Log.w(
+                    "NuxieBilling",
+                    "Invalid purchase catalog row; the store stays closed until it reads.",
+                    null,
+                    Log.status("row", read.row),
+                    Log.sensitive("field", read.field),
+                )
             }
         }
-    }.onFailure { Log.w("NuxieBilling", "Could not read purchase catalog.", it) }.getOrDefault(emptyList())
+
+    private sealed interface RowsRead<out T> {
+        data class Read<T>(val rows: List<T>) : RowsRead<T>
+        data class Unparsable(val cause: Throwable) : RowsRead<Nothing>
+        data class Malformed(val row: Int, val field: String) : RowsRead<Nothing>
+    }
+
+    private fun <T> readRowsUnlocked(target: File, decode: (JsonObject) -> T): RowsRead<T> {
+        if (!target.exists()) return RowsRead.Read(emptyList())
+        val rows = try {
+            json.parseToJsonElement(target.readText()).jsonArray
+        } catch (failure: Exception) {
+            return RowsRead.Unparsable(failure)
+        }
+        return RowsRead.Read(
+            rows.mapIndexed { index, raw ->
+                try {
+                    decode(raw as? JsonObject ?: throw MalformedField("row"))
+                } catch (malformed: MalformedField) {
+                    return RowsRead.Malformed(index, malformed.field)
+                }
+            },
+        )
+    }
 
     private fun saveArray(target: File, values: List<JsonObject>, description: String): Boolean = runCatching {
         directory.mkdirs()
@@ -426,7 +475,8 @@ internal class FilePurchaseEvidenceStore(
 
     /**
      * The stored entries, or null when the store is unreadable: a file that
-     * does not parse, or a row in the current format that does not decode.
+     * does not parse, or a row in the current format with a field that is
+     * present but does not decode to its type (an absent field stays absent).
      * Either fails closed, and nothing is written until it reads again. A row
      * in a previous SDK's format is recognised by what it lacks (no `refused`,
      * or an owed send with no admission id) and only that row is dropped; the
@@ -446,9 +496,16 @@ internal class FilePurchaseEvidenceStore(
                 Log.w("NuxieBilling", "Invalid purchase evidence row was dropped: it is in a previous format.", null, Log.status("row", index))
                 return@forEachIndexed
             }
-            val decoded = row?.let(::decodeEvidence)
-            if (decoded == null) {
-                Log.w("NuxieBilling", "Could not read a purchase evidence row; the store stays closed until it reads.", null, Log.status("row", index))
+            val decoded = try {
+                decodeEvidence(row ?: throw MalformedField("row"))
+            } catch (malformed: MalformedField) {
+                Log.w(
+                    "NuxieBilling",
+                    "Could not read a purchase evidence row; the store stays closed until it reads.",
+                    null,
+                    Log.status("row", index),
+                    Log.sensitive("field", malformed.field),
+                )
                 return null
             }
             entries[token] = decoded
@@ -518,55 +575,62 @@ internal class FilePurchaseEvidenceStore(
         },
     )
 
-    /** A row in the current format; null when any of its fields does not decode. */
-    private fun decodeEvidence(raw: JsonObject): PurchaseEvidence? = runCatching {
-        PurchaseEvidence(
-            purchaseToken = raw.string("purchaseToken") ?: return null,
-            packageName = raw.string("packageName") ?: return null,
-            storeProductIds = raw["storeProductIds"]?.jsonArray.orEmpty()
-                .mapNotNull { (it as? JsonPrimitive)?.contentOrNull },
-            nuxieProductId = raw.string("nuxieProductId"),
-            basePlanId = raw.string("basePlanId"),
-            purchaseOptionId = raw.string("purchaseOptionId"),
-            offerId = raw.string("offerId"),
-            productType = raw.string("productType"),
-            purchaseState = StoredPurchaseState.valueOf(raw.string("purchaseState") ?: return null),
-            obfuscatedAccountId = raw.string("obfuscatedAccountId"),
-            buyerDistinctId = raw.string("buyerDistinctId"),
-            ownerDistinctId = raw.string("ownerDistinctId"),
-            refused = (raw["refused"] as? JsonPrimitive)?.booleanOrNull ?: return null,
-            pendingSend = raw["pendingSend"]?.let { (it as? JsonObject)?.let(::decodeSend) ?: return null },
-            context = (raw["context"] as? JsonObject)?.let(::decodeContext),
-            pinnedFeatureAllowances = (raw["pinnedFeatureAllowances"] as? JsonArray)
-                ?.mapNotNull(::decodeAllowance),
-            acknowledged = raw.boolean("acknowledged"),
-            consumed = raw.boolean("consumed"),
-            syncAttempts = (raw["syncAttempts"] as? JsonPrimitive)?.intOrNull ?: 0,
-            retryDueAtMillis = (raw["retryDueAtMillis"] as? JsonPrimitive)?.longOrNull,
-            completionAttempts = (raw["completionAttempts"] as? JsonPrimitive)?.intOrNull ?: 0,
-            firstSeenMillis = (raw["firstSeenMillis"] as? JsonPrimitive)?.longOrNull ?: return null,
-            consumable = raw.boolean("consumable"),
-            catalogResolved = raw.boolean("catalogResolved"),
-            completionEmitted = raw.boolean("completionEmitted"),
-            syncedEventEmitted = raw.boolean("syncedEventEmitted"),
-            syncedCustomerId = raw.string("syncedCustomerId"),
-            nuxieManaged = raw.boolean("nuxieManaged"),
-            signatureVerified = raw.boolean("signatureVerified"),
-            authorityScope = raw.string("authorityScope"),
-            backendSyncedAtMillis = (raw["backendSyncedAtMillis"] as? JsonPrimitive)?.longOrNull,
-            checkoutCompletionEventId = raw.string("checkoutCompletionEventId"),
-        )
-    }.getOrNull()
+    /**
+     * A row in the current format. A field that is present but does not decode
+     * to its type throws [MalformedField], which makes the store unreadable; an
+     * absent field (or JSON null) stays absent.
+     */
+    private fun decodeEvidence(raw: JsonObject): PurchaseEvidence = PurchaseEvidence(
+        purchaseToken = raw.requiredString("purchaseToken"),
+        packageName = raw.requiredString("packageName"),
+        storeProductIds = raw.optionalStrings("storeProductIds").orEmpty(),
+        nuxieProductId = raw.optionalString("nuxieProductId"),
+        basePlanId = raw.optionalString("basePlanId"),
+        purchaseOptionId = raw.optionalString("purchaseOptionId"),
+        offerId = raw.optionalString("offerId"),
+        productType = raw.optionalString("productType"),
+        purchaseState = raw.requiredString("purchaseState").let { state ->
+            StoredPurchaseState.entries.firstOrNull { it.name == state } ?: throw MalformedField("purchaseState")
+        },
+        obfuscatedAccountId = raw.optionalString("obfuscatedAccountId"),
+        buyerDistinctId = raw.optionalString("buyerDistinctId"),
+        ownerDistinctId = raw.optionalString("ownerDistinctId"),
+        refused = raw.optionalBoolean("refused") ?: throw MalformedField("refused"),
+        pendingSend = raw.optionalObject("pendingSend")?.let(::decodeSend),
+        context = raw.optionalObject("context")?.let(::decodeContext),
+        pinnedFeatureAllowances = raw.optionalArray("pinnedFeatureAllowances")
+            ?.map { decodeAllowance(it, "pinnedFeatureAllowances") },
+        acknowledged = raw.optionalBoolean("acknowledged") ?: false,
+        consumed = raw.optionalBoolean("consumed") ?: false,
+        syncAttempts = raw.optionalInt("syncAttempts") ?: 0,
+        retryDueAtMillis = raw.optionalLong("retryDueAtMillis"),
+        completionAttempts = raw.optionalInt("completionAttempts") ?: 0,
+        firstSeenMillis = raw.optionalLong("firstSeenMillis") ?: throw MalformedField("firstSeenMillis"),
+        consumable = raw.optionalBoolean("consumable") ?: false,
+        catalogResolved = raw.optionalBoolean("catalogResolved") ?: false,
+        completionEmitted = raw.optionalBoolean("completionEmitted") ?: false,
+        syncedEventEmitted = raw.optionalBoolean("syncedEventEmitted") ?: false,
+        syncedCustomerId = raw.optionalString("syncedCustomerId"),
+        nuxieManaged = raw.optionalBoolean("nuxieManaged") ?: false,
+        signatureVerified = raw.optionalBoolean("signatureVerified") ?: false,
+        authorityScope = raw.optionalString("authorityScope"),
+        backendSyncedAtMillis = raw.optionalLong("backendSyncedAtMillis"),
+        checkoutCompletionEventId = raw.optionalString("checkoutCompletionEventId"),
+    )
 
     /** An owed send records its reason, requester, kind and admission; one without any of them is not read. */
-    private fun decodeSend(raw: JsonObject): PurchaseSend? {
-        val reason = PurchaseSyncReason.entries.firstOrNull { it.wireValue == raw.string("reason") } ?: return null
-        val kind = CustomerKind.entries.firstOrNull { it.wireValue == raw.string("customerKind") } ?: return null
+    private fun decodeSend(raw: JsonObject): PurchaseSend {
+        val reason = raw.requiredString("reason", "pendingSend.reason").let { wire ->
+            PurchaseSyncReason.entries.firstOrNull { it.wireValue == wire } ?: throw MalformedField("pendingSend.reason")
+        }
+        val kind = raw.requiredString("customerKind", "pendingSend.customerKind").let { wire ->
+            CustomerKind.entries.firstOrNull { it.wireValue == wire } ?: throw MalformedField("pendingSend.customerKind")
+        }
         return PurchaseSend(
             reason = reason,
-            distinctId = raw.string("distinctId") ?: return null,
+            distinctId = raw.requiredString("distinctId", "pendingSend.distinctId"),
             customerKind = kind,
-            admissionId = raw.string("admissionId") ?: return null,
+            admissionId = raw.requiredString("admissionId", "pendingSend.admissionId"),
         )
     }
 
@@ -591,29 +655,26 @@ internal class FilePurchaseEvidenceStore(
         },
     )
 
-    private fun decodeBinding(raw: JsonObject): StoredPurchaseBinding? = runCatching {
-        StoredPurchaseBinding(
-            obfuscatedAccountId = raw.string("obfuscatedAccountId") ?: return null,
-            distinctId = raw.string("distinctId") ?: return null,
-            storeProductId = raw.string("storeProductId") ?: return null,
-            nuxieProductId = raw.string("nuxieProductId") ?: return null,
-            basePlanId = raw.string("basePlanId"),
-            purchaseOptionId = raw.string("purchaseOptionId"),
-            offerId = raw.string("offerId"),
-            productType = raw.string("productType") ?: return null,
-            consumable = raw.boolean("consumable"),
-            context = (raw["context"] as? JsonObject)?.let(::decodeContext),
-            featureAllowances = (raw["featureAllowances"] as? JsonArray)
-                .orEmpty().mapNotNull(::decodeAllowance),
-            licensingPublicKey = raw.string("licensingPublicKey"),
-            nuxieManaged = raw.boolean("nuxieManaged"),
-            outcomeEventId = raw.string("outcomeEventId"),
-            // A binding stored without it awaits no checkout.
-            awaitingCheckout = raw.boolean("awaitingCheckout"),
-            priorTokens = (raw["priorTokens"] as? JsonArray).orEmpty()
-                .mapNotNullTo(mutableSetOf()) { (it as? JsonPrimitive)?.contentOrNull },
-        )
-    }.getOrNull()
+    private fun decodeBinding(raw: JsonObject): StoredPurchaseBinding = StoredPurchaseBinding(
+        obfuscatedAccountId = raw.requiredString("obfuscatedAccountId"),
+        distinctId = raw.requiredString("distinctId"),
+        storeProductId = raw.requiredString("storeProductId"),
+        nuxieProductId = raw.requiredString("nuxieProductId"),
+        basePlanId = raw.optionalString("basePlanId"),
+        purchaseOptionId = raw.optionalString("purchaseOptionId"),
+        offerId = raw.optionalString("offerId"),
+        productType = raw.requiredString("productType"),
+        consumable = raw.optionalBoolean("consumable") ?: false,
+        context = raw.optionalObject("context")?.let(::decodeContext),
+        featureAllowances = raw.optionalArray("featureAllowances").orEmpty()
+            .map { decodeAllowance(it, "featureAllowances") },
+        licensingPublicKey = raw.optionalString("licensingPublicKey"),
+        nuxieManaged = raw.optionalBoolean("nuxieManaged") ?: false,
+        outcomeEventId = raw.optionalString("outcomeEventId"),
+        // A binding stored without it awaits no checkout.
+        awaitingCheckout = raw.optionalBoolean("awaitingCheckout") ?: false,
+        priorTokens = raw.optionalStrings("priorTokens").orEmpty().toSet(),
+    )
 
     private fun encodeMapping(mapping: StoredProductMapping): JsonObject = encodeBinding(
         StoredPurchaseBinding(
@@ -633,24 +694,58 @@ internal class FilePurchaseEvidenceStore(
         ),
     )
 
-    private fun decodeMapping(raw: JsonObject): StoredProductMapping? = runCatching {
-        StoredProductMapping(
-            storeProductId = raw.string("storeProductId") ?: return null,
-            nuxieProductId = raw.string("nuxieProductId") ?: return null,
-            basePlanId = raw.string("basePlanId"),
-            purchaseOptionId = raw.string("purchaseOptionId"),
-            offerId = raw.string("offerId"),
-            productType = raw.string("productType") ?: return null,
-            consumable = raw.boolean("consumable"),
-            context = (raw["context"] as? JsonObject)?.let(::decodeContext),
-            featureAllowances = (raw["featureAllowances"] as? JsonArray)
-                .orEmpty().mapNotNull(::decodeAllowance),
-            licensingPublicKey = raw.string("licensingPublicKey"),
-        )
-    }.getOrNull()
+    private fun decodeMapping(raw: JsonObject): StoredProductMapping = StoredProductMapping(
+        storeProductId = raw.requiredString("storeProductId"),
+        nuxieProductId = raw.requiredString("nuxieProductId"),
+        basePlanId = raw.optionalString("basePlanId"),
+        purchaseOptionId = raw.optionalString("purchaseOptionId"),
+        offerId = raw.optionalString("offerId"),
+        productType = raw.requiredString("productType"),
+        consumable = raw.optionalBoolean("consumable") ?: false,
+        context = raw.optionalObject("context")?.let(::decodeContext),
+        featureAllowances = raw.optionalArray("featureAllowances").orEmpty()
+            .map { decodeAllowance(it, "featureAllowances") },
+        licensingPublicKey = raw.optionalString("licensingPublicKey"),
+    )
 
-    private fun JsonObject.string(key: String): String? =
-        (this[key] as? JsonPrimitive)?.contentOrNull
+    /** A field present but not of its type: the row, and so the store, is unreadable. */
+    private class MalformedField(val field: String) : RuntimeException("Malformed purchase store field")
+
+    /** A present value; JSON null reads as absent, as the encoder never writes it. */
+    private fun JsonObject.present(key: String): JsonElement? = this[key]?.takeUnless { it is JsonNull }
+
+    private fun JsonObject.optionalString(key: String, field: String = key): String? = present(key)?.let {
+        (it as? JsonPrimitive)?.takeIf { primitive -> primitive.isString }?.content ?: throw MalformedField(field)
+    }
+
+    private fun JsonObject.requiredString(key: String, field: String = key): String =
+        optionalString(key, field) ?: throw MalformedField(field)
+
+    private fun JsonObject.optionalStrings(key: String): List<String>? = optionalArray(key)?.map {
+        (it as? JsonPrimitive)?.takeIf { primitive -> primitive.isString }?.content ?: throw MalformedField(key)
+    }
+
+    private fun JsonObject.optionalNumber(key: String, field: String): JsonPrimitive? = present(key)?.let {
+        (it as? JsonPrimitive)?.takeUnless { primitive -> primitive.isString } ?: throw MalformedField(field)
+    }
+
+    private fun JsonObject.optionalLong(key: String, field: String = key): Long? =
+        optionalNumber(key, field)?.let { it.longOrNull ?: throw MalformedField(field) }
+
+    private fun JsonObject.optionalInt(key: String, field: String = key): Int? =
+        optionalNumber(key, field)?.let { it.intOrNull ?: throw MalformedField(field) }
+
+    private fun JsonObject.optionalDouble(key: String, field: String = key): Double? =
+        optionalNumber(key, field)?.let { it.doubleOrNull ?: throw MalformedField(field) }
+
+    private fun JsonObject.optionalBoolean(key: String, field: String = key): Boolean? =
+        optionalNumber(key, field)?.let { it.booleanOrNull ?: throw MalformedField(field) }
+
+    private fun JsonObject.optionalObject(key: String): JsonObject? =
+        present(key)?.let { it as? JsonObject ?: throw MalformedField(key) }
+
+    private fun JsonObject.optionalArray(key: String): JsonArray? =
+        present(key)?.let { it as? JsonArray ?: throw MalformedField(key) }
 
     private fun encodeAllowance(allowance: StoredFeatureAllowance): JsonObject = JsonObject(buildMap {
         put("featureId", JsonPrimitive(allowance.featureId))
@@ -659,13 +754,13 @@ internal class FilePurchaseEvidenceStore(
         allowance.allowance?.let { put("allowance", JsonPrimitive(it)) }
     })
 
-    private fun decodeAllowance(raw: kotlinx.serialization.json.JsonElement): StoredFeatureAllowance? {
-        val allowance = raw as? JsonObject ?: return null
+    private fun decodeAllowance(raw: JsonElement, field: String): StoredFeatureAllowance {
+        val allowance = raw as? JsonObject ?: throw MalformedField(field)
         return StoredFeatureAllowance(
-            featureId = allowance.string("featureId") ?: return null,
-            type = allowance.string("type") ?: return null,
-            unlimited = allowance.boolean("unlimited"),
-            allowance = (allowance["allowance"] as? JsonPrimitive)?.doubleOrNull,
+            featureId = allowance.requiredString("featureId", "$field.featureId"),
+            type = allowance.requiredString("type", "$field.type"),
+            unlimited = allowance.optionalBoolean("unlimited", "$field.unlimited") ?: false,
+            allowance = allowance.optionalDouble("allowance", "$field.allowance"),
         )
     }
 
@@ -679,16 +774,14 @@ internal class FilePurchaseEvidenceStore(
     })
 
     private fun decodeContext(raw: JsonObject) = StoredPurchaseContext(
-        raw.string("placementId"),
-        raw.string("experienceId"),
-        raw.string("experienceVersion"),
-        raw.string("price")?.toBigDecimalOrNull(),
-        raw.string("displayPrice"),
-        raw.string("journeyId"),
+        placementId = raw.optionalString("placementId", "context.placementId"),
+        experienceId = raw.optionalString("experienceId", "context.experienceId"),
+        experienceVersion = raw.optionalString("experienceVersion", "context.experienceVersion"),
+        price = raw.optionalString("price", "context.price")
+            ?.let { it.toBigDecimalOrNull() ?: throw MalformedField("context.price") },
+        displayPrice = raw.optionalString("displayPrice", "context.displayPrice"),
+        journeyId = raw.optionalString("journeyId", "context.journeyId"),
     )
-
-    private fun JsonObject.boolean(key: String): Boolean =
-        (this[key] as? JsonPrimitive)?.booleanOrNull ?: false
 }
 
 /** What writing a catalog mapping did: the catalog changes only when a mapping does. */

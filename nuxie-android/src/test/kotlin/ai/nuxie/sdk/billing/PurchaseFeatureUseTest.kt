@@ -232,6 +232,47 @@ class PurchaseFeatureUseTest {
     }
 
     @Test
+    fun aCurrentEntryWithAMalformedFieldKeepsTheOutboxOffAndItsFileUntouched() = runBlocking {
+        for ((field, value) in listOf(
+            "retryDueAtMillis" to kotlinx.serialization.json.JsonPrimitive("soon"),
+            "acknowledged" to kotlinx.serialization.json.JsonPrimitive("yes"),
+        )) {
+            // The buyer's own owed entry, due now, with one field that is not of its type.
+            val directory = temporaryFolder.newFolder()
+            assertTrue(FilePurchaseEvidenceStore(directory).upsert(evidence()))
+            val file = File(directory, "purchase-evidence.json")
+            val rows = Json.parseToJsonElement(file.readText()).jsonObject
+            file.writeText(
+                kotlinx.serialization.json.JsonObject(
+                    rows + ("token-1" to kotlinx.serialization.json.JsonObject(rows.getValue("token-1").jsonObject + (field to value))),
+                ).toString(),
+            )
+            val stored = file.readBytes()
+            val store = FilePurchaseEvidenceStore(directory)
+            assertFalse("$field: the store is not readable", store.isReadable())
+
+            val sends = java.util.concurrent.atomic.AtomicInteger()
+            val core = core(FakeTransport())
+            val service = service(
+                core,
+                store,
+                synchronizer = PurchaseSynchronizer { _, _ ->
+                    sends.incrementAndGet()
+                    PurchaseSyncOutcome.Rejected()
+                },
+                ownedOnPlay = mutableSetOf(),
+            )
+            // Read as due now, the entry would be sent at once by the launch's timer.
+            withTimeoutOrNull(500) { while (sends.get() == 0) delay(10) }
+            service.recover()
+
+            assertEquals("$field: the outbox is off, so nothing is sent", 0, sends.get())
+            assertTrue("$field: the entry's file is left byte for byte", stored.contentEquals(file.readBytes()))
+            core.stop()
+        }
+    }
+
+    @Test
     fun aSendHeldBackByAFeatureCommandCountsAFailedAttemptAndIsRetried() = runBlocking {
         // The launch sent the entry once without an answer; it is due again in a second.
         val fixture = concurrentFixture(firstStatus = 503, outboxRetryMillis = 1_000)

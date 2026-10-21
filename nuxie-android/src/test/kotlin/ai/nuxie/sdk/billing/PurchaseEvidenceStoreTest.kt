@@ -20,6 +20,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -297,6 +298,18 @@ class PurchaseEvidenceStoreTest {
         ai.nuxie.sdk.logging.NuxieLog.configure(ai.nuxie.sdk.LogLevel.WARN)
         // Current-format rows (they have `refused` and an admission id), each with one invalid field.
         val breakages = mapOf<String, (JsonObject) -> JsonObject>(
+            // A field that is present but not of its type, never read as absent.
+            "a retry due time that is not a number" to { row ->
+                JsonObject(row + ("retryDueAtMillis" to JsonPrimitive("soon")))
+            },
+            "an acknowledged flag that is not a boolean" to { row ->
+                JsonObject(row + ("acknowledged" to JsonPrimitive("yes")))
+            },
+            "a base plan that is not a string" to { row -> JsonObject(row + ("basePlanId" to JsonPrimitive(5))) },
+            "a context that is not an object" to { row -> JsonObject(row + ("context" to JsonPrimitive("primary"))) },
+            "a context price that is not a number" to { row ->
+                JsonObject(row + ("context" to JsonObject(mapOf("price" to JsonPrimitive("cheap")))))
+            },
             "an owed send without its reason" to { row ->
                 JsonObject(row + ("pendingSend" to JsonObject(row.getValue("pendingSend").jsonObject - "reason")))
             },
@@ -319,12 +332,13 @@ class PurchaseEvidenceStoreTest {
                 val stored = file.readBytes()
 
                 val store = FilePurchaseEvidenceStore(directory)
+                assertFalse("$name: the store is not readable", store.isReadable())
                 assertTrue("$name: nothing is read while the store is unreadable", store.load().isEmpty())
                 assertFalse("$name: nothing is written while it is unreadable", store.upsert(owed("new-token")))
                 assertTrue("$name: the file is left byte for byte as it was", stored.contentEquals(file.readBytes()))
                 val warnings = org.robolectric.shadows.ShadowLog.getLogsForTag("NuxieBilling").map { it.msg }
-                assertTrue("$name: the log names the row by its position", warnings.any {
-                    it.contains("Could not read a purchase evidence row") && it.contains("row=1")
+                assertTrue("$name: the log names the row by its position, and the field", warnings.any {
+                    it.contains("Could not read a purchase evidence row") && it.contains("row=1") && it.contains("field=")
                 })
                 assertFalse(warnings.any { it.contains("broken-token") || it.contains("good-token") })
             } finally {
@@ -332,6 +346,65 @@ class PurchaseEvidenceStoreTest {
             }
         }
     }
+
+    @Test
+    fun aBindingOrCatalogRowWithAMalformedFieldClosesTheStoreAndLeavesItsFileUntouched(): Unit =
+        kotlinx.coroutines.runBlocking {
+            // The field's name is a sensitive log field: shown here with redaction off.
+            ai.nuxie.sdk.logging.NuxieLog.configure(ai.nuxie.sdk.LogLevel.WARN, redactSensitiveData = false)
+            val mapping = StoredProductMapping(
+                storeProductId = "play-pro",
+                nuxieProductId = "pro",
+                productType = "inapp",
+                consumable = false,
+                licensingPublicKey = "public-key",
+            )
+            val binding = StoredPurchaseBinding(
+                obfuscatedAccountId = "account-hash",
+                distinctId = "customer-1",
+                storeProductId = "play-pro",
+                nuxieProductId = "pro",
+                productType = "inapp",
+                consumable = false,
+                nuxieManaged = true,
+            )
+            // A licensing key that is not a string must never read as "no key": that
+            // would drop the product's signature requirement.
+            for ((fileName, field, value) in listOf(
+                Triple("purchase-catalog.json", "licensingPublicKey", JsonPrimitive(42)),
+                Triple("purchase-bindings.json", "awaitingCheckout", JsonPrimitive("yes")),
+            )) {
+                val directory = Files.createTempDirectory("nuxie-purchase-catalog").toFile()
+                org.robolectric.shadows.ShadowLog.clear()
+                try {
+                    val writer = FilePurchaseEvidenceStore(directory)
+                    assertTrue(writer.upsertProductMapping(mapping))
+                    assertTrue(writer.upsertBinding(binding))
+                    val file = File(directory, fileName)
+                    val rows = Json.parseToJsonElement(file.readText()).jsonArray
+                    file.writeText(kotlinx.serialization.json.JsonArray(listOf(JsonObject(rows.single().jsonObject + (field to value)))).toString())
+                    val stored = file.readBytes()
+
+                    val store = FilePurchaseEvidenceStore(directory)
+                    assertFalse("$field: the store is not readable", store.isReadable())
+                    if (fileName == "purchase-catalog.json") {
+                        assertTrue(store.loadProductMappings().isEmpty())
+                        assertFalse(store.upsertProductMapping(mapping.copy(nuxieProductId = "other")))
+                    } else {
+                        assertTrue(store.loadBindings().isEmpty())
+                        assertFalse(store.upsertBinding(binding.copy(distinctId = "customer-2")))
+                    }
+                    assertTrue("$field: the file is left byte for byte as it was", stored.contentEquals(file.readBytes()))
+                    val warnings = org.robolectric.shadows.ShadowLog.getLogsForTag("NuxieBilling").map { it.msg }
+                    assertTrue("$field: the log names the row and the field", warnings.any {
+                        it.contains("row=0") && it.contains("field=$field")
+                    })
+                } finally {
+                    directory.deleteRecursively()
+                }
+            }
+            ai.nuxie.sdk.logging.NuxieLog.configure(ai.nuxie.sdk.LogLevel.WARN)
+        }
 
     private fun owed(token: String) = PurchaseEvidence(
         purchaseToken = token,
