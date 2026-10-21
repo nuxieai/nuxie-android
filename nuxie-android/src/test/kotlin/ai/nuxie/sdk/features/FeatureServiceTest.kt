@@ -793,6 +793,69 @@ class FeatureServiceTest {
     }
 
     @Test
+    fun aCheckThatBeganBeforeA200HoldRetiredCannotPublishOverTheProfile() = runBlocking {
+        val checkStarted = CountDownLatch(1)
+        val releaseCheck = CountDownLatch(1)
+        lateinit var core: NuxieCore
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    checkStarted.countDown()
+                    assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "pro",
+                            requiredBalance = 1.0,
+                            allowed = true,
+                            balance = "null",
+                            type = "boolean",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    profileResponse("[]")
+                }
+            }
+        }
+        core = core(transport)
+        val customer = core.identity.distinctId()
+        core.features.hydrateProfile(customer, Json.parseToJsonElement("""{"features":[]}""").jsonObject)
+        // A 200 holds "pro" until a profile requested after it lands.
+        core.features.publishStaged(
+            core.features.stagePurchaseAnswer(
+                customer,
+                Json.parseToJsonElement(
+                    """{"success":true,"features":[{"id":"pro","type":"boolean","allowed":true,"unlimited":false,"balance":null}]}""",
+                ).jsonObject,
+                emptyMap(),
+            ),
+        )
+        assertTrue(core.featureInfo.isAllowed("pro"))
+
+        // That profile is requested, then a check of "pro" begins.
+        val purchaseRevision = core.features.capturePurchaseRevision()
+        val profileRevision = core.features.reserveAuthoritativeRevision()
+        val check = async(Dispatchers.Default) { runCatching { core.features.check("pro") } }
+        assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
+        // The profile lands without "pro": it retires the hold.
+        core.features.hydrateProfile(
+            customer,
+            Json.parseToJsonElement("""{"features":[]}""").jsonObject,
+            snapshotPurchaseRevision = purchaseRevision,
+            snapshotAuthoritativeRevision = profileRevision,
+        )
+        assertFalse(core.featureInfo.isAllowed("pro"))
+
+        // The check began before that retirement: its answer cannot publish over the profile.
+        releaseCheck.countDown()
+        check.await()
+        assertFalse(core.featureInfo.isAllowed("pro"))
+        assertEquals(null, core.features.getCached("pro", null))
+        core.stop()
+    }
+
+    @Test
     fun profileFetchStartedBeforePurchaseResponseDoesNotEraseTheNewerFeatureUpdate() = runBlocking {
         val fetchStarted = CountDownLatch(1)
         val releaseFetch = CountDownLatch(1)

@@ -449,7 +449,14 @@ internal class FeatureService(
             }
             // A profile requested after an answer retires that answer's grants
             // only; later answers keep theirs until a profile requested after them.
-            purchaseAnswers = purchaseAnswers.filter { it.committedRevision > snapshotPurchaseRevision }
+            val (kept, retired) = purchaseAnswers.partition { it.committedRevision > snapshotPurchaseRevision }
+            purchaseAnswers = kept
+            // Retiring a 200 hold changes those Features: it advances their
+            // revision, so a check that began before it cannot publish its
+            // answer over this profile.
+            retired.flatMapTo(linkedSetOf()) { it.access.keys }.forEach { featureId ->
+                committedMutationRevisions[CacheKey(featureId, null)] = advanceFeatureMutationRevision(featureId)
+            }
             stageCurrentLocked(
                 expectedGeneration = hydrationGeneration,
                 publicationGuard = {

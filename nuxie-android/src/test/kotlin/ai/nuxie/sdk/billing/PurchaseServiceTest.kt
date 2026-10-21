@@ -1247,6 +1247,100 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun aClaimWaitsWhileAnAnswerForThePurchaseIsApplied() = runTest {
+        val fixture = fixture(this)
+        val customer = fixture.core.identity.distinctId()
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("applied-token", obfuscatedAccountId = accountHash(customer)),
+        )
+        fixture.synchronizer = { accepted(it.requester, it) }
+        // The launch scan's send is accepted; applying that answer is held at its write.
+        val answerApplying = CompletableDeferred<Unit>()
+        val finishApplying = CompletableDeferred<Unit>()
+        fixture.store.beforeUpsert = { evidence ->
+            if (evidence.purchaseToken == "applied-token" && evidence.pendingSend == null && evidence.synced) {
+                answerApplying.complete(Unit)
+                finishApplying.await()
+            }
+        }
+        val launch = async { fixture.service.recover() }
+        runCurrent()
+        answerApplying.await()
+        val scanSend = fixture.store.load().getValue("applied-token").pendingSend
+        assertEquals(PurchaseSyncReason.SYNC, scanSend?.reason)
+
+        // A Restore starts while that answer is applied: its claim waits.
+        val restore = async { fixture.service.restorePurchases() }
+        runCurrent()
+        assertEquals(
+            "No new admission while the answer is applied",
+            scanSend,
+            fixture.store.load().getValue("applied-token").pendingSend,
+        )
+
+        fixture.store.beforeUpsert = null
+        finishApplying.complete(Unit)
+        launch.await()
+        assertEquals(RestoreResult.Restored, restore.await())
+        assertEquals(
+            listOf(PurchaseSyncReason.SYNC, PurchaseSyncReason.RESTORE),
+            fixture.requests.map { it.second.reason },
+        )
+        assertNull(fixture.store.load().getValue("applied-token").pendingSend)
+        fixture.close()
+    }
+
+    @Test
+    fun aWriteBasedOnASupersededAdmissionIsDropped() = runTest {
+        val fixture = fixture(this, initialRetryDelayMillis = 1_000, maxRetryDelayMillis = 1_000)
+        val customer = fixture.core.identity.distinctId()
+        fixture.billing.active[BillingClient.ProductType.INAPP] = listOf(
+            playPurchase("basis-token", obfuscatedAccountId = accountHash(customer)),
+        )
+        // The launch scan's send gets no answer: the entry keeps one failed attempt.
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
+        fixture.service.recover()
+        assertEquals(1, fixture.store.load().getValue("basis-token").syncAttempts)
+
+        // Its retry is out when a recovery reads the entry to write Play's observation.
+        val retryOut = CompletableDeferred<Unit>()
+        val answerTheRetry = CompletableDeferred<Unit>()
+        fixture.synchronizer = {
+            retryOut.complete(Unit)
+            answerTheRetry.await()
+            accepted(it.requester, it)
+        }
+        advanceTimeBy(1_000)
+        runCurrent()
+        retryOut.await()
+        val observing = CompletableDeferred<Unit>()
+        val finishObserving = CompletableDeferred<Unit>()
+        fixture.store.afterNextMappingsLoad = {
+            observing.complete(Unit)
+            finishObserving.await()
+        }
+        val recovery = async { fixture.service.recover() }
+        runCurrent()
+        observing.await()
+
+        // The retry is accepted while that observation is being written.
+        answerTheRetry.complete(Unit)
+        runCurrent()
+        finishObserving.complete(Unit)
+        recovery.await()
+        runCurrent()
+
+        val entry = fixture.store.load().getValue("basis-token")
+        assertNull(entry.pendingSend)
+        assertEquals(
+            "The observation is written over the answered entry, not the attempts it read before",
+            0,
+            entry.syncAttempts,
+        )
+        fixture.close()
+    }
+
+    @Test
     fun aLaterDeliveryReadsTheEntryNotAnEarlierCommit() = runTest {
         val actions = mutableListOf<String>()
         val fixture = fixture(this, actions = actions)
@@ -2793,13 +2887,12 @@ class PurchaseServiceTest {
         runCurrent()
         verificationStarted.await()
 
-        // A Play update reads owner A, then the server moves the purchase to B
-        // before the update writes its evidence back.
-        fixture.store.afterNextMappingsLoad = {
-            serverAnswers.complete(Unit)
-            assertEquals(RestoreResult.Restored, restore.await())
-        }
+        // The server's answer moving the purchase to B arrives while a Play update
+        // is being written. The update is built over the entry as it stands and
+        // written in the same step, so the answer applies after it, not under it.
+        fixture.store.afterNextMappingsLoad = { serverAnswers.complete(Unit) }
         fixture.service.onPurchasesUpdated(okUpdate(purchase))
+        assertEquals(RestoreResult.Restored, restore.await())
 
         val retained = fixture.store.load().getValue("refresh-token")
         assertEquals("customer-b", retained.ownerDistinctId)
@@ -5186,6 +5279,8 @@ class PurchaseServiceTest {
         var rejectEvidenceUpsert: ((PurchaseEvidence) -> Boolean)? = null
         var afterNextLoad: ((Map<String, PurchaseEvidence>) -> Unit)? = null
         var afterNextMappingsLoad: (suspend (List<StoredProductMapping>) -> Unit)? = null
+        /** Runs before each evidence write, and may hold it. */
+        var beforeUpsert: (suspend (PurchaseEvidence) -> Unit)? = null
         override suspend fun load(): Map<String, PurchaseEvidence> {
             checkThread()
             val snapshot = entries.toMap()
@@ -5195,6 +5290,7 @@ class PurchaseServiceTest {
             return snapshot
         }
         override suspend fun upsert(evidence: PurchaseEvidence): Boolean {
+            beforeUpsert?.invoke(evidence)
             actions += "persist"
             if (failEvidenceUpserts || rejectEvidenceUpsert?.invoke(evidence) == true) return false
             entries[evidence.purchaseToken] = evidence

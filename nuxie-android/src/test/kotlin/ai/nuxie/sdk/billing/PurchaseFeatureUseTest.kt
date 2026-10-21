@@ -197,6 +197,32 @@ class PurchaseFeatureUseTest {
     }
 
     @Test
+    fun aCatalogChangeRunsThePlayRecoveryQuery() = runBlocking {
+        val core = core(FakeTransport())
+        val store = InMemoryPurchaseEvidenceStore()
+        val sent = java.util.concurrent.CopyOnWriteArrayList<String>()
+        // Play owns token-1, a purchase this device has not stored.
+        service(core, store, synchronizer = PurchaseSynchronizer { evidence, _ ->
+            sent += evidence.purchaseToken
+            PurchaseSyncOutcome.Rejected()
+        })
+        delay(300)
+        assertTrue(sent.isEmpty())
+
+        // A changed mapping is a catalog change: Play is asked, and what it owns is sent.
+        store.upsertProductMapping(
+            featureDescriptor().copy(
+                featureAllowances = listOf(
+                    StoredFeatureAllowance("credits", FeatureType.CREDIT_SYSTEM.name, false, allowance = 2.0),
+                ),
+            ),
+        )
+        withTimeoutOrNull(3_000) { while (sent.isEmpty()) delay(10) }
+        assertEquals(listOf("token-1"), sent.distinct())
+        core.stop()
+    }
+
+    @Test
     fun onlyACatalogChangeResendsKeptEntries() = runBlocking {
         val core = core(FakeTransport())
         val store = InMemoryPurchaseEvidenceStore()
