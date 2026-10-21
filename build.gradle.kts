@@ -19,7 +19,7 @@ plugins {
 }
 
 group = "ai.nuxie"
-version = "0.1.1"
+version = "0.1.2"
 
 val androidToolchainFile = layout.projectDirectory.file("runtime/android-toolchain.properties").asFile
 val androidToolchain = Properties().apply {
