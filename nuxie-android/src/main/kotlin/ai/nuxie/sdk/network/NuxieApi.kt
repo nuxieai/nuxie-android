@@ -471,17 +471,24 @@ internal class NuxieApi(
             append('}')
         }.encodeToByteArray()
         val response = execute(purchaseRequest(body))
+        if (response.statusCode in 400..499 && response.statusCode !in setOf(408, 429)) {
+            throw TestStoreGrantRefusedException(response.statusCode)
+        }
         if (response.statusCode !in 200..299) {
-            throw IOException("Test Store purchase was not granted (HTTP ${response.statusCode})")
+            throw IOException("Test Store grant answered HTTP ${response.statusCode}")
         }
         val text = response.body.decodeToString().ifBlank { "{}" }
         StrictJsonValidator.requireNoDuplicateKeys(text)
         val parsed = Json.parseToJsonElement(text).jsonObject
         if ((parsed["success"] as? JsonPrimitive)?.content?.toBooleanStrictOrNull() != true) {
-            throw IOException("Test Store purchase was not granted")
+            throw TestStoreGrantRefusedException(response.statusCode)
         }
         return parsed
     }
+
+    /** The server answered a Test Store grant and granted nothing. */
+    class TestStoreGrantRefusedException(val statusCode: Int) :
+        IOException("Test Store purchase was not granted (HTTP $statusCode)")
 
     private fun purchaseRequest(body: ByteArray) = HttpTransport.Request(
         url = URL("$baseUrl/purchase"),

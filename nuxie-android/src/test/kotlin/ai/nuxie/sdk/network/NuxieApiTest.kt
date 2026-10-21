@@ -284,6 +284,7 @@ class NuxieApiTest {
             HttpTransport.Response(200, """{"success":true,"customer_id":"customer-1","features":[]}""".encodeToByteArray()),
             HttpTransport.Response(403, """{"success":false,"code":"test_store_requires_test_key"}""".encodeToByteArray()),
             HttpTransport.Response(200, """{"success":false}""".encodeToByteArray()),
+            HttpTransport.Response(503, "{}".encodeToByteArray()),
         ))
         val transport = object : HttpTransport {
             val requests = mutableListOf<HttpTransport.Request>()
@@ -295,11 +296,16 @@ class NuxieApiTest {
         val api = NuxieApi("pk_test_key", NuxieEnvironment.PRODUCTION, transport)
 
         val granted = api.grantTestStorePurchase("prd_annual", "nuxie-test-1", "customer-1")
+        // An answered refusal grants nothing; a server failure may have committed.
         repeat(2) {
-            assertThrows(IOException::class.java) {
+            assertThrows(NuxieApi.TestStoreGrantRefusedException::class.java) {
                 api.grantTestStorePurchase("prd_annual", "nuxie-test-1", "customer-1")
             }
         }
+        val unavailable = assertThrows(IOException::class.java) {
+            api.grantTestStorePurchase("prd_annual", "nuxie-test-1", "customer-1")
+        }
+        assertFalse(unavailable is NuxieApi.TestStoreGrantRefusedException)
 
         assertEquals("customer-1", (granted["customer_id"] as JsonPrimitive).content)
         assertEquals("https://i.nuxie.ai/purchase", transport.requests.first().url.toString())

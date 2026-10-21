@@ -143,6 +143,61 @@ class NuxieTestStoreTest {
     }
 
     @Test
+    fun `an unanswered grant is replayed by the next purchase of the same product`() = runTest {
+        val transactionIds = mutableListOf<String>()
+        val answers = ArrayDeque<() -> kotlinx.serialization.json.JsonObject>(listOf(
+            { throw java.io.IOException("timeout") },
+            { throw java.io.IOException("Test Store grant answered HTTP 503") },
+            { kotlinx.serialization.json.buildJsonObject { put("success", kotlinx.serialization.json.JsonPrimitive(true)) } },
+        ))
+        val store = NuxieTestStore(Choices()) { _, transactionId, _ ->
+            transactionIds += transactionId
+            answers.removeFirst()()
+        }
+
+        assertTrue(store.purchase(product("prd_annual"), "alice").result is PurchaseResult.Failed)
+        assertTrue(store.purchase(product("prd_annual"), "alice").result is PurchaseResult.Failed)
+        val granted = store.purchase(product("prd_annual"), "alice")
+
+        assertEquals(PurchaseResult.Purchased, granted.result)
+        assertEquals(3, transactionIds.size)
+        assertEquals("every attempt replays the first transaction", 1, transactionIds.toSet().size)
+        assertEquals(transactionIds.first(), granted.transactionId)
+    }
+
+    @Test
+    fun `a refused or settled grant starts a new transaction next time`() = runTest {
+        val transactionIds = mutableListOf<String>()
+        var calls = 0
+        val store = NuxieTestStore(Choices()) { _, transactionId, _ ->
+            transactionIds += transactionId
+            calls += 1
+            if (calls == 1) throw ai.nuxie.sdk.network.NuxieApi.TestStoreGrantRefusedException(403)
+            kotlinx.serialization.json.buildJsonObject { put("success", kotlinx.serialization.json.JsonPrimitive(true)) }
+        }
+
+        repeat(3) { store.purchase(product("prd_annual"), "alice") }
+
+        assertEquals(3, transactionIds.toSet().size)
+    }
+
+    @Test
+    fun `an unanswered grant is kept for its own customer and product`() = runTest {
+        val transactionIds = mutableListOf<String>()
+        val store = NuxieTestStore(Choices()) { _, transactionId, distinctId ->
+            transactionIds += transactionId
+            if (distinctId == "alice") throw java.io.IOException("timeout")
+            kotlinx.serialization.json.buildJsonObject { put("success", kotlinx.serialization.json.JsonPrimitive(true)) }
+        }
+
+        store.purchase(product("prd_annual"), "alice")
+        store.purchase(product("prd_annual"), "bob")
+        store.purchase(product("prd_monthly"), "alice")
+
+        assertEquals(3, transactionIds.toSet().size)
+    }
+
+    @Test
     fun `only a purchased choice reaches the server`() = runTest {
         var grants = 0
         for (choice in TestStorePurchaseChoice.entries - TestStorePurchaseChoice.PURCHASED) {
