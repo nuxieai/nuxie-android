@@ -49,12 +49,12 @@ internal class NuxieTestStore(
     private val purchases = mutableMapOf<String, MutableMap<String, StoreProduct>>()
 
     /**
-     * A grant whose outcome is unknown (the server may have committed it) keeps
-     * its transaction ID, so the customer's next Purchased of the same Product
-     * replays that grant instead of granting again. A purchase takes the ID
-     * while it runs, so one that overlaps it is a purchase of its own.
+     * Grants whose outcome is unknown (the server may have committed them) keep
+     * their transaction IDs, oldest first, so the customer's next Purchased of
+     * the same Product replays one instead of granting again. A purchase takes
+     * its ID while it runs, so one that overlaps it is a purchase of its own.
      */
-    private val unsettledTransactionIds = mutableMapOf<Pair<String, String>, String>()
+    private val unsettledTransactionIds = mutableMapOf<Pair<String, String>, ArrayDeque<String>>()
 
     suspend fun purchase(product: StoreProduct, distinctId: String, activity: android.app.Activity? = null): TestStorePurchaseResponse {
         // Do not hold storage ownership while waiting for a human choice. The
@@ -62,18 +62,21 @@ internal class NuxieTestStore(
         return when (if (activity == null) choices.purchase(product) else choices.purchase(product, activity)) {
             TestStorePurchaseChoice.PURCHASED -> {
                 val attempt = distinctId to product.productId
-                val transactionId = mutex.withLock { unsettledTransactionIds.remove(attempt) }
-                    ?: "nuxie-test-${UUID.randomUUID()}"
+                val transactionId = mutex.withLock {
+                    unsettledTransactionIds[attempt]?.let { unsettled ->
+                        unsettled.removeFirst().also { if (unsettled.isEmpty()) unsettledTransactionIds.remove(attempt) }
+                    }
+                } ?: "nuxie-test-${UUID.randomUUID()}"
                 val access = try {
                     granting.grant(product.productId, transactionId, distinctId)
                 } catch (cancellation: CancellationException) {
                     withContext(NonCancellable) {
-                        mutex.withLock { unsettledTransactionIds[attempt] = transactionId }
+                        mutex.withLock { unsettledTransactionIds.getOrPut(attempt) { ArrayDeque() }.addLast(transactionId) }
                     }
                     throw cancellation
                 } catch (failure: Exception) {
                     if (failure !is NuxieApi.TestStoreGrantRefusedException) {
-                        mutex.withLock { unsettledTransactionIds[attempt] = transactionId }
+                        mutex.withLock { unsettledTransactionIds.getOrPut(attempt) { ArrayDeque() }.addLast(transactionId) }
                     }
                     return TestStorePurchaseResponse(PurchaseResult.Failed(failure))
                 }
