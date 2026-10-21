@@ -562,6 +562,12 @@ internal class PurchaseService(
     private val completedExternalCommits = mutableSetOf<PurchaseCommitIdentity.External>()
     /** For the commit observer only: each purchase's completed commit is reported once. Guarded by [processing]. */
     private val reportedEvidenceCommits = mutableSetOf<PurchaseCommitIdentity.Evidence>()
+    /**
+     * Failed attempts the store could not save, by purchase token, held until a
+     * later write succeeds: a failed write never makes a retry fire sooner than
+     * the backoff its attempt count gives. Guarded by [projectionRefresh].
+     */
+    private val unsavedAttempts = mutableMapOf<String, UnsavedAttempts>()
     private val usageCoordinationLock = Any()
     /** The one send in flight per purchase token; guarded by [usageCoordinationLock]. */
     private val sending = mutableMapOf<String, CompletableDeferred<SendAnswer>>()
@@ -2164,15 +2170,27 @@ internal class PurchaseService(
             }
             PurchaseAnswer.Failed -> null
         }?.copy(pendingSend = null, syncAttempts = 0, retryDueAtMillis = null)
-        if (answered != null && evidenceStore.upsert(answered)) return EntryAnswer.Answered(answered)
+        if (answered != null && evidenceStore.upsert(answered)) {
+            unsavedAttempts.remove(purchaseToken)
+            return EntryAnswer.Answered(answered)
+        }
         // No answer, or one that could not be saved: it changes nothing but the
         // attempt count, so the entry stays owed and unlocking until an answer is saved.
-        val attempts = current.syncAttempts + 1
+        // An attempt count whose write failed is held here, so the backoff still grows.
+        val held = unsavedAttempts[purchaseToken]?.takeIf { it.admissionId == send.admissionId }?.attempts ?: 0
+        val attempts = maxOf(current.syncAttempts, held) + 1
         // The due time is saved with the attempt, so it survives a restart.
         val dueAt = nowMillis() + outboxRetryDelay(attempts)
-        evidenceStore.upsert(current.copy(syncAttempts = attempts, retryDueAtMillis = dueAt))
+        if (evidenceStore.upsert(current.copy(syncAttempts = attempts, retryDueAtMillis = dueAt))) {
+            unsavedAttempts.remove(purchaseToken)
+        } else {
+            unsavedAttempts[purchaseToken] = UnsavedAttempts(send.admissionId, attempts)
+        }
         return EntryAnswer.Kept(dueAt)
     }
+
+    /** An attempt count the store could not save, for the admission it counts. */
+    private data class UnsavedAttempts(val admissionId: String, val attempts: Int)
 
     /**
      * Apply the server's answer to a send of [purchaseToken]'s entry. After any

@@ -5037,6 +5037,42 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun aRetryBackoffKeepsGrowingWhenItsAttemptCannotBeSaved() = runTest {
+        val clock = { 1_800_000_000_000L + testScheduler.currentTime }
+        val store = RecordingEvidenceStore()
+        store.upsert(owedRestoreEvidence("stored-customer"))
+        // The store cannot save the entry's retry bookkeeping (a full disk, say).
+        store.rejectEvidenceUpsert = { it.purchaseToken == "refresh-token" && it.syncAttempts > 0 }
+        val launched = fixture(
+            this,
+            store = store,
+            initialRetryDelayMillis = 1_000,
+            maxRetryDelayMillis = 1_000_000,
+            nowMillis = clock,
+        )
+        var sends = 0
+        launched.synchronizer = {
+            sends += 1
+            PurchaseSyncOutcome.Rejected()
+        }
+
+        // Sent at launch; each failure is due again after 1 s, then 2 s, then 4 s.
+        runCurrent()
+        assertEquals(1, sends)
+        advanceTimeBy(3_500)
+        runCurrent()
+        assertEquals("The backoff grows though no attempt was saved", 3, sends)
+        advanceTimeBy(3_499)
+        runCurrent()
+        assertEquals(3, sends)
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(4, sends)
+        assertEquals("Nothing was saved", 0, store.load().getValue("refresh-token").syncAttempts)
+        launched.close()
+    }
+
+    @Test
     fun anEntryNeverSentIsSentAtLaunchWithoutPlay() = runTest {
         // The entry was admitted, then the process died before its first send.
         val store = RecordingEvidenceStore()
