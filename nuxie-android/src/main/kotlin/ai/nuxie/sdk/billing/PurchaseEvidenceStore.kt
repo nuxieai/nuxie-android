@@ -170,7 +170,20 @@ internal data class PurchaseSend(
         fun admit(reason: PurchaseSyncReason, distinctId: String, customerKind: CustomerKind) =
             PurchaseSend(reason, distinctId, customerKind, java.util.UUID.randomUUID().toString())
     }
+
+    /** The same reason, requester and kind as a new admission. */
+    fun readmitted(): PurchaseSend = admit(reason, distinctId, customerKind)
 }
+
+/** The Play facts a send of an entry carries, besides its admission's reason, requester and kind. */
+internal data class SendPayload(
+    val productId: String?,
+    val basePlanId: String?,
+    val purchaseOptionId: String?,
+    val offerId: String?,
+    val productType: String?,
+    val obfuscatedAccountId: String?,
+)
 
 /**
  * One Play purchase's durable outbox entry, keyed by its purchase token: the
@@ -231,6 +244,17 @@ internal data class PurchaseEvidence(
 ) {
     /** The server accepted this purchase for its owner. */
     val synced: Boolean get() = ownerDistinctId != null
+
+    /** What a send of this entry carries; a write that changes it is a new admission. */
+    val sendPayload: SendPayload
+        get() = SendPayload(
+            storeProductIds.firstOrNull(),
+            basePlanId,
+            purchaseOptionId,
+            offerId,
+            productType,
+            obfuscatedAccountId,
+        )
 
     /** Accepted and still to be acknowledged or consumed with Play by Nuxie. */
     val needsManagedCompletion: Boolean

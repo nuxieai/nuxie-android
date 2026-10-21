@@ -57,6 +57,7 @@ import kotlinx.serialization.json.long
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -1337,6 +1338,51 @@ class PurchaseServiceTest {
             0,
             entry.syncAttempts,
         )
+        fixture.close()
+    }
+
+    @Test
+    fun aWriteThatChangesWhatTheSendCarriesIsANewAdmission() = runTest {
+        val fixture = fixture(this)
+        val customer = fixture.core.identity.distinctId()
+        val purchase = playPurchase("early-token", obfuscatedAccountId = accountHash(customer))
+        val sent = mutableListOf<PurchaseEvidence>()
+        val firstSendOut = CompletableDeferred<Unit>()
+        val answerTheFirst = CompletableDeferred<Unit>()
+        fixture.synchronizer = { evidence ->
+            sent += evidence
+            if (sent.size == 1) {
+                firstSendOut.complete(Unit)
+                answerTheFirst.await()
+            }
+            accepted(evidence.requester, evidence)
+        }
+        // Play delivers the purchase before its catalog mapping has loaded.
+        val delivery = async { fixture.service.onPurchasesUpdated(okUpdate(purchase)) }
+        runCurrent()
+        firstSendOut.await()
+        val firstAdmission = fixture.store.load().getValue("early-token").pendingSend
+        assertNull(sent.single().productType)
+
+        // The catalog loads and a recovery fills in what the send carries.
+        fixture.service.rememberProduct(product(subscription = true, licensingPublicKey = null))
+        fixture.billing.active[BillingClient.ProductType.SUBS] = listOf(purchase)
+        val recovery = async { fixture.service.recover() }
+        runCurrent()
+        val changed = fixture.store.load().getValue("early-token")
+        assertEquals(BillingClient.ProductType.SUBS, changed.productType)
+        assertNotEquals("The changed send is a new admission", firstAdmission, changed.pendingSend)
+        assertEquals(0, changed.syncAttempts)
+
+        // The answer to the earlier payload cannot settle the changed entry: it is sent again as it now is.
+        answerTheFirst.complete(Unit)
+        delivery.await()
+        recovery.await()
+        runCurrent()
+        assertEquals(2, sent.size)
+        assertEquals(BillingClient.ProductType.SUBS, sent.last().productType)
+        assertEquals("annual", sent.last().basePlanId)
+        assertNull(fixture.store.load().getValue("early-token").pendingSend)
         fixture.close()
     }
 
