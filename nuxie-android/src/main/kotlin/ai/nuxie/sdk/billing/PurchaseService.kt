@@ -2133,8 +2133,10 @@ internal class PurchaseService(
     private suspend fun sendOnce(purchaseToken: String): SendAnswer {
         val evidence = evidenceStore.load()[purchaseToken] ?: return SendAnswer(null, SyncResult.UNAVAILABLE)
         val send = evidence.pendingSend ?: return SendAnswer(null, SyncResult.UNAVAILABLE)
-        // While the outbox is off a stored entry waits for the next launch.
-        if (outboxOff) return SendAnswer(null, SyncResult.UNAVAILABLE)
+        // The outbox turned off after this entry was saved (a later write failed):
+        // the delivery or claim that admitted it is still sent once, unsaved. Timers
+        // and the stored-entry pass never get here while it is off.
+        if (outboxOff) return SendAnswer(null, sendUnsaved(evidence, send))
         // A purchase whose Play signature the current catalog requires and that
         // never verified is never sent. Like any owed entry that cannot be sent,
         // it counts a failed attempt and waits out its backoff, so its timer
