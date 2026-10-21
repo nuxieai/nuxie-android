@@ -20,6 +20,7 @@ import java.security.MessageDigest
 import java.security.Signature
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -261,8 +262,49 @@ class JourneyRefetchEventHoldTest {
         assertEquals(0, launch.outcomes("customer", "timed_out"))
     }
 
+    /**
+     * The copy lands while a go sent during the hold is still in EventLog's
+     * route worker. The wait that ran out meanwhile resolves only once that go
+     * has reached Journey, so it takes the go.
+     */
+    @Test fun `waits resolve only after events still in EventLog when the copy lands`() = runBlocking {
+        val goReached = CompletableDeferred<Unit>()
+        val releaseGo = CompletableDeferred<Unit>()
+        val launch = Launch("customer") { event ->
+            if (event.name == "go") {
+                goReached.complete(Unit)
+                releaseGo.await()
+            }
+        }
+        val saved = launch.copy("customer", 1, "start_waiting")
+        launch.start()
+        launch.commit("customer", saved)
+        launch.track("start_waiting")
+        launch.journeys.profileRefetchWillBegin("customer")
+        launch.withdraw("customer")
+        launch.eventLog.capture("go")
+        withTimeout(5_000L) { goReached.await() }
+        launch.clock.addAndGet(70_000L)
+
+        launch.commit("customer", saved)
+        assertEquals(0, launch.outcomes("customer", "timed_out"))
+
+        releaseGo.complete(Unit)
+        launch.journeys.profileRefetchDidSettle("customer")
+        launch.eventLog.awaitBarrier()
+        withTimeout(5_000L) {
+            while (launch.outcomes("customer", "took_go") + launch.outcomes("customer", "timed_out") == 0) delay(20)
+        }
+        assertEquals(1, launch.outcomes("customer", "took_go"))
+        assertEquals(0, launch.outcomes("customer", "timed_out"))
+    }
+
     /** One launch: Journey subscribed to a real EventLog as NuxieCore subscribes it. */
-    private inner class Launch(distinctId: String) {
+    private inner class Launch(
+        distinctId: String,
+        /** Runs in EventLog's route worker before Journey sees each event. */
+        private val beforeJourney: (suspend (StoredEvent) -> Unit)? = null,
+    ) {
         val clock = AtomicLong(1_000_000L)
         val identity = MutableIdentity(distinctId)
         private val store = SQLiteEventStore(context, nowMillis = { clock.get() })
@@ -291,12 +333,14 @@ class JourneyRefetchEventHoldTest {
             },
             nowMillis = { clock.get() },
             replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
+            awaitEventsDrained = eventLog::awaitBarrier,
             fixedStorageScope = JourneyStorageScope(authority),
         )
         private var publication = 0L
 
         init {
             launches += this
+            beforeJourney?.let { hook -> eventLog.subscribeCommitted { event -> hook(event) } }
             eventLog.subscribeCommittedWithAdmission(sampleGeneration = journeys::eventAdmissionGeneration) { event, generation ->
                 journeys.handleEvent(event, generation)
             }
