@@ -227,7 +227,11 @@ internal interface PurchaseEvidenceStore {
     suspend fun loadBindings(): List<StoredPurchaseBinding> = emptyList()
     suspend fun upsertBinding(binding: StoredPurchaseBinding): Boolean = true
     suspend fun loadProductMappings(): List<StoredProductMapping> = emptyList()
-    /** Successful installation invokes the listener before a later mapping installation may begin. */
+    /**
+     * An installation that changes the catalog (a new product or a changed
+     * mapping) invokes the listener, once, before a later mapping installation
+     * may begin. Installing the same mapping again changes nothing and does not.
+     */
     suspend fun upsertProductMapping(mapping: StoredProductMapping): Boolean = true
     fun setProductMappingsChangedListener(listener: (suspend () -> Unit)?) = Unit
 }
@@ -283,13 +287,19 @@ internal class FilePurchaseEvidenceStore(
 
     override suspend fun upsertProductMapping(mapping: StoredProductMapping): Boolean = onIo {
         productMappingInstallationLock.withLock {
-            val persisted = synchronized(lock) {
+            val upsert = synchronized(lock) {
                 val entries = loadMappingsUnlocked().associateByTo(linkedMapOf()) { it.productIdentity }
+                // The same mapping again changes nothing: no write and no catalog change.
+                if (entries[mapping.productIdentity] == mapping) return@synchronized MappingUpsert.UNCHANGED
                 entries[mapping.productIdentity] = mapping
-                saveArray(catalogFile, entries.values.map(::encodeMapping), "catalog mapping")
+                if (saveArray(catalogFile, entries.values.map(::encodeMapping), "catalog mapping")) {
+                    MappingUpsert.CHANGED
+                } else {
+                    MappingUpsert.FAILED
+                }
             }
-            if (persisted) withContext(NonCancellable) { productMappingsChangedListener?.invoke() }
-            persisted
+            if (upsert == MappingUpsert.CHANGED) withContext(NonCancellable) { productMappingsChangedListener?.invoke() }
+            upsert != MappingUpsert.FAILED
         }
     }
 
@@ -613,6 +623,9 @@ internal class FilePurchaseEvidenceStore(
         (this[key] as? JsonPrimitive)?.booleanOrNull ?: false
 }
 
+/** What writing a catalog mapping did: the catalog changes only when a mapping does. */
+private enum class MappingUpsert { CHANGED, UNCHANGED, FAILED }
+
 internal class InMemoryPurchaseEvidenceStore : PurchaseEvidenceStore {
     private val entries = linkedMapOf<String, PurchaseEvidence>()
     private val bindings = linkedMapOf<StoredPurchaseBindingKey, StoredPurchaseBinding>()
@@ -636,8 +649,11 @@ internal class InMemoryPurchaseEvidenceStore : PurchaseEvidenceStore {
     }
     override suspend fun upsertProductMapping(mapping: StoredProductMapping): Boolean =
         productMappingInstallationLock.withLock {
-            synchronized(mappings) { mappings[mapping.productIdentity] = mapping }
-            withContext(NonCancellable) { productMappingsChangedListener?.invoke() }
+            // The same mapping again changes nothing: no catalog change.
+            val changed = synchronized(mappings) {
+                (mappings.put(mapping.productIdentity, mapping) != mapping)
+            }
+            if (changed) withContext(NonCancellable) { productMappingsChangedListener?.invoke() }
             true
         }
     override fun setProductMappingsChangedListener(listener: (suspend () -> Unit)?) {

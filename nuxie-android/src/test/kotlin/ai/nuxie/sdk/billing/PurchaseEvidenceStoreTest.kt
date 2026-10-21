@@ -306,6 +306,31 @@ class PurchaseEvidenceStoreTest {
     }
 
     @Test
+    fun bothStoresReportACatalogChangeOnlyWhenAMappingChanges(): Unit = kotlinx.coroutines.runBlocking {
+        val directory = Files.createTempDirectory("nuxie-purchase-evidence").toFile()
+        try {
+            for (store in listOf(FilePurchaseEvidenceStore(directory), InMemoryPurchaseEvidenceStore())) {
+                val changes = AtomicInteger()
+                store.setProductMappingsChangedListener { changes.incrementAndGet() }
+                val mapping = StoredProductMapping(
+                    storeProductId = "pro",
+                    nuxieProductId = "pro-product",
+                    productType = "inapp",
+                    consumable = false,
+                    featureAllowances = emptyList(),
+                )
+                assertTrue(store.upsertProductMapping(mapping))
+                assertTrue("The same mapping again is still stored", store.upsertProductMapping(mapping))
+                assertEquals("A new product is one change", 1, changes.get())
+                assertTrue(store.upsertProductMapping(mapping.copy(consumable = true)))
+                assertEquals("A changed mapping is one more", 2, changes.get())
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun fileStoreDistinguishesAbsentEmptyAndPopulatedPinnedAllowances(): Unit = kotlinx.coroutines.runBlocking {
         val directory = Files.createTempDirectory("nuxie-pinned-purchase-allowances").toFile()
         try {
