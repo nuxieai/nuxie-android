@@ -550,13 +550,15 @@ internal class PurchaseService(
     /** Process-lifetime terminal identities; guarded by [processing]. */
     private val completedPurchaseCommits = mutableMapOf<PurchaseCommitIdentity, Unit>()
     /**
-     * What Play reported most recently: each purchase token with the product
-     * type of the query that reported it, or null when only a purchase update
-     * delivered it. In memory only, recomputed on every query, and empty after
-     * launch until the first one, so stored entries unlock nothing early before
-     * Play has reported them. Guarded by itself.
+     * What Play reported most recently: each purchase token with its product
+     * type (null while only a purchase update has delivered it and nothing
+     * knows the type) and the stamp of when it was last reported. In memory
+     * only, recomputed on every query, and empty after launch until the first
+     * one, so stored entries unlock nothing early before Play has reported
+     * them. Guarded by itself, as is [playReportStamp].
      */
-    private val playReported = mutableMapOf<String, String?>()
+    private val playReported = mutableMapOf<String, PlayReported>()
+    private var playReportStamp = 0L
     /**
      * Purchases the server answered in this process. An answer ends the early
      * unlock at once, even when saving it failed and the entry stays owed.
@@ -2746,12 +2748,12 @@ internal class PurchaseService(
      * again, so a commit that failed exposes nothing.
      */
     private suspend fun <T> updatePlayReport(
-        change: (MutableMap<String, String?>) -> Unit,
+        change: PlayReportEdit.() -> Unit,
         during: suspend () -> T,
     ): T {
         val (removed, added) = synchronized(playReported) {
             val before = playReported.keys.toSet()
-            change(playReported)
+            PlayReportEdit().change()
             (before - playReported.keys) to (playReported.keys - before)
         }
         var completed = false
@@ -2765,37 +2767,57 @@ internal class PurchaseService(
         }
     }
 
-    private suspend fun updatePlayReport(change: (MutableMap<String, String?>) -> Unit) =
+    private suspend fun updatePlayReport(change: PlayReportEdit.() -> Unit) =
         updatePlayReport(change) {}
+
+    private class PlayReported(val type: String?, val stamp: Long)
+
+    /** The changes [updatePlayReport] may make; used only while it holds the report. */
+    private inner class PlayReportEdit {
+        val reported: MutableMap<String, PlayReported> get() = playReported
+
+        /** Play reported [token] now: it gets a fresh stamp. */
+        fun report(token: String, type: String?) {
+            playReportStamp += 1
+            reported[token] = PlayReported(type, playReportStamp)
+        }
+
+        /** Remove what a query or pass that started at [since] can speak for. */
+        fun removeReportedBefore(since: Long, matches: (String?) -> Boolean) {
+            reported.entries.removeAll { (_, entry) -> entry.stamp <= since && matches(entry.type) }
+        }
+    }
+
+    /** The report's stamp now: a query or pass started at it removes only what was reported by then. */
+    private fun playReportNow(): Long = synchronized(playReported) { playReportStamp }
 
     /**
      * Ask Play for its active purchases of [productType], recording what it
-     * reports. A query speaks only for its own type: it replaces that type's
-     * tokens and leaves the other type's, and those of unknown type, alone.
+     * reports. A query speaks only for its own type, and only for what was in
+     * the report when it started: a purchase reported after that (by an update
+     * or another query) survives its result. Its own purchases are added.
      */
     private suspend fun queryPlay(@BillingClient.ProductType productType: String): ActivePurchasesResult {
+        val since = playReportNow()
         val result = billing.queryActive(productType)
         if (result is ActivePurchasesResult.Success) {
-            updatePlayReport { reported ->
-                reported.entries.removeAll { (_, type) -> type == productType }
-                result.purchases.forEach { reported[it.purchaseToken] = productType }
+            updatePlayReport {
+                removeReportedBefore(since) { it == productType }
+                result.purchases.forEach { report(it.purchaseToken, productType) }
             }
         }
         return result
     }
 
-    /** The tokens of unknown type before a pass that queries both types. */
-    private fun beginPlayPass(): Set<String> =
-        synchronized(playReported) { playReported.filterValues { it == null }.keys.toSet() }
+    /** When a pass that queries both types starts. */
+    private fun beginPlayPass(): Long = playReportNow()
 
     /**
-     * Both types answered in one pass: a token of unknown type from before the
-     * pass that neither query reported has left Play's report.
+     * Both types answered in one pass: a token of unknown type reported before
+     * the pass started that neither query reported has left Play's report.
      */
-    private suspend fun endPlayPass(unknownBefore: Set<String>) {
-        updatePlayReport { reported ->
-            unknownBefore.forEach { token -> if (reported[token] == null) reported.remove(token) }
-        }
+    private suspend fun endPlayPass(since: Long) {
+        updatePlayReport { removeReportedBefore(since) { it == null } }
     }
 
     /**
@@ -2814,7 +2836,7 @@ internal class PurchaseService(
             }
         }
         updatePlayReport(
-            { reported -> types.forEach { (token, type) -> if (reported[token] == null) reported[token] = type } },
+            { types.forEach { (token, type) -> report(token, reported[token]?.type ?: type) } },
             process,
         )
     }
@@ -2822,9 +2844,10 @@ internal class PurchaseService(
     /** A purchase Play reported with no known type takes the type its committed evidence records. */
     private suspend fun typeReportedPurchase(evidence: PurchaseEvidence) {
         val type = evidence.productType ?: return
-        updatePlayReport { reported ->
-            if (evidence.purchaseToken in reported && reported[evidence.purchaseToken] == null) {
-                reported[evidence.purchaseToken] = type
+        updatePlayReport {
+            val current = reported[evidence.purchaseToken]
+            if (current != null && current.type == null) {
+                reported[evidence.purchaseToken] = PlayReported(type, current.stamp)
             }
         }
     }

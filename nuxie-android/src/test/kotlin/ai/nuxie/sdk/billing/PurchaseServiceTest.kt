@@ -4924,6 +4924,39 @@ class PurchaseServiceTest {
     }
 
     @Test
+    fun aQueryInFlightCannotDropAPurchaseReportedAfterItStarted() = runTest {
+        val fixture = fixture(this)
+        val customer = fixture.core.identity.distinctId()
+        fixture.service.rememberProduct(
+            product(allowances = listOf(FeatureAllowance("pro", FeatureType.BOOLEAN))),
+        )
+        runCurrent()
+        fixture.synchronizer = { PurchaseSyncOutcome.Rejected() }
+        // Recovery's one-time query is out, with Play's answer from before the purchase.
+        val queryOut = CompletableDeferred<Unit>()
+        val answerTheQuery = CompletableDeferred<Unit>()
+        fixture.billing.queryStartedFor[BillingClient.ProductType.INAPP] = queryOut
+        fixture.billing.holdQueryOf[BillingClient.ProductType.INAPP] = answerTheQuery
+        val recovery = async { fixture.service.recover() }
+        runCurrent()
+        queryOut.await()
+
+        // Play delivers a new purchase of the same type meanwhile.
+        fixture.service.onPurchasesUpdated(
+            okUpdate(playPurchase("new-token", obfuscatedAccountId = accountHash(customer))),
+        )
+        assertTrue(fixture.core.featureInfo.isAllowed("pro"))
+
+        answerTheQuery.complete(Unit)
+        recovery.await()
+        assertTrue(
+            "The older query's answer cannot drop a purchase reported after it started",
+            fixture.core.featureInfo.isAllowed("pro"),
+        )
+        fixture.close()
+    }
+
+    @Test
     fun authenticatedRestoreWaitsForBackendVerification() = runTest {
         val fixture = fixture(this)
         val owner = fixture.core.identity.distinctId()
@@ -5244,6 +5277,9 @@ class PurchaseServiceTest {
         val failQueryTypes = mutableSetOf<String>()
         var queryStarted: CompletableDeferred<Unit>? = null
         var releaseQueries: CompletableDeferred<Unit>? = null
+        /** One product type's query: signalled when it starts, held until released, answering what Play had then. */
+        val queryStartedFor = mutableMapOf<String, CompletableDeferred<Unit>>()
+        val holdQueryOf = mutableMapOf<String, CompletableDeferred<Unit>>()
 
         override suspend fun launch(activity: Activity, request: CheckoutRequest): BillingResult {
             launched = request
@@ -5261,7 +5297,10 @@ class PurchaseServiceTest {
                     "offline",
                 )
             }
-            return ActivePurchasesResult.Success(active[productType].orEmpty())
+            val answer = active[productType].orEmpty()
+            queryStartedFor[productType]?.complete(Unit)
+            holdQueryOf[productType]?.await()
+            return ActivePurchasesResult.Success(answer)
         }
 
         override suspend fun acknowledge(purchaseToken: String): BillingResult {
