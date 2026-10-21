@@ -1,6 +1,7 @@
 package ai.nuxie.sdk
 
 import ai.nuxie.sdk.testsupport.InertBillingClientAdapter
+import ai.nuxie.sdk.testsupport.ReportingBillingClientAdapter
 import ai.nuxie.sdk.billing.InMemoryPurchaseEvidenceStore
 import ai.nuxie.sdk.billing.PurchaseEvidence
 import ai.nuxie.sdk.billing.StoredFeatureAllowance
@@ -351,9 +352,13 @@ class NuxieMeteredUseTest {
                 purchaseEvidenceStore = store,
                 registerLifecycle = false,
                 requestInitialProfileRefresh = false,
-            billingClientFactory = InertBillingClientAdapter.factory,
+            billingClientFactory = ReportingBillingClientAdapter.factory(
+                ReportingBillingClientAdapter.purchase("token-1", "play-credit-pack", playAccountId("customer-a")),
+            ),
             ),
         )
+        // The launch query: the early unlock needs Play to report the purchase.
+        core.purchases.refreshPlayReport()
 
         withTimeout(5_000) {
             core.featureInfo.all.first { it["credits"]?.balance == 10.0 }

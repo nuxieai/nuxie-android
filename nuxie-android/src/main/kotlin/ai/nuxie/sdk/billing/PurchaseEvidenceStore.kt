@@ -437,17 +437,15 @@ internal class FilePurchaseEvidenceStore(
      * sent for in `syncAttributionDistinctId`. Its `ownerDistinctId` was the
      * SDK's own guess, never the server's word, so it is not read. An entry
      * the server never answered becomes an outbox entry that reads as a sync
-     * for a signed-in customer, unless it was `revoked` (Play stopped reporting
-     * it): that one owes no send, so it neither unlocks early nor goes out
-     * until a fresh Play observation admits it again. Null for an entry
-     * written by the outbox.
+     * for a signed-in customer; whether it unlocks early depends only on
+     * Play's latest report. Null for an entry written by the outbox.
      */
     private fun decodeLegacyAnswer(raw: JsonObject): LegacyAnswer? {
         if ("refused" in raw || "synced" !in raw) return null
         val requester = raw.string("syncAttributionDistinctId")
         val accepted = raw.boolean("synced")
         val refused = !accepted && raw.boolean("permanentlyRejected")
-        val unanswered = !accepted && !refused && !raw.boolean("revoked") &&
+        val unanswered = !accepted && !refused &&
             raw.string("purchaseState") == StoredPurchaseState.PURCHASED.name
         return LegacyAnswer(
             requester = requester,

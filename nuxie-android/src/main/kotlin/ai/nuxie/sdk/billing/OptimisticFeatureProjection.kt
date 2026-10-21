@@ -87,10 +87,11 @@ private fun <T> PurchaseEvidence.selectAllowanceSource(
 }
 
 /**
- * The early unlock: only the buyer's own purchase still waiting for the server
- * projects. Play must name the account the SDK derives for this customer, and
- * the owed send must be theirs. Everything else, including a purchase the
- * server has answered, waits for the server profile.
+ * The early unlock: only the buyer's own purchase or sync entry still waiting
+ * for the server projects. Play must name the account the SDK derives for this
+ * customer, and the owed send must be theirs. A Restore claim waits for the
+ * server, as Restore itself does; so does a purchase the server has answered.
+ * The SDK also requires Play to report the purchase in its latest query.
  */
 internal fun PurchaseEvidence.isBuyersOwnUnsyncedPurchase(
     distinctId: String,
@@ -99,6 +100,7 @@ internal fun PurchaseEvidence.isBuyersOwnUnsyncedPurchase(
     val send = pendingSend ?: return false
     return !synced &&
         send.distinctId == distinctId &&
+        send.reason != PurchaseSyncReason.RESTORE &&
         obfuscatedAccountId == accountId &&
         purchaseState == StoredPurchaseState.PURCHASED &&
         hasEligiblePurchaseSignature

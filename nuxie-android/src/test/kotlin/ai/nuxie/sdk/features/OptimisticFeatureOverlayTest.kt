@@ -2,6 +2,7 @@ package ai.nuxie.sdk.features
 
 import kotlinx.coroutines.sync.withLock
 import ai.nuxie.sdk.testsupport.InertBillingClientAdapter
+import ai.nuxie.sdk.testsupport.ReportingBillingClientAdapter
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.billing.InMemoryPurchaseEvidenceStore
@@ -220,9 +221,13 @@ class OptimisticFeatureOverlayTest {
                 purchaseEvidenceStore = store,
                 registerLifecycle = false,
                 requestInitialProfileRefresh = false,
-            billingClientFactory = InertBillingClientAdapter.factory,
+            billingClientFactory = ReportingBillingClientAdapter.factory(
+                ReportingBillingClientAdapter.purchase("identity-return-token", "play-pro", playAccountId(owner)),
+            ),
             ),
         ).also(cores::add)
+        // The launch query: the early unlock needs Play to report the purchase.
+        core.purchases.refreshPlayReport()
 
         identity.setDistinctId("customer-b")
         core.featureInfo.publish(core.stageFeatureUserChange(owner, "customer-b"))
@@ -272,9 +277,13 @@ class OptimisticFeatureOverlayTest {
                 purchaseEvidenceStore = store,
                 registerLifecycle = false,
                 requestInitialProfileRefresh = false,
-            billingClientFactory = InertBillingClientAdapter.factory,
+            billingClientFactory = ReportingBillingClientAdapter.factory(
+                ReportingBillingClientAdapter.purchase("token-1", "play-credit-pack", playAccountId("customer-a")),
+            ),
             ),
         ).also(cores::add)
+        // The launch query: the early unlock needs Play to report the purchase.
+        core.purchases.refreshPlayReport()
 
         store.upsertProductMapping(
             StoredProductMapping(
@@ -353,10 +362,14 @@ class OptimisticFeatureOverlayTest {
                 purchaseEvidenceStore = store,
                 registerLifecycle = false,
                 requestInitialProfileRefresh = false,
-            billingClientFactory = InertBillingClientAdapter.factory,
+            billingClientFactory = ReportingBillingClientAdapter.factory(
+                ReportingBillingClientAdapter.purchase("token-1", "play-credit-pack", playAccountId(owner)),
+            ),
             ),
         ).also(cores::add)
         try {
+            // The launch query: the early unlock needs Play to report the purchase.
+            core.purchases.refreshPlayReport()
             store.failPinnedEvidenceUpserts = true
             assertTrue(
                 store.upsertProductMapping(

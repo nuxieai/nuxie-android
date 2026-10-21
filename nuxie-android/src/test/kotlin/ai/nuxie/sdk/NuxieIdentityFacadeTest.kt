@@ -14,6 +14,7 @@ import ai.nuxie.sdk.features.FeatureType
 import ai.nuxie.sdk.identity.IdentityService
 import ai.nuxie.sdk.testsupport.canonicalJourneyProfileResponse
 import ai.nuxie.sdk.testsupport.FakeTransport
+import ai.nuxie.sdk.testsupport.ReportingBillingClientAdapter
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -386,12 +387,17 @@ class NuxieIdentityFacadeTest {
             purchaseEvidenceStore = evidenceStore,
             registerLifecycle = false,
             requestInitialProfileRefresh = false,
+            billingClientFactory = ReportingBillingClientAdapter.factory(
+                ReportingBillingClientAdapter.purchase("token-owner", "play-pro", playAccountId(owner)),
+            ),
         )
         Nuxie.setup(
             application,
             NuxieConfiguration(apiKey).apply { logLevel = LogLevel.NONE },
         )
         val core = requireNotNull(Nuxie.core)
+        // The launch query: the early unlock needs Play to report the purchase.
+        core.purchases.refreshPlayReport()
         core.featureInfo.publish(core.stageFeatureUserChange(owner, owner))
         assertTrue(Nuxie.features.isAllowed("pro"))
 
