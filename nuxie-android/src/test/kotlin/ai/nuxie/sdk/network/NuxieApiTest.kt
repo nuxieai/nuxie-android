@@ -10,6 +10,7 @@ import org.junit.Test
 import java.net.URL
 import java.util.zip.GZIPInputStream
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonArray
 
@@ -274,6 +275,37 @@ class NuxieApiTest {
         assertEquals(
             """{"apiKey":"pk_test_key","type":"playstore","purchase_token":"token-1","product_id":"pro","base_plan_id":"annual","offer_id":"launch","product_type":"subscription","obfuscated_account_id":"account-hash","distinct_id":"customer-1"}""",
             transport.request.body.decodeToString(),
+        )
+    }
+
+    @Test
+    fun testStoreGrantPostsTheCatalogProductAndRefusesAnythingButAGrant() = runBlocking<Unit> {
+        val answers = ArrayDeque(listOf(
+            HttpTransport.Response(200, """{"success":true,"customer_id":"customer-1","features":[]}""".encodeToByteArray()),
+            HttpTransport.Response(403, """{"success":false,"code":"test_store_requires_test_key"}""".encodeToByteArray()),
+            HttpTransport.Response(200, """{"success":false}""".encodeToByteArray()),
+        ))
+        val transport = object : HttpTransport {
+            val requests = mutableListOf<HttpTransport.Request>()
+            override fun execute(request: HttpTransport.Request): HttpTransport.Response {
+                requests += request
+                return answers.removeFirst()
+            }
+        }
+        val api = NuxieApi("pk_test_key", NuxieEnvironment.PRODUCTION, transport)
+
+        val granted = api.grantTestStorePurchase("prd_annual", "nuxie-test-1", "customer-1")
+        repeat(2) {
+            assertThrows(IOException::class.java) {
+                api.grantTestStorePurchase("prd_annual", "nuxie-test-1", "customer-1")
+            }
+        }
+
+        assertEquals("customer-1", (granted["customer_id"] as JsonPrimitive).content)
+        assertEquals("https://i.nuxie.ai/purchase", transport.requests.first().url.toString())
+        assertEquals(
+            """{"apiKey":"pk_test_key","type":"test_store","catalog_product_id":"prd_annual","transaction_id":"nuxie-test-1","distinct_id":"customer-1"}""",
+            transport.requests.first().body.decodeToString(),
         )
     }
 

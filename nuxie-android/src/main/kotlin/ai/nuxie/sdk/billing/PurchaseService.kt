@@ -831,6 +831,11 @@ internal class PurchaseService(
         }
         testStore?.let { store ->
             val response = store.purchase(product, initiatingOwner, activity)
+            response.access?.let { access ->
+                // The server granted this purchase's Features: unlock them now,
+                // before the purchase is announced, as a Play purchase sync does.
+                features.updateFromPurchase(initiatingOwner, access, checkNotNull(response.transactionId))
+            }
             val outcome = if (response.result == PurchaseResult.Purchased) {
                 PurchaseOutcome.External(ExternalPurchaseDeclaration.Purchase(
                     operationId = checkNotNull(response.transactionId),

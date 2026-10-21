@@ -19,6 +19,11 @@ import org.junit.Test
 
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class NuxieTestStoreTest {
+    /** The server grants every purchase. */
+    private val granted = TestStoreGranting { _, _, _ ->
+        kotlinx.serialization.json.buildJsonObject { put("success", kotlinx.serialization.json.JsonPrimitive(true)) }
+    }
+
     private class Choices : TestStoreChoices {
         var purchaseChoice = TestStorePurchaseChoice.PURCHASED
         var restoreChoice = TestStoreRestoreChoice.RESTORED
@@ -40,7 +45,7 @@ class NuxieTestStoreTest {
         ).jsonObject
         for (scenario in fixture.getValue("cases").jsonArray) {
             val choices = Choices()
-            val store = NuxieTestStore(choices)
+            val store = NuxieTestStore(choices, granted)
             val transactions = mutableSetOf<String>()
             for (element in scenario.jsonObject.getValue("actions").jsonArray) {
                 val action = element.jsonObject
@@ -84,7 +89,7 @@ class NuxieTestStoreTest {
     fun `purchase choices preserve iOS outcomes and only purchased records a product`() = runTest {
         for (choice in TestStorePurchaseChoice.entries) {
             val choices = Choices().apply { purchaseChoice = choice }
-            val store = NuxieTestStore(choices)
+            val store = NuxieTestStore(choices, granted)
             val response = store.purchase(product("credits"), "alice")
             when (choice) {
                 TestStorePurchaseChoice.PURCHASED -> {
@@ -107,8 +112,52 @@ class NuxieTestStoreTest {
     }
 
     @Test
+    fun `a purchase is granted by the server and carries the access it answers with`() = runTest {
+        val grants = mutableListOf<Triple<String, String, String>>()
+        val answer = kotlinx.serialization.json.buildJsonObject {
+            put("success", kotlinx.serialization.json.JsonPrimitive(true))
+            put("customer_id", kotlinx.serialization.json.JsonPrimitive("customer-1"))
+        }
+        val store = NuxieTestStore(Choices()) { catalogProductId, transactionId, distinctId ->
+            grants += Triple(catalogProductId, transactionId, distinctId)
+            answer
+        }
+
+        val response = store.purchase(product("prd_annual", "cadence_pro:annual"), "alice")
+
+        assertEquals(PurchaseResult.Purchased, response.result)
+        assertEquals(listOf(Triple("prd_annual", response.transactionId!!, "alice")), grants)
+        assertEquals(answer, response.access)
+    }
+
+    @Test
+    fun `a purchase the server does not grant fails and leaves nothing to restore`() = runTest {
+        val store = NuxieTestStore(Choices()) { _, _, _ -> throw java.io.IOException("not granted") }
+
+        val response = store.purchase(product("prd_annual"), "alice")
+
+        assertTrue(response.result is PurchaseResult.Failed)
+        assertNull(response.transactionId)
+        assertNull(response.access)
+        assertTrue(store.restorePurchases("alice").products.isEmpty())
+    }
+
+    @Test
+    fun `only a purchased choice reaches the server`() = runTest {
+        var grants = 0
+        for (choice in TestStorePurchaseChoice.entries - TestStorePurchaseChoice.PURCHASED) {
+            val store = NuxieTestStore(Choices().apply { purchaseChoice = choice }) { _, _, _ ->
+                grants += 1
+                error("granted a $choice purchase")
+            }
+            store.purchase(product("prd_annual"), "alice")
+        }
+        assertEquals(0, grants)
+    }
+
+    @Test
     fun `restores isolate customers deduplicate products and retain latest product metadata`() = runTest {
-        val store = NuxieTestStore(Choices())
+        val store = NuxieTestStore(Choices(), granted)
         val first = store.purchase(product("credits", "old"), "alice")
         val second = store.purchase(product("credits", "new"), "alice")
         store.purchase(product("subscription"), "bob")
@@ -121,7 +170,7 @@ class NuxieTestStoreTest {
     @Test
     fun `restore choice is independent of local history and does not erase it`() = runTest {
         val choices = Choices()
-        val store = NuxieTestStore(choices)
+        val store = NuxieTestStore(choices, granted)
         assertEquals(TestStoreRestoreResponse(RestoreResult.Restored), store.restorePurchases("alice"))
         store.purchase(product("credits"), "alice")
         choices.restoreChoice = TestStoreRestoreChoice.NO_PURCHASES
@@ -132,13 +181,13 @@ class NuxieTestStoreTest {
         assertTrue(failure.products.isEmpty())
         choices.restoreChoice = TestStoreRestoreChoice.RESTORED
         assertEquals(1, store.restorePurchases("alice").products.size)
-        assertTrue(NuxieTestStore(choices).restorePurchases("alice").products.isEmpty())
+        assertTrue(NuxieTestStore(choices, granted).restorePurchases("alice").products.isEmpty())
     }
 
     @Test
     fun `pending choice retains initiating customer and cancellation creates no purchase`() = runTest {
         val choices = Choices()
-        val store = NuxieTestStore(choices)
+        val store = NuxieTestStore(choices, granted)
         val decision = CompletableDeferred<TestStorePurchaseChoice>()
         choices.pending = decision
         val alice = async { store.purchase(product("credits"), "alice") }

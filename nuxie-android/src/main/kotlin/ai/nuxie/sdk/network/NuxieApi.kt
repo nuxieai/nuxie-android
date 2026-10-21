@@ -452,6 +452,47 @@ internal class NuxieApi(
      * Submit Play evidence for server-authoritative verification. UNIV-2632
      * supplies the server-side Play Developer API arm served by this contract.
      */
+    /**
+     * Records a Nuxie Test Store purchase from a debug build. The server grants
+     * the Product's Features as a Play purchase would, without revenue, and
+     * answers like `/purchase`; any other answer means it was not granted.
+     */
+    suspend fun grantTestStorePurchase(
+        catalogProductId: String,
+        transactionId: String,
+        distinctId: String,
+    ): JsonObject {
+        val body = buildString {
+            append("{\"apiKey\":").append(jsonString(apiKey))
+            append(",\"type\":\"test_store\"")
+            append(",\"catalog_product_id\":").append(jsonString(catalogProductId))
+            append(",\"transaction_id\":").append(jsonString(transactionId))
+            append(",\"distinct_id\":").append(jsonString(distinctId))
+            append('}')
+        }.encodeToByteArray()
+        val response = execute(purchaseRequest(body))
+        if (response.statusCode !in 200..299) {
+            throw IOException("Test Store purchase was not granted (HTTP ${response.statusCode})")
+        }
+        val text = response.body.decodeToString().ifBlank { "{}" }
+        StrictJsonValidator.requireNoDuplicateKeys(text)
+        val parsed = Json.parseToJsonElement(text).jsonObject
+        if ((parsed["success"] as? JsonPrimitive)?.content?.toBooleanStrictOrNull() != true) {
+            throw IOException("Test Store purchase was not granted")
+        }
+        return parsed
+    }
+
+    private fun purchaseRequest(body: ByteArray) = HttpTransport.Request(
+        url = URL("$baseUrl/purchase"),
+        headers = mapOf(
+            "Content-Type" to "application/json",
+            "Accept-Encoding" to "gzip",
+            "User-Agent" to "Nuxie-Android-SDK/${SdkVersion.VALUE}",
+        ),
+        body = body,
+    )
+
     suspend fun postPurchase(report: PlayPurchaseReport): PurchaseResponse {
         val body = buildString {
             append("{\"apiKey\":").append(jsonString(apiKey))
@@ -470,17 +511,7 @@ internal class NuxieApi(
             append(",\"distinct_id\":").append(jsonString(report.distinctId))
             append('}')
         }.encodeToByteArray()
-        val response = execute(
-            HttpTransport.Request(
-                url = URL("$baseUrl/purchase"),
-                headers = mapOf(
-                    "Content-Type" to "application/json",
-                    "Accept-Encoding" to "gzip",
-                    "User-Agent" to "Nuxie-Android-SDK/${SdkVersion.VALUE}",
-                ),
-                body = body,
-            ),
-        )
+        val response = execute(purchaseRequest(body))
         if (response.statusCode !in 200..299) {
             val permanent = response.statusCode in 400..499 && response.statusCode !in setOf(408, 429)
             val invalidToken = runCatching {

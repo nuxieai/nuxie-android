@@ -120,9 +120,8 @@ internal class NuxieCore(
 ) {
     init {
         if (testStoreEnabled) {
-            require(environment == NuxieEnvironment.DEVELOPMENT) {
-                "testStoreEnabled requires DEVELOPMENT environment."
-            }
+            // The key's mode selects test content on any service, so the Test
+            // Store needs only a test key in a debuggable app.
             require(apiKey.startsWith("pk_test_")) { "testStoreEnabled requires a pk_test_ API key." }
             require(context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
                 "testStoreEnabled requires a debuggable host application."
@@ -257,7 +256,10 @@ internal class NuxieCore(
     ).also { billing -> construction?.onFailure { billing.close() } }
 
     private val testStore = if (testStoreEnabled) {
-        NuxieTestStore(AndroidTestStoreChoices { presentations.purchaseActivity() ?: lifecycleCoordinator.purchaseActivity() })
+        NuxieTestStore(
+            AndroidTestStoreChoices { presentations.purchaseActivity() ?: lifecycleCoordinator.purchaseActivity() },
+            api::grantTestStorePurchase,
+        )
     } else null
 
     val purchases: PurchaseService = PurchaseService(
