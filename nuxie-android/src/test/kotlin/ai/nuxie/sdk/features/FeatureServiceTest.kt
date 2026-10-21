@@ -760,6 +760,39 @@ class FeatureServiceTest {
     }
 
     @Test
+    fun aProfileRequestedAfterOneAnswerRetiresThatAnswersGrantsOnly() = runBlocking {
+        val core = core(FakeTransport())
+        val customer = core.identity.distinctId()
+        core.features.hydrateProfile(customer, Json.parseToJsonElement("""{"features":[]}""").jsonObject)
+        suspend fun answer(featureId: String) = core.features.publishStaged(
+            core.features.stagePurchaseAnswer(
+                customer,
+                Json.parseToJsonElement(
+                    """{"success":true,"features":[{"id":"$featureId","type":"boolean","allowed":true,"unlimited":false,"balance":null}]}""",
+                ).jsonObject,
+                emptyMap(),
+            ),
+        )
+
+        answer("first-grant")
+        // A profile is requested after the first answer, before the second.
+        val requestedAfterTheFirst = core.features.capturePurchaseRevision()
+        answer("second-grant")
+        assertTrue(core.featureInfo.isAllowed("first-grant"))
+        assertTrue(core.featureInfo.isAllowed("second-grant"))
+
+        core.features.hydrateProfile(
+            customer,
+            Json.parseToJsonElement("""{"features":[]}""").jsonObject,
+            requestedAfterTheFirst,
+        )
+
+        assertFalse("That profile decides the first answer's grant", core.featureInfo.isAllowed("first-grant"))
+        assertTrue("The second answer holds until a profile requested after it", core.featureInfo.isAllowed("second-grant"))
+        core.stop()
+    }
+
+    @Test
     fun profileFetchStartedBeforePurchaseResponseDoesNotEraseTheNewerFeatureUpdate() = runBlocking {
         val fetchStarted = CountDownLatch(1)
         val releaseFetch = CountDownLatch(1)
