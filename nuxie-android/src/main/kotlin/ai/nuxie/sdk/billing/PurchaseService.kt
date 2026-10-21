@@ -1132,6 +1132,7 @@ internal class PurchaseService(
             return result
         }
         val found = mutableListOf<PlayPurchase>()
+        val pass = beginPlayPass()
         for (type in listOf(BillingClient.ProductType.SUBS, BillingClient.ProductType.INAPP)) {
             val query = try {
                 queryPlay(type)
@@ -1151,6 +1152,8 @@ internal class PurchaseService(
                 }
             }
         }
+        // Both types answered: this Restore's queries are a full pass.
+        endPlayPass(pass)
         refreshOptimisticProjection()
         // Null means Play owns purchases this Restore must ask the server about.
         val settled: RestoreResult? = withProcessingDecision { effects ->
@@ -1720,6 +1723,7 @@ internal class PurchaseService(
         )
         // D2: evidence is durable before projection, facts, sync, acknowledge, or consume.
         val evidence = upsertEvidence(evidenceCandidate)
+        evidence?.let(::typeReportedPurchase)
         if (evidence == null) {
             val failedOutcome = PurchaseOutcome.Failed(
                 IllegalStateException("Could not persist purchase evidence."),
@@ -2619,34 +2623,71 @@ internal class PurchaseService(
      * unlock from what it reports. Returns the purchases Play reported.
      */
     internal suspend fun refreshPlayReport(): List<PlayPurchase> {
+        val pass = beginPlayPass()
         val active = mutableListOf<PlayPurchase>()
+        var bothAnswered = true
         for (type in listOf(BillingClient.ProductType.SUBS, BillingClient.ProductType.INAPP)) {
             val result = runCatching { queryPlay(type) }.getOrNull()
-            if (result is ActivePurchasesResult.Success) active += result.purchases
+            if (result is ActivePurchasesResult.Success) active += result.purchases else bothAnswered = false
         }
+        if (bothAnswered) endPlayPass(pass)
         refreshOptimisticProjection()
         return active
     }
 
-    /** Ask Play for its active purchases of [productType], recording what it reports. */
+    /**
+     * Ask Play for its active purchases of [productType], recording what it
+     * reports. A query speaks only for its own type: it replaces that type's
+     * tokens and leaves the other type's, and those of unknown type, alone.
+     */
     private suspend fun queryPlay(@BillingClient.ProductType productType: String): ActivePurchasesResult =
         billing.queryActive(productType).also { result ->
             if (result is ActivePurchasesResult.Success) {
                 synchronized(playReported) {
-                    // This query is Play's latest word on its type, and on any
-                    // purchase only an update reported.
-                    playReported.entries.removeAll { (_, type) -> type == null || type == productType }
+                    playReported.entries.removeAll { (_, type) -> type == productType }
                     result.purchases.forEach { playReported[it.purchaseToken] = productType }
                 }
             }
         }
 
-    /** Play delivered these purchases: it reports them until a query of their type says otherwise. */
+    /** The tokens of unknown type before a pass that queries both types. */
+    private fun beginPlayPass(): Set<String> =
+        synchronized(playReported) { playReported.filterValues { it == null }.keys.toSet() }
+
+    /**
+     * Both types answered in one pass: a token of unknown type from before the
+     * pass that neither query reported has left Play's report.
+     */
+    private fun endPlayPass(unknownBefore: Set<String>) {
+        synchronized(playReported) {
+            unknownBefore.forEach { token -> if (playReported[token] == null) playReported.remove(token) }
+        }
+    }
+
+    /**
+     * Play delivered these purchases: it reports them until a query of their
+     * type says otherwise. Each keeps the product type its checkout or the
+     * catalog knows for it; [typeReportedPurchase] fills in the rest from the
+     * evidence the update commits.
+     */
     private fun recordPlayUpdate(purchases: List<PlayPurchase>) {
         synchronized(playReported) {
             purchases.forEach { purchase ->
-                val type = purchase.products.firstNotNullOfOrNull { inFlight[it]?.product?.productType }
+                val type = purchase.products.firstNotNullOfOrNull { storeProductId ->
+                    inFlight[storeProductId]?.product?.productType
+                        ?: products.values.firstOrNull { it.storeProductId == storeProductId }?.productType
+                }
                 if (playReported[purchase.purchaseToken] == null) playReported[purchase.purchaseToken] = type
+            }
+        }
+    }
+
+    /** A purchase Play reported with no known type takes the type its committed evidence records. */
+    private fun typeReportedPurchase(evidence: PurchaseEvidence) {
+        val type = evidence.productType ?: return
+        synchronized(playReported) {
+            if (evidence.purchaseToken in playReported && playReported[evidence.purchaseToken] == null) {
+                playReported[evidence.purchaseToken] = type
             }
         }
     }
