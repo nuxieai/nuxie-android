@@ -793,22 +793,28 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun aCheckThatBeganBeforeA200HoldRetiredCannotPublishOverTheProfile() = runBlocking {
+    fun aRemoteCheckWhoseHoldRetiredMidCheckReturnsTheCurrentAnswer() = runBlocking {
         val checkStarted = CountDownLatch(1)
         val releaseCheck = CountDownLatch(1)
+        val asks = AtomicInteger()
         lateinit var core: NuxieCore
         val transport = FakeTransport().apply {
             respond = { request ->
                 if (request.url.path == "/entitled") {
-                    checkStarted.countDown()
-                    assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                    // The first ask goes out before the hold retires and answers from
+                    // before it; asked again, the server gives the current answer.
+                    val first = asks.incrementAndGet() == 1
+                    if (first) {
+                        checkStarted.countDown()
+                        assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                    }
                     HttpTransport.Response(
                         200,
                         featureResponse(
                             customerId = core.identity.distinctId(),
                             featureId = "pro",
                             requiredBalance = 1.0,
-                            allowed = true,
+                            allowed = first,
                             balance = "null",
                             type = "boolean",
                         ).encodeToByteArray(),
@@ -847,25 +853,33 @@ class FeatureServiceTest {
         )
         assertFalse(core.featureInfo.isAllowed("pro"))
 
-        // The check began before that retirement: its answer cannot publish over
-        // the profile, nor reach the caller.
+        // The check's first answer is from before that retirement: it is asked
+        // again, and the caller gets the current answer instead of an error.
         releaseCheck.countDown()
-        assertTrue(check.await().exceptionOrNull() is CancellationException)
+        val access = check.await().getOrThrow()
+        assertFalse(access.allowed)
+        assertEquals(2, asks.get())
         assertFalse(core.featureInfo.isAllowed("pro"))
-        assertEquals(null, core.features.getCached("pro", null))
+        assertEquals(false, core.features.getCached("pro", null)?.allowed)
         core.stop()
     }
 
     @Test
-    fun aCheckWhoseBalanceSourceHoldRetiredMidCheckDoesNotOverwriteIt() = runBlocking {
+    fun aCheckWhoseBalanceSourceHoldRetiredMidCheckIsAskedAgain() = runBlocking {
         val checkStarted = CountDownLatch(1)
         val releaseCheck = CountDownLatch(1)
+        val asks = AtomicInteger()
         lateinit var core: NuxieCore
         val transport = FakeTransport().apply {
             respond = { request ->
                 if (request.url.path == "/entitled") {
-                    checkStarted.countDown()
-                    assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                    // The first ask answers from before the hold retired; asked again,
+                    // the server gives the wallet's current balance.
+                    val first = asks.incrementAndGet() == 1
+                    if (first) {
+                        checkStarted.countDown()
+                        assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                    }
                     // The check of "exports" answers with its balance source, the wallet.
                     HttpTransport.Response(
                         200,
@@ -873,7 +887,7 @@ class FeatureServiceTest {
                             customerId = core.identity.distinctId(),
                             featureId = "credit-wallet",
                             requiredBalance = 2.0,
-                            balance = "50",
+                            balance = if (first) "50" else "3",
                             type = "creditSystem",
                         ).encodeToByteArray(),
                     )
@@ -912,28 +926,36 @@ class FeatureServiceTest {
         )
 
         releaseCheck.countDown()
-        assertTrue("The check is discarded", check.await().exceptionOrNull() is CancellationException)
-        assertEquals("The newer profile's wallet stands", 3.0, core.features.getCached("credit-wallet", null)!!.balance!!, 0.0)
+        val access = check.await().getOrThrow()
+        assertTrue("The caller gets the current answer", access.allowed)
+        assertEquals(2, asks.get())
+        assertEquals("The current wallet stands", 3.0, core.features.getCached("credit-wallet", null)!!.balance!!, 0.0)
         core.stop()
     }
 
     @Test
-    fun aCachedCheckThatBeganBeforeA200HoldRetiredReturnsTheProfilesAnswer() = runBlocking {
+    fun aCachedCheckWhoseHoldRetiredMidCheckIsAskedAgain() = runBlocking {
         val checkStarted = CountDownLatch(1)
         val releaseCheck = CountDownLatch(1)
+        val asks = AtomicInteger()
         lateinit var core: NuxieCore
         val transport = FakeTransport().apply {
             respond = { request ->
                 if (request.url.path == "/entitled") {
-                    checkStarted.countDown()
-                    assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                    // The first ask goes out before the hold retires and answers from
+                    // before it; asked again, the server gives the current answer.
+                    val first = asks.incrementAndGet() == 1
+                    if (first) {
+                        checkStarted.countDown()
+                        assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                    }
                     HttpTransport.Response(
                         200,
                         featureResponse(
                             customerId = core.identity.distinctId(),
                             featureId = "pro",
                             requiredBalance = 1.0,
-                            allowed = true,
+                            allowed = first,
                             balance = "null",
                             type = "boolean",
                         ).encodeToByteArray(),
@@ -946,6 +968,7 @@ class FeatureServiceTest {
         core = core(transport)
         val customer = core.identity.distinctId()
         core.features.hydrateProfile(customer, Json.parseToJsonElement("""{"features":[]}""").jsonObject)
+        // A 200 holds "pro" until a profile requested after it lands.
         core.features.publishStaged(
             core.features.stagePurchaseAnswer(
                 customer,
@@ -970,8 +993,64 @@ class FeatureServiceTest {
         )
 
         releaseCheck.countDown()
-        assertFalse("The caller gets the profile's answer, not the older check's", check.await().allowed)
+        assertFalse("The caller gets the current answer, not the older check's", check.await().allowed)
+        assertEquals("The check is asked again", 2, asks.get())
         assertFalse(core.featureInfo.isAllowed("pro"))
+        core.stop()
+    }
+
+    @Test
+    fun aCheckIsAskedAgainAtMostTwiceWhileHoldsKeepRetiring() = runBlocking {
+        lateinit var core: NuxieCore
+        val asks = AtomicInteger()
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/entitled") {
+                    asks.incrementAndGet()
+                    // While each ask is out, a 200 holds "pro" and a newer profile retires it.
+                    runBlocking {
+                        val customer = core.identity.distinctId()
+                        core.features.publishStaged(
+                            core.features.stagePurchaseAnswer(
+                                customer,
+                                Json.parseToJsonElement(
+                                    """{"success":true,"features":[{"id":"pro","type":"boolean","allowed":true,"unlimited":false,"balance":null}]}""",
+                                ).jsonObject,
+                                emptyMap(),
+                            ),
+                        )
+                        val purchaseRevision = core.features.capturePurchaseRevision()
+                        val profileRevision = core.features.reserveAuthoritativeRevision()
+                        core.features.hydrateProfile(
+                            customer,
+                            Json.parseToJsonElement("""{"features":[]}""").jsonObject,
+                            snapshotPurchaseRevision = purchaseRevision,
+                            snapshotAuthoritativeRevision = profileRevision,
+                        )
+                    }
+                    HttpTransport.Response(
+                        200,
+                        featureResponse(
+                            customerId = core.identity.distinctId(),
+                            featureId = "pro",
+                            requiredBalance = 1.0,
+                            allowed = true,
+                            balance = "null",
+                            type = "boolean",
+                        ).encodeToByteArray(),
+                    )
+                } else {
+                    profileResponse("[]")
+                }
+            }
+        }
+        core = core(transport)
+        core.features.hydrateProfile(core.identity.distinctId(), Json.parseToJsonElement("""{"features":[]}""").jsonObject)
+
+        val result = runCatching { core.features.check("pro") }
+
+        assertTrue("A third retirement cancels it, as on iOS", result.exceptionOrNull() is CancellationException)
+        assertEquals("The first ask and two more", 3, asks.get())
         core.stop()
     }
 
@@ -1176,22 +1255,28 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun remoteCheckStillCancelsAfterHydrationRetiresTheMidRequestPurchaseUpdate() = runBlocking {
+    fun remoteCheckIsAskedAgainAfterHydrationRetiresTheMidRequestPurchaseUpdate() = runBlocking {
         val checkStarted = CountDownLatch(1)
         val releaseCheck = CountDownLatch(1)
+        val asks = AtomicInteger()
         lateinit var core: NuxieCore
         val transport = FakeTransport().apply {
             respond = { request ->
                 if (request.url.path == "/entitled") {
-                    checkStarted.countDown()
-                    assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                    // The first ask answers from before the purchase; asked again, the
+                    // server gives the current answer.
+                    val first = asks.incrementAndGet() == 1
+                    if (first) {
+                        checkStarted.countDown()
+                        assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                    }
                     HttpTransport.Response(
                         200,
                         featureResponse(
                             customerId = core.identity.distinctId(),
                             featureId = "pro",
                             requiredBalance = 1.0,
-                            allowed = false,
+                            allowed = !first,
                             balance = "null",
                             type = "boolean",
                         ).encodeToByteArray(),
@@ -1222,7 +1307,10 @@ class FeatureServiceTest {
         )
         releaseCheck.countDown()
 
-        assertTrue(runCatching { check.await() }.exceptionOrNull() is CancellationException)
+        // The profile retired the purchase's hold while the check was out: it is
+        // asked again, and the caller gets the current answer.
+        assertTrue(check.await().allowed)
+        assertEquals(2, asks.get())
         assertTrue(core.features.getCached("pro", null)!!.allowed)
         core.stop()
     }

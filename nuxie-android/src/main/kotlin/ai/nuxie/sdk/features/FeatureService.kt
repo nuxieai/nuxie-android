@@ -55,6 +55,8 @@ internal class FeatureService(
     private companion object {
         /** A null requiredBalance means "one unit" everywhere. */
         const val DEFAULT_REQUIRED_BALANCE = 1.0
+        /** As on iOS: a check whose hold retired while it was out is asked again at most twice. */
+        const val MAX_RETIRED_HOLD_REASKS = 2
     }
 
     private val lock = Any()
@@ -603,11 +605,34 @@ internal class FeatureService(
         }
     }
 
+    /**
+     * The check writes the Feature it asked about and the answer's balance
+     * source (a credit wallet, say). When a newer profile retired a purchase's
+     * 200 hold on either while the check was out, its answer may be from
+     * before that profile: it is discarded and the check is asked again in the
+     * same customer scope, so its caller gets the current answer. As on iOS, it
+     * is asked again at most twice; a third retirement cancels it.
+     */
     private suspend fun performCheck(
         featureId: String,
         requiredBalance: Double?,
         entityId: String?,
     ): CheckedAccess {
+        val customer = identity.distinctId()
+        repeat(MAX_RETIRED_HOLD_REASKS + 1) {
+            // A customer change between asks cancels the check, as it does during one.
+            if (identity.distinctId() != customer) throw kotlinx.coroutines.CancellationException()
+            checkOnce(featureId, requiredBalance, entityId)?.let { return it }
+        }
+        throw kotlinx.coroutines.CancellationException()
+    }
+
+    /** One ask of [performCheck]; null when a hold it would write was retired meanwhile. */
+    private suspend fun checkOnce(
+        featureId: String,
+        requiredBalance: Double?,
+        entityId: String?,
+    ): CheckedAccess? {
         synchronizeCustomerScopeIfNeeded()
         val distinctId = identity.distinctId()
         val key = CacheKey(featureId, entityId)
@@ -639,6 +664,9 @@ internal class FeatureService(
                 // transition invalidates staged publications and clears the
                 // visible projection before that transition returns.
                 validateCheckScope(distinctId, requestGeneration)
+                if (affectedFeatureIds.any { (retiredHoldRevisions[it] ?: Long.MIN_VALUE) > requestMutationRevision }) {
+                    return@synchronized null to null
+                }
                 supersededCheckAccess(
                     featureId = featureId,
                     requiredBalance = requiredBalance,
@@ -739,14 +767,6 @@ internal class FeatureService(
                 ?: entityAccess(featureId, entityId)
                     ?.forRequiredBalance(requiredBalance)
                     ?.takeIf { directAnswer }
-                // A profile that retired a 200 hold after this check began and
-                // does not grant the Feature has the last word: the check's older
-                // answer is not returned.
-                ?: FeatureAccess(allowed = false, unlimited = false, balance = null, type = serverAccess.type)
-                    .takeIf {
-                        directAnswer && entityId == null &&
-                            (retiredHoldRevisions[featureId] ?: Long.MIN_VALUE) > requestMutationRevision
-                    }
                 ?: serverAccess
         } else {
             requestedAccess
