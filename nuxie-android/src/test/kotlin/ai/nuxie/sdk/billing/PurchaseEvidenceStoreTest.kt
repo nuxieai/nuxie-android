@@ -34,30 +34,70 @@ import ai.nuxie.sdk.identity.CustomerKind
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class PurchaseEvidenceStoreTest {
     @Test
-    fun consumeKindsSurviveBookkeepingAndOlderEvidenceStillDecodes(): Unit = kotlinx.coroutines.runBlocking {
-        val directory = Files.createTempDirectory("nuxie-consume-kinds").toFile()
+    fun consumeDeclarationsAreScopedToCustomersAndSurviveBookkeeping(): Unit = kotlinx.coroutines.runBlocking {
+        val directory = Files.createTempDirectory("nuxie-consume-declarations").toFile()
         try {
             val store = FilePurchaseEvidenceStore(directory)
             val original = owed("token")
-            assertEquals(emptyMap<String, CustomerKind>(), original.featureUseCustomerKinds)
-            val admitted = original.copy(featureUseCustomerKinds = mapOf(
-                "use-anonymous" to CustomerKind.ANONYMOUS, "use-identified" to CustomerKind.IDENTIFIED,
-            ))
+            assertEquals(emptyMap<String, StoredFeatureUseDeclarations>(), original.featureUseDeclarations)
+            val admitted = original.admitFeatureUse("requester", "same-use", CustomerKind.ANONYMOUS)
+                .admitFeatureUse("customer-b", "same-use", CustomerKind.IDENTIFIED)
+                .admitFeatureUse("requester", "same-use", CustomerKind.IDENTIFIED)
+            assertEquals(mapOf("same-use" to CustomerKind.ANONYMOUS), admitted.featureUseCustomerKinds("requester"))
+            assertEquals(mapOf("same-use" to CustomerKind.IDENTIFIED), admitted.featureUseCustomerKinds("customer-b"))
+            assertEquals(emptyMap<String, CustomerKind>(), admitted.featureUseCustomerKinds("new-customer"))
             assertTrue(store.upsert(admitted.copy(syncAttempts = 1, retryDueAtMillis = 100)))
             val reopened = FilePurchaseEvidenceStore(directory).load().getValue("token")
-            assertEquals(admitted.featureUseCustomerKinds, reopened.featureUseCustomerKinds)
+            assertEquals(admitted.featureUseDeclarations, reopened.featureUseDeclarations)
             assertEquals(original.pendingSend, reopened.pendingSend)
+            val raw = Json.parseToJsonElement(File(directory, "purchase-evidence.json").readText()).jsonObject
+                .getValue("token").jsonObject
+            assertFalse(raw.containsKey("featureUseCustomerKinds"))
+            assertEquals(JsonPrimitive("anonymous"), raw.getValue("featureUseDeclarations").jsonObject
+                .getValue("requester").jsonObject.getValue("customerKinds").jsonObject["same-use"])
             assertTrue(store.upsert(reopened.copy(pendingSend = null, ownerDistinctId = "requester")))
-            assertEquals(admitted.featureUseCustomerKinds, store.load().getValue("token").featureUseCustomerKinds)
+            assertEquals(admitted.featureUseDeclarations, store.load().getValue("token").featureUseDeclarations)
+        } finally { directory.deleteRecursively() }
+    }
 
+    @Test
+    fun missingDeclarationsAndTheUnmergedFlatFieldDecodeAsLegacyForTheRecordedCustomerOnly(): Unit = kotlinx.coroutines.runBlocking {
+        val directory = Files.createTempDirectory("nuxie-legacy-declarations").toFile()
+        try {
+            val store = FilePurchaseEvidenceStore(directory)
+            val original = owed("token").copy(ownerDistinctId = "previous-owner", buyerDistinctId = "original-buyer")
+            assertTrue(store.upsert(original))
             val file = File(directory, "purchase-evidence.json")
-            val rows = Json.parseToJsonElement(file.readText()).jsonObject
-            file.writeText(JsonObject(rows + ("token" to JsonObject(rows.getValue("token").jsonObject - "featureUseCustomerKinds"))).toString())
-            val older = FilePurchaseEvidenceStore(directory).load().getValue("token")
-            assertEquals(null, older.featureUseCustomerKinds)
-            assertEquals("requester", older.ownerDistinctId)
-            assertTrue(store.upsert(older.copy(syncAttempts = 2)))
-            assertEquals(null, FilePurchaseEvidenceStore(directory).load().getValue("token").featureUseCustomerKinds)
+            val row = Json.parseToJsonElement(file.readText()).jsonObject.getValue("token").jsonObject - "featureUseDeclarations"
+            for (withFlatField in listOf(false, true)) {
+                val legacyRow = if (withFlatField) row + ("featureUseCustomerKinds" to
+                    JsonObject(mapOf("same-use" to JsonPrimitive("identified")))) else row
+                file.writeText(JsonObject(mapOf("token" to JsonObject(legacyRow))).toString())
+                val older = FilePurchaseEvidenceStore(directory).load().getValue("token")
+                assertEquals(null, older.featureUseDeclarations)
+                assertEquals(null, older.featureUseCustomerKinds("requester"))
+                assertEquals(emptyMap<String, CustomerKind>(), older.featureUseCustomerKinds("customer-b"))
+                assertEquals(emptyMap<String, CustomerKind>(), older.featureUseCustomerKinds("previous-owner"))
+                assertEquals(emptyMap<String, CustomerKind>(), older.featureUseCustomerKinds("original-buyer"))
+                val moved = older.copy(
+                    pendingSend = PurchaseSend.admit(PurchaseSyncReason.PURCHASE, "customer-b", CustomerKind.IDENTIFIED),
+                    featureUseDeclarations = older.retainedFeatureUseDeclarations,
+                ).admitFeatureUse("requester", "same-use", CustomerKind.IDENTIFIED)
+                    .admitFeatureUse("customer-b", "same-use", CustomerKind.IDENTIFIED)
+                assertTrue(store.upsert(moved.copy(syncAttempts = 2)))
+                val reopened = FilePurchaseEvidenceStore(directory).load().getValue("token")
+                assertEquals(null, reopened.featureUseCustomerKinds("requester"))
+                assertEquals(mapOf("same-use" to CustomerKind.IDENTIFIED), reopened.featureUseCustomerKinds("customer-b"))
+                val history = Json.parseToJsonElement(file.readText()).jsonObject.getValue("token").jsonObject
+                    .getValue("featureUseDeclarations").jsonObject
+                assertEquals(JsonObject(emptyMap()), history["requester"])
+            }
+            // With no owed send, the server's owner is the recorded customer;
+            // without an owner either, the original buyer is the only named customer.
+            val noSend = original.copy(pendingSend = null, featureUseDeclarations = null)
+            assertEquals(null, noSend.featureUseCustomerKinds("previous-owner"))
+            assertEquals(emptyMap<String, CustomerKind>(), noSend.featureUseCustomerKinds("requester"))
+            assertEquals(null, noSend.copy(ownerDistinctId = null).featureUseCustomerKinds("original-buyer"))
         } finally { directory.deleteRecursively() }
     }
 

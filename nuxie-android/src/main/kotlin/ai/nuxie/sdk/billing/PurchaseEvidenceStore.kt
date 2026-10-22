@@ -204,6 +204,11 @@ internal data class SendPayload(
     val obfuscatedAccountId: String?,
 )
 
+/** One customer's consume admissions; null kinds preserve undeclared legacy uses. */
+internal data class StoredFeatureUseDeclarations(
+    val customerKinds: Map<String, CustomerKind>?,
+)
+
 /**
  * One Play purchase's durable outbox entry, keyed by its purchase token: the
  * only purchase state the SDK keeps. Once the server answers it, it stays as
@@ -237,10 +242,11 @@ internal data class PurchaseEvidence(
     /** The outbox entry: the send still owed for this purchase, or null when none is. */
     val pendingSend: PurchaseSend? = null,
     /**
-     * Consume admission kinds keyed by stable operation id. Fresh evidence starts
-     * empty; absent on legacy evidence whose retries must remain undeclared.
+     * Customer id, then stable operation id. Claims retain every customer's
+     * history. Fresh rows start empty; absence marks legacy evidence for the
+     * row's recorded customer only.
      */
-    val featureUseCustomerKinds: Map<String, CustomerKind>? = emptyMap(),
+    val featureUseDeclarations: Map<String, StoredFeatureUseDeclarations>? = emptyMap(),
     val context: StoredPurchaseContext? = null,
     /** Purchase-token-scoped allowance snapshot; null is unresolved and empty carries no Feature allowances. */
     val pinnedFeatureAllowances: List<StoredFeatureAllowance>? = null,
@@ -273,6 +279,26 @@ internal data class PurchaseEvidence(
     /** The checkout whose binding (or flight) this purchase matched; its completion retires that binding. */
     val checkoutId: String? = null,
 ) {
+    /** Attach legacy absence to the recorded customer before changing the row's requester or owner. */
+    val retainedFeatureUseDeclarations: Map<String, StoredFeatureUseDeclarations>
+        get() = featureUseDeclarations ?: (pendingSend?.distinctId ?: ownerDistinctId ?: buyerDistinctId)
+            ?.let { mapOf(it to StoredFeatureUseDeclarations(customerKinds = null)) }.orEmpty()
+
+    fun featureUseCustomerKinds(customerId: String): Map<String, CustomerKind>? {
+        val declarations = retainedFeatureUseDeclarations[customerId] ?: return emptyMap()
+        return declarations.customerKinds
+    }
+
+    fun admitFeatureUse(customerId: String, operationId: String, customerKind: CustomerKind): PurchaseEvidence {
+        val history = retainedFeatureUseDeclarations
+        val declarations = history[customerId] ?: StoredFeatureUseDeclarations(customerKinds = emptyMap())
+        val kinds = declarations.customerKinds
+        val admitted = if (kinds != null && operationId !in kinds) {
+            declarations.copy(customerKinds = kinds + (operationId to customerKind))
+        } else declarations
+        return copy(featureUseDeclarations = history + (customerId to admitted))
+    }
+
     /** The server accepted this purchase for its owner. */
     val synced: Boolean get() = ownerDistinctId != null
 
@@ -716,8 +742,14 @@ internal class FilePurchaseEvidenceStore(
                     "admissionId" to JsonPrimitive(send.admissionId),
                 )))
             }
-            evidence.featureUseCustomerKinds?.let { kinds ->
-                put("featureUseCustomerKinds", JsonObject(kinds.mapValues { JsonPrimitive(it.value.wireValue) }))
+            evidence.featureUseDeclarations?.let { history ->
+                put("featureUseDeclarations", JsonObject(history.mapValues { (_, declarations) ->
+                    JsonObject(buildMap {
+                        declarations.customerKinds?.let { kinds ->
+                            put("customerKinds", JsonObject(kinds.mapValues { JsonPrimitive(it.value.wireValue) }))
+                        }
+                    })
+                }))
             }
             evidence.context?.let { put("context", encodeContext(it)) }
             evidence.pinnedFeatureAllowances?.let { allowances ->
@@ -767,9 +799,12 @@ internal class FilePurchaseEvidenceStore(
         ownerDistinctId = raw.optionalString("ownerDistinctId"),
         refused = raw.optionalBoolean("refused") ?: throw MalformedField("refused"),
         pendingSend = raw.optionalObject("pendingSend")?.let(::decodeSend),
-        featureUseCustomerKinds = raw.optionalObject("featureUseCustomerKinds")?.mapValues { (_, value) ->
-            CustomerKind.entries.firstOrNull { it.wireValue == (value as? JsonPrimitive)?.takeIf { it.isString }?.content }
-                ?: throw MalformedField("featureUseCustomerKinds")
+        featureUseDeclarations = raw.optionalObject("featureUseDeclarations")?.mapValues { (_, value) ->
+            val declarations = value as? JsonObject ?: throw MalformedField("featureUseDeclarations")
+            StoredFeatureUseDeclarations(customerKinds = declarations.optionalObject("customerKinds")?.mapValues { (_, kind) ->
+                CustomerKind.entries.firstOrNull { it.wireValue == (kind as? JsonPrimitive)?.takeIf { it.isString }?.content }
+                    ?: throw MalformedField("featureUseDeclarations.customerKinds")
+            })
         },
         context = raw.optionalObject("context")?.let(::decodeContext),
         pinnedFeatureAllowances = raw.optionalArray("pinnedFeatureAllowances")
