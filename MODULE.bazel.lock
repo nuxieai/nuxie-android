@@ -268,7 +268,7 @@
     "@@rules_android_ndk+//:extension.bzl%android_ndk_repository_extension": {
       "general": {
         "bzlTransitiveDigest": "j+NMXk5/a1vnDypModKL+ToEo/4o7DJeXSFhTfbJ7rI=",
-        "usagesDigest": "tHxfnjubS1FHg1KFYHLkVi14Xvxd+BLapuitiihlVOU=",
+        "usagesDigest": "il73RSo92vy4x4cIZRPu1B60G8COHj/2VsUSKeb7sK4=",
         "recordedInputs": [],
         "generatedRepoSpecs": {
           "androidndk": {
@@ -284,7 +284,7 @@
     "@@rules_kotlin+//src/main/starlark/core/repositories:bzlmod_setup.bzl%rules_kotlin_extensions": {
       "general": {
         "bzlTransitiveDigest": "1eDDuTFD39r/W+K8QY/4BN9y/SvxQjD9Z0bTSo8NWTM=",
-        "usagesDigest": "D7aJ0yZDBdaH4O3r6FU8nbun1fkshX9vOteKATuDHsY=",
+        "usagesDigest": "QRmeeqleV58NUrsPekDE/i7FXESrIGAp9mami2/kdKY=",
         "recordedInputs": [
           "REPO_MAPPING:rules_kotlin+,bazel_tools bazel_tools"
         ],
