@@ -832,7 +832,10 @@ internal class NuxieExperienceActivity : Activity() {
         (layers.mapNotNull { it.sheet } + listOfNotNull(baseWindow)).distinct().forEach { it.refreshChrome() }
         // Keep incoming and outgoing screens synchronized during navigation.
         screens.forEach { screen ->
-            if (!screen.rendererEffects.isRetired) screen.mounted?.refreshFontScale(newConfig.fontScale)
+            if (!screen.rendererEffects.isRetired) screen.mounted?.let { mounted ->
+                mounted.refreshFontScale(newConfig.fontScale)
+                mounted.surface.refreshColorScheme(newConfig.uiMode)
+            }
         }
     }
 

@@ -121,6 +121,10 @@ internal class ExperienceSurfaceHost(
     private var artboard: NuxieRuntimeArtboard? = null
     private var viewModelState: NuxieRuntimeViewModelState? = null
     private var environment: NuxieRuntimeViewModelState? = null
+    private var environmentBindings: ExperienceEnvironmentBindings? = null
+    private val themeInstances = mutableMapOf<ExperienceEnvironmentBindings.ThemeSelection, NuxieRuntimeViewModelState>()
+    @Volatile private var requestedColorScheme = ExperienceColorScheme.fromUiMode(resources.configuration.uiMode)
+    private var appliedColorScheme: ExperienceColorScheme? = null
     @Volatile private var semanticsEnabled = false
     private var semanticSnapshot: NuxieSemanticSnapshot? = null
     private var semanticSnapshotEpoch = -1L
@@ -607,6 +611,7 @@ internal class ExperienceSurfaceHost(
         retainedViewModel: java.util.concurrent.atomic.AtomicReference<NuxieViewModelSnapshot?>? = null,
         onLoaded: ((Boolean) -> Unit)? = null,
     ) {
+        refreshColorScheme(resources.configuration.uiMode)
         retireSemantics()
         discardFocusInput()
         riveFocusState = NuxieFocusState(false, false)
@@ -727,6 +732,8 @@ internal class ExperienceSurfaceHost(
             try {
                 // Each screen owns its env: a covered layer keeps the values of its own space.
                 environment = loadedFile.newGlobalViewModel("env")
+                environmentBindings = ExperienceEnvironmentBindings(loadedFile.viewModelCatalog())
+                appliedColorScheme = null
                 val retained = retainedViewModel?.get()
                 if (retained != null) {
                     viewModelState = runtime.restoreViewModel(loadedFile, loadedArtboard, retained)
@@ -776,6 +783,8 @@ internal class ExperienceSurfaceHost(
             try {
                 player = loadedFile.newExperiencePlayer(loadedArtboard, artboardName)
                 environment?.let { checkNotNull(player).bindGlobalViewModel("env", it) }
+                // Entry transitions and measurement must see the device's appearance on their first advance.
+                applyColorScheme()
                 if (semanticsEnabled) checkNotNull(player).enableSemantics()
                 if (videoBindings.isNotEmpty()) {
                     videoPlayback = ExperienceVideoPlayback(context.applicationContext, checkNotNull(player), videoBindings, videoTargets,
@@ -786,6 +795,7 @@ internal class ExperienceSurfaceHost(
                 val failedPlayer = player
                 player = null
                 runCatching { failedPlayer?.close() }.exceptionOrNull()?.let(error::addSuppressed)
+                runCatching { closeThemeInstances() }.exceptionOrNull()?.let(error::addSuppressed)
                 artboard = null
                 file = null
                 runCatching { environment?.close() }.exceptionOrNull()?.let(error::addSuppressed)
@@ -843,8 +853,60 @@ internal class ExperienceSurfaceHost(
         }
     }
 
-    private fun stepAndRefreshFocus(step: () -> NuxiePlayerStepOutcome): NuxiePlayerStepOutcome =
-        step().also { riveFocusState = it.focusState ?: NuxieFocusState(false, false) }
+    private fun stepAndRefreshFocus(step: () -> NuxiePlayerStepOutcome): NuxiePlayerStepOutcome {
+        // A submitted frame keeps its model revision. Deferred appearance changes apply
+        // before the next advance, including hidden transitions and native input steps.
+        applyColorScheme()
+        return step().also { riveFocusState = it.focusState ?: NuxieFocusState(false, false) }
+    }
+
+    /** UI-thread input, also used for detached screens waiting behind another screen. */
+    fun refreshColorScheme(uiMode: Int) {
+        val scheme = ExperienceColorScheme.fromUiMode(uiMode)
+        if (requestedColorScheme == scheme || released.get() || failureReported.get()) return
+        requestedColorScheme = scheme
+        lane.enqueue {
+            if (released.get() || failureReported.get() || pendingPresentation) return@enqueue
+            try {
+                applyColorScheme()
+            } catch (error: Exception) {
+                reportFailure(ExperiencePresentationException.Reason.HOST_FAILED, "Experience appearance update failed", error)
+            }
+        }
+        // Visible surfaces already request a frame every Choreographer tick. The next
+        // tick advances these bindings; hidden surfaces apply them before re-entry.
+    }
+
+    /** One lane operation writes env and rebinds every state-machine player, as on iOS. */
+    private fun applyColorScheme() {
+        val active = player ?: return
+        val loadedFile = file ?: return
+        val bindings = environmentBindings ?: return
+        val scheme = requestedColorScheme
+        if (appliedColorScheme == scheme) return
+        bindings.colorSchemeMutation(scheme)?.let { environment?.restoreWrites(listOf(it)) }
+        bindings.themeSelection(scheme)?.let { selection ->
+            val instance = themeInstances.getOrPut(selection) {
+                selection.authoredInstanceIndex?.let {
+                    checkNotNull(loadedFile.newAuthoredViewModel(ExperienceEnvironmentBindings.THEME_GLOBAL_NAME, it))
+                } ?: loadedFile.newSchemaViewModel(selection.schemaIndex)
+            }
+            active.bindGlobalViewModel(ExperienceEnvironmentBindings.THEME_GLOBAL_NAME, instance)
+        }
+        appliedColorScheme = scheme
+    }
+
+    private fun closeThemeInstances() {
+        val instances = themeInstances.values.toList()
+        themeInstances.clear()
+        var failure: Throwable? = null
+        for (instance in instances) {
+            try { instance.close() } catch (error: Throwable) {
+                if (failure == null) failure = error else failure.addSuppressed(error)
+            }
+        }
+        failure?.let { throw it }
+    }
 
     private var nativeEditingTarget: ExperienceTextFieldTarget? = null
     private var nativeEditingOwnerId: Long? = null
@@ -1033,6 +1095,7 @@ internal class ExperienceSurfaceHost(
 
     /** UI-thread visibility input; a paused but visible Activity remains active. */
     fun setPresentationVisible(visible: Boolean, preservePendingInput: Boolean = false) {
+        if (visible) refreshColorScheme(resources.configuration.uiMode)
         if (!visible) {
             semanticKeys.clear()
             riveKeys.clear()
@@ -1135,7 +1198,13 @@ internal class ExperienceSurfaceHost(
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        refreshColorScheme(newConfig.uiMode)
         refreshLayoutDensity()
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        refreshColorScheme(resources.configuration.uiMode)
     }
 
     private fun refreshLayoutDensity() {
@@ -1529,6 +1598,7 @@ internal class ExperienceSurfaceHost(
                 window?.let { it::close },
                 videoPlayback?.let { owner -> { owner.closeAfterRetirement(onMediaReleased) } } ?: onMediaReleased,
                 player?.let { it::close },
+                ::closeThemeInstances,
                 presentationHeight::close,
                 environment?.let { it::close },
                 viewModelState?.let { it::close },
@@ -1541,6 +1611,8 @@ internal class ExperienceSurfaceHost(
             videoPlayback = null
             viewModelState = null
             environment = null
+            environmentBindings = null
+            appliedColorScheme = null
             artboard = null
             file = null
             renderer = null

@@ -6,6 +6,28 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class NuxieExperiencePlayerTest {
+    @Test fun `binding Theme reaches every state machine and wakes the auxiliary for the next frame`() {
+        for (primaryKind in listOf(0, 1, 2)) {
+            val native = RecordingNative().apply { playerKinds[10L] = primaryKind }
+            val player = NuxieRuntimePlayer(10, native)
+            player.installInteractionPlayer(NuxieRuntimePlayer(11, native))
+            val catalog = NuxieViewModelCatalog(emptyList(), emptyList(), emptyList())
+            val theme = NuxieRuntimeViewModelState(20, emptyList(), native, catalog, 0)
+            try {
+                player.bindGlobalViewModel("Theme", theme)
+                val expected = (if (primaryKind == 1) listOf(10L) else emptyList()) + 11L
+                assertEquals(expected, native.globalBindings.map { it.first })
+                assertTrue(native.globalBindings.all { it.second == "Theme" && it.third == 20L })
+                player.stepTyped(elapsedSeconds = 0.0)
+                native.steps.clear()
+                player.bindGlobalViewModel("Theme", theme)
+                player.stepTyped(elapsedSeconds = 0.016)
+                assertEquals("Rebinding also advances the auxiliary's new bindings", listOf(10L, 11L),
+                    native.steps.map { it.handle })
+            } finally { player.close(); theme.close() }
+        }
+    }
+
     @Test fun `generated state mutation advances both players once without fabricated input`() {
         val native = RecordingNative()
         val player = NuxieRuntimePlayer(10, native)
@@ -173,6 +195,12 @@ class NuxieExperiencePlayerTest {
 
     private data class Step(val handle: Long, val elapsed: Float, val inputs: List<String>, val pointers: Int, val correlation: Long)
     private class RecordingNative : NuxieTypedRuntimeNative {
+        val globalBindings = mutableListOf<Triple<Long, String, Long>>()
+        override fun setPlayerGlobalViewModel(playerHandle: Long, name: ByteArray, viewModelHandle: Long): Int {
+            globalBindings += Triple(playerHandle, name.decodeToString(), viewModelHandle)
+            return 0
+        }
+        override fun freeViewModel(handle: Long) = 0
         val playerKinds = mutableMapOf(10L to 1, 11L to 1)
         val focusBatches = mutableListOf<Pair<Long, List<NativeFocusInput>>>()
         val focusReads = mutableListOf<Pair<Long, Int>>()
