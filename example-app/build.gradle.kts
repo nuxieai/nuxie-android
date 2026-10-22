@@ -35,7 +35,7 @@ android {
   }
   if (qualifyFontFallback) sourceSets.getByName("release") {
     java.srcDir("src/fontFallbackQualification/java")
-    assets.srcDir("../nuxie-android/src/androidTest/assets/authored-font-fallback")
+    assets.srcDir("../fixtures/runtime/authored-font-fallback")
     manifest.srcFile("src/fontFallbackQualification/AndroidManifest.xml")
   }
   testOptions { unitTests.isIncludeAndroidResources = true }

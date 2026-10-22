@@ -19,9 +19,13 @@ The typed two-field form qualifies Japanese, Arabic, Hebrew, Hindi, Latin,
 emoji and symbols after focus moves. Only iOS 27.0 currently checks the known
 blank Apple emjc emoji row; other OS versions do not inherit that expectation.
 
-Android qualification copies these files unchanged from nuxie-ios origin/main
-`62f7e4717885fdcf708097064f230224092db2e2` (16 October 2026).
-`inline_text_data_binding.riv` is copied from that revision's
+`ordinary-roboto.nux`, `ordinary-provenance.json` and `ordinary-latin.ttf`
+now sync from nuxie-ios into `fixtures/runtime/authored-font-fallback/`
+(UNIV-5273). The published-text device test and the example's release
+qualification read them there. This directory keeps `ordinary-latin.ttf` and
+`inline_text_data_binding.riv` for the bound-text test, copied unchanged from
+nuxie-ios origin/main `62f7e4717885fdcf708097064f230224092db2e2`
+(16 October 2026). `inline_text_data_binding.riv` is copied from that revision's
 `Tests/NuxieUnitTests/Fixtures/` and exercises the same bound ordinary symbols
 as `NuxieNativeRuntimeTests.testSymbolsUseCoreTextFallbackAndDrawFromALatinPrimary`.
 This Android-only test asset directory does not change the synced fixture contract.

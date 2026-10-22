@@ -225,7 +225,7 @@ class SystemFontFallbackDeviceTest {
     fun ordinaryPublishedTextDrawsFallbackScriptsAndColorEmoji() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val baseline = InstrumentationRegistry.getArguments().getString("fontFallbackBaseline") == "true"
-        fun asset(name: String) = instrumentation.context.assets.open("authored-font-fallback/$name").use { it.readBytes() }
+        fun asset(name: String) = instrumentation.context.assets.open("runtime/authored-font-fallback/$name").use { it.readBytes() }
         val runtime = NuxieRuntime.shared
         assertTrue(runtime.isAvailable)
         val bytes = asset("ordinary-roboto.nux")
