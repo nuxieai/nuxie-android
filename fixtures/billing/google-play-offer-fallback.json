@@ -1,0 +1,834 @@
+{
+  "suite": "google-play-offer-fallback",
+  "version": 1,
+  "ownership": "Android-owned Google Play contract",
+  "eligibility": "ProductDetails supplies available offers for this customer. An ineligible named offer is omitted, so resolution uses the configured base plan.",
+  "releaseProducts": {
+    "subscription": {
+      "id": "pro",
+      "type": "subscription",
+      "store": {
+        "platform": "google_play",
+        "productId": "play-pro",
+        "productType": "subscription",
+        "basePlanId": "annual"
+      },
+      "preview": {
+        "name": "Pro",
+        "description": "Published terms",
+        "price": "€0.00",
+        "period": "year",
+        "periodLabel": "1 year",
+        "periodCount": 1,
+        "hasTrial": true,
+        "trialLabel": "7 days free",
+        "introOfferLabel": "Published introduction",
+        "renewalLabel": "then €9.99/year"
+      },
+      "entitlements": []
+    },
+    "one-time": {
+      "id": "pro",
+      "type": "nonConsumable",
+      "store": {
+        "platform": "google_play",
+        "productId": "play-lifetime",
+        "productType": "nonConsumable",
+        "purchaseOptionId": "rental"
+      },
+      "preview": {
+        "name": "Pro",
+        "description": "Published terms",
+        "price": "€0.00",
+        "period": "year",
+        "periodLabel": "1 year",
+        "periodCount": 1,
+        "hasTrial": true,
+        "trialLabel": "7 days free",
+        "introOfferLabel": "Published introduction",
+        "renewalLabel": "then €9.99/year"
+      },
+      "entitlements": []
+    }
+  },
+  "playProducts": {
+    "subscription": {
+      "productId": "play-pro",
+      "type": "subs",
+      "title": "Pro",
+      "name": "Pro",
+      "description": "Pro subscription",
+      "packageName": "com.example.app",
+      "subscriptionOfferDetails": [
+        {
+          "basePlanId": "monthly",
+          "offerIdToken": "monthly-base",
+          "offerTags": [],
+          "pricingPhases": [
+            {
+              "billingPeriod": "P1Y",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€9.99",
+              "priceAmountMicros": 9990000,
+              "recurrenceMode": 1,
+              "billingCycleCount": 0
+            }
+          ]
+        },
+        {
+          "basePlanId": "annual",
+          "offerIdToken": "welcome-token",
+          "offerTags": [],
+          "pricingPhases": [
+            {
+              "billingPeriod": "P1W",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€0.00",
+              "priceAmountMicros": 0,
+              "recurrenceMode": 2,
+              "billingCycleCount": 1
+            },
+            {
+              "billingPeriod": "P1Y",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€9.99",
+              "priceAmountMicros": 9990000,
+              "recurrenceMode": 1,
+              "billingCycleCount": 0
+            }
+          ],
+          "offerId": "welcome"
+        },
+        {
+          "basePlanId": "annual",
+          "offerIdToken": "annual-base",
+          "offerTags": [],
+          "pricingPhases": [
+            {
+              "billingPeriod": "P1Y",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€9.99",
+              "priceAmountMicros": 9990000,
+              "recurrenceMode": 1,
+              "billingCycleCount": 0
+            }
+          ]
+        },
+        {
+          "basePlanId": "annual",
+          "offerIdToken": "summer-token",
+          "offerTags": [
+            "summer-ignore-offer"
+          ],
+          "pricingPhases": [
+            {
+              "billingPeriod": "P1M",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€0.00",
+              "priceAmountMicros": 0,
+              "recurrenceMode": 2,
+              "billingCycleCount": 3
+            },
+            {
+              "billingPeriod": "P1Y",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€9.99",
+              "priceAmountMicros": 9990000,
+              "recurrenceMode": 1,
+              "billingCycleCount": 0
+            }
+          ],
+          "offerId": "summer"
+        },
+        {
+          "basePlanId": "annual",
+          "offerIdToken": "paid-token",
+          "offerTags": [],
+          "pricingPhases": [
+            {
+              "billingPeriod": "P1M",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€1.99",
+              "priceAmountMicros": 1990000,
+              "recurrenceMode": 2,
+              "billingCycleCount": 2
+            },
+            {
+              "billingPeriod": "P1Y",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€9.99",
+              "priceAmountMicros": 9990000,
+              "recurrenceMode": 1,
+              "billingCycleCount": 0
+            }
+          ],
+          "offerId": "paid"
+        }
+      ]
+    },
+    "subscription-ineligible": {
+      "productId": "play-pro",
+      "type": "subs",
+      "title": "Pro",
+      "name": "Pro",
+      "description": "Pro subscription",
+      "packageName": "com.example.app",
+      "subscriptionOfferDetails": [
+        {
+          "basePlanId": "monthly",
+          "offerIdToken": "monthly-base",
+          "offerTags": [],
+          "pricingPhases": [
+            {
+              "billingPeriod": "P1Y",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€9.99",
+              "priceAmountMicros": 9990000,
+              "recurrenceMode": 1,
+              "billingCycleCount": 0
+            }
+          ]
+        },
+        {
+          "basePlanId": "annual",
+          "offerIdToken": "annual-base",
+          "offerTags": [],
+          "pricingPhases": [
+            {
+              "billingPeriod": "P1Y",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€9.99",
+              "priceAmountMicros": 9990000,
+              "recurrenceMode": 1,
+              "billingCycleCount": 0
+            }
+          ]
+        },
+        {
+          "basePlanId": "annual",
+          "offerIdToken": "summer-token",
+          "offerTags": [
+            "summer-ignore-offer"
+          ],
+          "pricingPhases": [
+            {
+              "billingPeriod": "P1M",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€0.00",
+              "priceAmountMicros": 0,
+              "recurrenceMode": 2,
+              "billingCycleCount": 3
+            },
+            {
+              "billingPeriod": "P1Y",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€9.99",
+              "priceAmountMicros": 9990000,
+              "recurrenceMode": 1,
+              "billingCycleCount": 0
+            }
+          ],
+          "offerId": "summer"
+        },
+        {
+          "basePlanId": "annual",
+          "offerIdToken": "paid-token",
+          "offerTags": [],
+          "pricingPhases": [
+            {
+              "billingPeriod": "P1M",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€1.99",
+              "priceAmountMicros": 1990000,
+              "recurrenceMode": 2,
+              "billingCycleCount": 2
+            },
+            {
+              "billingPeriod": "P1Y",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€9.99",
+              "priceAmountMicros": 9990000,
+              "recurrenceMode": 1,
+              "billingCycleCount": 0
+            }
+          ],
+          "offerId": "paid"
+        }
+      ]
+    },
+    "subscription-invalid": {
+      "productId": "play-pro",
+      "type": "subs",
+      "title": "Pro",
+      "name": "Pro",
+      "description": "Pro subscription",
+      "packageName": "com.example.app",
+      "subscriptionOfferDetails": [
+        {
+          "basePlanId": "monthly",
+          "offerIdToken": "monthly-base",
+          "offerTags": [],
+          "pricingPhases": [
+            {
+              "billingPeriod": "P1Y",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€9.99",
+              "priceAmountMicros": 9990000,
+              "recurrenceMode": 1,
+              "billingCycleCount": 0
+            }
+          ]
+        },
+        {
+          "basePlanId": "annual",
+          "offerIdToken": "invalid-token",
+          "offerTags": [],
+          "pricingPhases": [],
+          "offerId": "invalid"
+        },
+        {
+          "basePlanId": "annual",
+          "offerIdToken": "annual-base",
+          "offerTags": [],
+          "pricingPhases": [
+            {
+              "billingPeriod": "P1Y",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€9.99",
+              "priceAmountMicros": 9990000,
+              "recurrenceMode": 1,
+              "billingCycleCount": 0
+            }
+          ]
+        },
+        {
+          "basePlanId": "annual",
+          "offerIdToken": "welcome-token",
+          "offerTags": [],
+          "pricingPhases": [
+            {
+              "billingPeriod": "P1W",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€0.00",
+              "priceAmountMicros": 0,
+              "recurrenceMode": 2,
+              "billingCycleCount": 1
+            },
+            {
+              "billingPeriod": "P1Y",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€9.99",
+              "priceAmountMicros": 9990000,
+              "recurrenceMode": 1,
+              "billingCycleCount": 0
+            }
+          ],
+          "offerId": "welcome"
+        }
+      ]
+    },
+    "subscription-paid": {
+      "productId": "play-pro",
+      "type": "subs",
+      "title": "Pro",
+      "name": "Pro",
+      "description": "Pro subscription",
+      "packageName": "com.example.app",
+      "subscriptionOfferDetails": [
+        {
+          "basePlanId": "monthly",
+          "offerIdToken": "monthly-base",
+          "offerTags": [],
+          "pricingPhases": [
+            {
+              "billingPeriod": "P1Y",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€9.99",
+              "priceAmountMicros": 9990000,
+              "recurrenceMode": 1,
+              "billingCycleCount": 0
+            }
+          ]
+        },
+        {
+          "basePlanId": "annual",
+          "offerIdToken": "annual-base",
+          "offerTags": [],
+          "pricingPhases": [
+            {
+              "billingPeriod": "P1Y",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€9.99",
+              "priceAmountMicros": 9990000,
+              "recurrenceMode": 1,
+              "billingCycleCount": 0
+            }
+          ]
+        },
+        {
+          "basePlanId": "annual",
+          "offerIdToken": "paid-token",
+          "offerTags": [],
+          "pricingPhases": [
+            {
+              "billingPeriod": "P1M",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€1.99",
+              "priceAmountMicros": 1990000,
+              "recurrenceMode": 2,
+              "billingCycleCount": 2
+            },
+            {
+              "billingPeriod": "P1Y",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€9.99",
+              "priceAmountMicros": 9990000,
+              "recurrenceMode": 1,
+              "billingCycleCount": 0
+            }
+          ],
+          "offerId": "paid"
+        }
+      ]
+    },
+    "subscription-other-plan": {
+      "productId": "play-pro",
+      "type": "subs",
+      "title": "Pro",
+      "name": "Pro",
+      "description": "Pro subscription",
+      "packageName": "com.example.app",
+      "subscriptionOfferDetails": [
+        {
+          "basePlanId": "monthly",
+          "offerIdToken": "monthly-base",
+          "offerTags": [],
+          "pricingPhases": [
+            {
+              "billingPeriod": "P1Y",
+              "priceCurrencyCode": "EUR",
+              "formattedPrice": "€9.99",
+              "priceAmountMicros": 9990000,
+              "recurrenceMode": 1,
+              "billingCycleCount": 0
+            }
+          ]
+        }
+      ]
+    },
+    "one-time": {
+      "productId": "play-lifetime",
+      "type": "inapp",
+      "title": "Lifetime",
+      "name": "Lifetime",
+      "description": "Lifetime access",
+      "packageName": "com.example.app",
+      "oneTimePurchaseOfferDetailsList": [
+        {
+          "purchaseOptionId": "standard",
+          "offerIdToken": "standard-token",
+          "formattedPrice": "€9.99",
+          "priceAmountMicros": 9990000,
+          "priceCurrencyCode": "EUR"
+        },
+        {
+          "purchaseOptionId": "rental",
+          "offerIdToken": "rental-token",
+          "formattedPrice": "€4.99",
+          "priceAmountMicros": 4990000,
+          "priceCurrencyCode": "EUR"
+        },
+        {
+          "purchaseOptionId": "rental",
+          "offerIdToken": "other-token",
+          "formattedPrice": "€1.99",
+          "priceAmountMicros": 1990000,
+          "priceCurrencyCode": "EUR",
+          "offerId": "other"
+        }
+      ]
+    },
+    "one-time-other-option": {
+      "productId": "play-lifetime",
+      "type": "inapp",
+      "title": "Lifetime",
+      "name": "Lifetime",
+      "description": "Lifetime access",
+      "packageName": "com.example.app",
+      "oneTimePurchaseOfferDetailsList": [
+        {
+          "purchaseOptionId": "standard",
+          "offerIdToken": "standard-token",
+          "formattedPrice": "€9.99",
+          "priceAmountMicros": 9990000,
+          "priceCurrencyCode": "EUR"
+        }
+      ]
+    }
+  },
+  "vectors": [
+    {
+      "name": "missing named subscription offer",
+      "releaseProduct": "subscription",
+      "placement": {
+        "id": "primary",
+        "productId": "pro",
+        "googlePlay": {
+          "offerId": "deleted"
+        }
+      },
+      "productDetails": "subscription",
+      "expected": {
+        "display": {
+          "price": "€9.99",
+          "hasTrial": false,
+          "hasFreeTrial": false,
+          "hasIntroductoryOffer": false,
+          "trialLabel": "",
+          "trialPeriodText": "",
+          "introOfferLabel": "",
+          "introductoryPrice": "",
+          "introductoryPeriod": "",
+          "introductoryPeriodCount": 0,
+          "introductoryCycles": 0,
+          "introductoryPaymentMode": ""
+        },
+        "purchase": {
+          "storeProductId": "play-pro",
+          "basePlanId": "annual",
+          "purchaseOptionId": null,
+          "offerId": null,
+          "offerToken": "annual-base"
+        },
+        "fallbackLog": "Configured Play offer is unavailable; using the base plan without an offer."
+      }
+    },
+    {
+      "name": "ineligible named subscription offer omitted from ProductDetails",
+      "releaseProduct": "subscription",
+      "placement": {
+        "id": "primary",
+        "productId": "pro",
+        "googlePlay": {
+          "offerId": "welcome"
+        }
+      },
+      "productDetails": "subscription-ineligible",
+      "expected": {
+        "display": {
+          "price": "€9.99",
+          "hasTrial": false,
+          "hasFreeTrial": false,
+          "hasIntroductoryOffer": false,
+          "trialLabel": "",
+          "trialPeriodText": "",
+          "introOfferLabel": "",
+          "introductoryPrice": "",
+          "introductoryPeriod": "",
+          "introductoryPeriodCount": 0,
+          "introductoryCycles": 0,
+          "introductoryPaymentMode": ""
+        },
+        "purchase": {
+          "storeProductId": "play-pro",
+          "basePlanId": "annual",
+          "purchaseOptionId": null,
+          "offerId": null,
+          "offerToken": "annual-base"
+        },
+        "fallbackLog": "Configured Play offer is unavailable; using the base plan without an offer."
+      }
+    },
+    {
+      "name": "invalid named subscription pricing phases",
+      "releaseProduct": "subscription",
+      "placement": {
+        "id": "primary",
+        "productId": "pro",
+        "googlePlay": {
+          "offerId": "invalid"
+        }
+      },
+      "productDetails": "subscription-invalid",
+      "expected": {
+        "display": {
+          "price": "€9.99",
+          "hasTrial": false,
+          "hasFreeTrial": false,
+          "hasIntroductoryOffer": false,
+          "trialLabel": "",
+          "trialPeriodText": "",
+          "introOfferLabel": "",
+          "introductoryPrice": "",
+          "introductoryPeriod": "",
+          "introductoryPeriodCount": 0,
+          "introductoryCycles": 0,
+          "introductoryPaymentMode": ""
+        },
+        "purchase": {
+          "storeProductId": "play-pro",
+          "basePlanId": "annual",
+          "purchaseOptionId": null,
+          "offerId": null,
+          "offerToken": "annual-base"
+        },
+        "fallbackLog": "Configured Play offer is unavailable; using the base plan without an offer."
+      }
+    },
+    {
+      "name": "base plan only despite available trial and intro offers",
+      "releaseProduct": "subscription",
+      "placement": {
+        "id": "primary",
+        "productId": "pro",
+        "googlePlay": {
+          "noOffer": true
+        }
+      },
+      "productDetails": "subscription",
+      "expected": {
+        "display": {
+          "price": "€9.99",
+          "hasTrial": false,
+          "hasFreeTrial": false,
+          "hasIntroductoryOffer": false,
+          "trialLabel": "",
+          "trialPeriodText": "",
+          "introOfferLabel": "",
+          "introductoryPrice": "",
+          "introductoryPeriod": "",
+          "introductoryPeriodCount": 0,
+          "introductoryCycles": 0,
+          "introductoryPaymentMode": ""
+        },
+        "purchase": {
+          "storeProductId": "play-pro",
+          "basePlanId": "annual",
+          "purchaseOptionId": null,
+          "offerId": null,
+          "offerToken": "annual-base"
+        },
+        "fallbackLog": null
+      }
+    },
+    {
+      "name": "automatic skips summer-ignore-offer",
+      "releaseProduct": "subscription",
+      "placement": {
+        "id": "primary",
+        "productId": "pro"
+      },
+      "productDetails": "subscription",
+      "expected": {
+        "display": {
+          "price": "€9.99",
+          "hasTrial": true,
+          "hasFreeTrial": true,
+          "hasIntroductoryOffer": true,
+          "trialLabel": "1 week",
+          "trialPeriodText": "1 week",
+          "introOfferLabel": "1 week",
+          "introductoryPrice": "€0.00",
+          "introductoryPeriod": "week",
+          "introductoryPeriodCount": 1,
+          "introductoryCycles": 1,
+          "introductoryPaymentMode": "freeTrial"
+        },
+        "purchase": {
+          "storeProductId": "play-pro",
+          "basePlanId": "annual",
+          "purchaseOptionId": null,
+          "offerId": "welcome",
+          "offerToken": "welcome-token"
+        },
+        "fallbackLog": null
+      }
+    },
+    {
+      "name": "automatic paid introduction is not a free trial",
+      "releaseProduct": "subscription",
+      "placement": {
+        "id": "primary",
+        "productId": "pro"
+      },
+      "productDetails": "subscription-paid",
+      "expected": {
+        "display": {
+          "price": "€9.99",
+          "hasTrial": false,
+          "hasFreeTrial": false,
+          "hasIntroductoryOffer": true,
+          "trialLabel": "",
+          "trialPeriodText": "",
+          "introOfferLabel": "€1.99/1 month for 2 months",
+          "introductoryPrice": "€1.99",
+          "introductoryPeriod": "month",
+          "introductoryPeriodCount": 1,
+          "introductoryCycles": 2,
+          "introductoryPaymentMode": "payAsYouGo"
+        },
+        "purchase": {
+          "storeProductId": "play-pro",
+          "basePlanId": "annual",
+          "purchaseOptionId": null,
+          "offerId": "paid",
+          "offerToken": "paid-token"
+        },
+        "fallbackLog": null
+      }
+    },
+    {
+      "name": "explicit named offer can use an ignored tag",
+      "releaseProduct": "subscription",
+      "placement": {
+        "id": "primary",
+        "productId": "pro",
+        "googlePlay": {
+          "offerId": "summer"
+        }
+      },
+      "productDetails": "subscription",
+      "expected": {
+        "display": {
+          "price": "€9.99",
+          "hasTrial": true,
+          "hasFreeTrial": true,
+          "hasIntroductoryOffer": true,
+          "trialLabel": "3 months",
+          "trialPeriodText": "3 months",
+          "introOfferLabel": "3 months",
+          "introductoryPrice": "€0.00",
+          "introductoryPeriod": "month",
+          "introductoryPeriodCount": 1,
+          "introductoryCycles": 3,
+          "introductoryPaymentMode": "freeTrial"
+        },
+        "purchase": {
+          "storeProductId": "play-pro",
+          "basePlanId": "annual",
+          "purchaseOptionId": null,
+          "offerId": "summer",
+          "offerToken": "summer-token"
+        },
+        "fallbackLog": null
+      }
+    },
+    {
+      "name": "missing one-time offer uses configured purchase option",
+      "releaseProduct": "one-time",
+      "placement": {
+        "id": "primary",
+        "productId": "pro",
+        "googlePlay": {
+          "offerId": "deleted"
+        }
+      },
+      "productDetails": "one-time",
+      "expected": {
+        "display": {
+          "price": "€4.99",
+          "hasTrial": false,
+          "hasFreeTrial": false,
+          "hasIntroductoryOffer": false,
+          "trialLabel": "",
+          "trialPeriodText": "",
+          "introOfferLabel": "",
+          "introductoryPrice": "",
+          "introductoryPeriod": "",
+          "introductoryPeriodCount": 0,
+          "introductoryCycles": 0,
+          "introductoryPaymentMode": ""
+        },
+        "purchase": {
+          "storeProductId": "play-lifetime",
+          "basePlanId": null,
+          "purchaseOptionId": "rental",
+          "offerId": null,
+          "offerToken": "rental-token"
+        },
+        "fallbackLog": "Configured Play offer is unavailable; using the purchase option without an offer."
+      }
+    },
+    {
+      "name": "one-time noOffer uses configured purchase option",
+      "releaseProduct": "one-time",
+      "placement": {
+        "id": "primary",
+        "productId": "pro",
+        "googlePlay": {
+          "noOffer": true
+        }
+      },
+      "productDetails": "one-time",
+      "expected": {
+        "display": {
+          "price": "€4.99",
+          "hasTrial": false,
+          "hasFreeTrial": false,
+          "hasIntroductoryOffer": false,
+          "trialLabel": "",
+          "trialPeriodText": "",
+          "introOfferLabel": "",
+          "introductoryPrice": "",
+          "introductoryPeriod": "",
+          "introductoryPeriodCount": 0,
+          "introductoryCycles": 0,
+          "introductoryPaymentMode": ""
+        },
+        "purchase": {
+          "storeProductId": "play-lifetime",
+          "basePlanId": null,
+          "purchaseOptionId": "rental",
+          "offerId": null,
+          "offerToken": "rental-token"
+        },
+        "fallbackLog": null
+      }
+    },
+    {
+      "name": "missing product still fails",
+      "releaseProduct": "subscription",
+      "placement": {
+        "id": "primary",
+        "productId": "pro",
+        "googlePlay": {
+          "offerId": "deleted"
+        }
+      },
+      "productDetails": null,
+      "expected": {
+        "failure": "missing from Play query result"
+      }
+    },
+    {
+      "name": "missing configured base plan still fails",
+      "releaseProduct": "subscription",
+      "placement": {
+        "id": "primary",
+        "productId": "pro",
+        "googlePlay": {
+          "offerId": "deleted"
+        }
+      },
+      "productDetails": "subscription-other-plan",
+      "expected": {
+        "failure": "configured base plan 'annual' is absent"
+      }
+    },
+    {
+      "name": "missing configured purchase option still fails",
+      "releaseProduct": "one-time",
+      "placement": {
+        "id": "primary",
+        "productId": "pro",
+        "googlePlay": {
+          "offerId": "deleted"
+        }
+      },
+      "productDetails": "one-time-other-option",
+      "expected": {
+        "failure": "configured purchase option 'rental' is absent"
+      }
+    }
+  ]
+}

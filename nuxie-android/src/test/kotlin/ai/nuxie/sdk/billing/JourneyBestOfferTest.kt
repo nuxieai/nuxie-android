@@ -51,6 +51,18 @@ class JourneyBestOfferTest {
         assertEquals("standard", request.purchaseOptionId)
     }
 
+    @Test fun basePlanOnlyIgnoresAvailableOffers() = runBlocking {
+        val requests = JourneyProductCatalog.parse(release(null, noOffer = true)).requests
+        assertEquals(OfferSelection.None, requests.single().offerSelection)
+        val resolver = ProductResolver(ProductDetailsQuery {
+            ProductDetailsQueryResult.Success(listOf(PlayProductDetails("play-pro", BillingClient.ProductType.SUBS,
+                null, listOf(offer("trial", 0), offer(null), offer("intro", 1_000_000)))))
+        }, InMemoryPurchaseEvidenceStore())
+        val product = resolver.resolve(requests).single()
+        assertEquals(null, product.offerId)
+        assertEquals("base-token", product.offerToken)
+    }
+
     private suspend fun assertChoice(expected: String?, offers: List<PlaySubscriptionOffer>, pinned: String? = null) {
         // Exercise both spellings of an absent offer through the real Journey adapter.
         for (explicitNull in listOf(false, true)) {
@@ -72,7 +84,8 @@ class JourneyBestOfferTest {
             (if (id == null) emptyList() else listOf(PlayPricingPhase(price, period, 1, PlayRecurrenceMode.FINITE))) +
                 PlayPricingPhase(9_990_000, "P1M", 0, PlayRecurrenceMode.INFINITE))
 
-    private fun release(pinned: String?, type: String = "subscription", explicitNull: Boolean = false): AuthenticatedJourneyRelease {
+    private fun release(pinned: String?, type: String = "subscription", explicitNull: Boolean = false,
+        noOffer: Boolean = false): AuthenticatedJourneyRelease {
         val root = FixtureRunner.fixturesRoot()
         val entry = Json.parseToJsonElement(root.resolve("journeys/rendered-text-input/release-entry.json").readText()).jsonObject
         val keys = Json.parseToJsonElement(root.resolve("journeys/planes/release.json").readText()).jsonObject
@@ -89,7 +102,8 @@ class JourneyBestOfferTest {
             }) },
             "placements" to buildJsonArray { add(buildJsonObject {
                 put("id", "primary"); put("productId", "pro")
-                if (pinned != null) putJsonObject("googlePlay") { put("offerId", pinned) }
+                if (noOffer) putJsonObject("googlePlay") { put("noOffer", true) }
+                else if (pinned != null) putJsonObject("googlePlay") { put("offerId", pinned) }
                 else if (explicitNull) put("googlePlay", JsonNull)
             }) },
         ))

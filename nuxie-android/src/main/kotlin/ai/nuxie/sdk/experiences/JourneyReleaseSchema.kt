@@ -65,8 +65,12 @@ internal object JourneyReleaseSchema {
             }
             placement["googlePlay"]?.let {
                 if (product.platform != "google_play") fail("Google Play offer platform")
-                val store = exact(it, setOf("offerId"))
-                utf8(store["offerId"], 256)
+                val store = record(it)
+                when (store.keys) {
+                    setOf("offerId") -> utf8(store["offerId"], 256)
+                    setOf("noOffer") -> if (boolean(store["noOffer"])) Unit else fail("Google Play noOffer must be true")
+                    else -> fail("Google Play selection requires exactly one of offerId or noOffer")
+                }
             }
             placementId
         }
