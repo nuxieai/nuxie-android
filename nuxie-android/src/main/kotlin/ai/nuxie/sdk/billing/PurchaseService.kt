@@ -755,7 +755,7 @@ internal class PurchaseService(
                         requiredBalance = amount,
                         eventData = NuxieApi.FeatureUseEventData(amount, metadata),
                         entityId = entityId,
-                        customerKind = claimed.featureUseCustomerKinds?.get(eventId),
+                        customerKind = claimed.featureUseCustomerKinds(distinctId)?.get(eventId),
                         purchase = NuxieApi.PlayPurchaseUseReport(
                             packageName = claimed.packageName,
                             productId = claimed.storeProductIds.first(),
@@ -866,18 +866,10 @@ internal class PurchaseService(
                 if (current.pendingSend?.admissionId != evidence.pendingSend?.admissionId ||
                     !current.matchesAtomicUsePayload(evidence)
                 ) return@withLock
-                val kinds = current.featureUseCustomerKinds
-                // A missing map is legacy evidence: the reconstructed operation
-                // may already have been sent undeclared. Never backfill its kind.
-                if (kinds == null || kinds.containsKey(operationId)) {
-                    admitted = current
-                } else {
-                    val updated = current.copy(featureUseCustomerKinds =
-                        kinds + (operationId to customerKind(distinctId)))
-                    // A failed durable admission turns the outbox off. No evidence
-                    // was sent, so the caller can use the ordinary command path.
-                    if (saveEntry(updated)) admitted = updated
-                }
+                val updated = current.admitFeatureUse(distinctId, operationId, customerKind(distinctId))
+                // A failed durable admission turns the outbox off. No evidence
+                // was sent, so the caller can use the ordinary command path.
+                if (updated == current || saveEntry(updated)) admitted = updated
             }
         }
         val provider = identity
@@ -1895,7 +1887,8 @@ internal class PurchaseService(
         val committed = projectionRefresh.withLock {
             // Another customer's settled record is only the record of their purchase:
             // this customer's checkout starts the purchase's entry afresh.
-            val existing = readEntries()[purchase.purchaseToken]?.takeUnless { it.givesWayTo(checkoutFlight?.owner) }
+            val current = readEntries()[purchase.purchaseToken]
+            val existing = current?.takeUnless { it.givesWayTo(checkoutFlight?.owner) }
             val bindings = readBindings()
             val mappings = readMappings()
             val existingProductIdentity = existing?.nuxieProductId?.let { nuxieProductId ->
@@ -2008,7 +2001,7 @@ internal class PurchaseService(
                 ownerDistinctId = existing?.ownerDistinctId,
                 refused = existing?.refused == true,
                 pendingSend = admittedSend,
-                featureUseCustomerKinds = if (existing == null) emptyMap() else existing.featureUseCustomerKinds,
+                featureUseDeclarations = current?.retainedFeatureUseDeclarations ?: emptyMap(),
                 context = existing?.context ?: product?.toStoredContext()
                     ?: catalogBinding?.context ?: catalogMapping?.context,
                 pinnedFeatureAllowances = pinnedFeatureAllowances,
@@ -2180,11 +2173,12 @@ internal class PurchaseService(
                     // whose customer is no longer the current one is dropped, so it can
                     // never move the purchase back after another customer's Restore.
                     if (requested.distinctId != distinctId()) return@withLock null
-                    // Only the /purchase admission changes. Consume operation ids
-                    // survive customer claims, so keep their original declarations
-                    // and the null marker for undeclared legacy evidence.
+                    // A claim changes /purchase admission, not earlier uses.
+                    // Resolve legacy absence before changing the requester so
+                    // its undeclared uses stay with their original customer.
                     saveEntry(current.copy(
                         pendingSend = claim,
+                        featureUseDeclarations = current.retainedFeatureUseDeclarations,
                         syncAttempts = 0,
                         retryDueAtMillis = null,
                     ))
@@ -2327,7 +2321,7 @@ internal class PurchaseService(
         }
         val outcome = try {
             synchronizer.sync(
-                evidence.copy(pendingSend = send),
+                evidence.copy(pendingSend = send, featureUseDeclarations = evidence.retainedFeatureUseDeclarations),
                 PurchaseSyncRequest(send.reason, send.distinctId, send.customerKind),
             )
         } catch (cancelled: CancellationException) {
@@ -2354,7 +2348,7 @@ internal class PurchaseService(
         if (!signatureEligible(evidence)) return SyncResult.UNAVAILABLE
         val outcome = try {
             synchronizer.sync(
-                evidence.copy(pendingSend = send),
+                evidence.copy(pendingSend = send, featureUseDeclarations = evidence.retainedFeatureUseDeclarations),
                 PurchaseSyncRequest(send.reason, send.distinctId, send.customerKind),
             )
         } catch (cancelled: CancellationException) {
@@ -2478,7 +2472,12 @@ internal class PurchaseService(
                 current.copy(ownerDistinctId = owner, refused = current.refused || owner == null)
             }
             PurchaseAnswer.Failed -> null
-        }?.copy(pendingSend = null, syncAttempts = 0, retryDueAtMillis = null)
+        }?.copy(
+            pendingSend = null,
+            featureUseDeclarations = current.retainedFeatureUseDeclarations,
+            syncAttempts = 0,
+            retryDueAtMillis = null,
+        )
         if (answered != null) {
             return if (saveEntry(answered)) EntryAnswer.Answered(answered) else EntryAnswer.Unsaved
         }
@@ -2674,8 +2673,12 @@ internal class PurchaseService(
      * record of another customer than [givesWayTo] is replaced, not merged.
      */
     private suspend fun upsertEvidenceLocked(candidate: PurchaseEvidence, givesWayTo: String? = null): PurchaseEvidence {
-        val current = readEntries()[candidate.purchaseToken]?.takeUnless { it.givesWayTo(givesWayTo) }
-        val merged = if (current == null) candidate else candidate.copy(
+        val retained = readEntries()[candidate.purchaseToken]
+        val current = retained?.takeUnless { it.givesWayTo(givesWayTo) }
+        // Replacing checkout state must not replace any customer's consume history.
+        val merged = if (current == null) candidate.copy(
+            featureUseDeclarations = retained?.retainedFeatureUseDeclarations ?: candidate.retainedFeatureUseDeclarations,
+        ) else candidate.copy(
             purchaseState = if (candidate.purchaseState == StoredPurchaseState.PURCHASED ||
                 current.purchaseState == StoredPurchaseState.PURCHASED
             ) {
@@ -2686,7 +2689,7 @@ internal class PurchaseService(
             buyerDistinctId = candidate.buyerDistinctId ?: current.buyerDistinctId,
             ownerDistinctId = current.ownerDistinctId,
             refused = current.refused,
-            featureUseCustomerKinds = current.featureUseCustomerKinds,
+            featureUseDeclarations = current.retainedFeatureUseDeclarations,
             pendingSend = when {
                 current.pendingSend == null ->
                     candidate.pendingSend.takeUnless { current.synced || current.refused }

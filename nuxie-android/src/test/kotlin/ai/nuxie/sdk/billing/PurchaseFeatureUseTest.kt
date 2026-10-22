@@ -95,7 +95,7 @@ class PurchaseFeatureUseTest {
             assertEquals(kind.wireValue, body.getValue("customerKind").jsonPrimitive.content)
             assertFalse(body.containsKey("customer_kind"))
             val operationId = body.getValue("operationId").jsonPrimitive.content
-            assertEquals(kind, store.load().getValue("token-1").featureUseCustomerKinds?.get(operationId))
+            assertEquals(kind, store.load().getValue("token-1").featureUseCustomerKinds(customer)?.get(operationId))
             core.stop()
         }
     }
@@ -129,7 +129,7 @@ class PurchaseFeatureUseTest {
             val file = File(directory, "purchase-evidence.json")
             val rows = Json.parseToJsonElement(file.readText()).jsonObject
             file.writeText(kotlinx.serialization.json.JsonObject(rows + ("token-1" to
-                kotlinx.serialization.json.JsonObject(rows.getValue("token-1").jsonObject - "featureUseCustomerKinds"))).toString())
+                kotlinx.serialization.json.JsonObject(rows.getValue("token-1").jsonObject - "featureUseDeclarations"))).toString())
         }
         val first = service(core, store, outboxRetryMillis = 3_600_000)
         suspend fun attempt(service: PurchaseService) {
@@ -152,8 +152,8 @@ class PurchaseFeatureUseTest {
         val operationId = command.getValue("operationId").jsonPrimitive.content
         val beforeRestart = store.load().getValue("token-1")
         assertEquals(send, beforeRestart.pendingSend)
-        if (legacy) assertNull(beforeRestart.featureUseCustomerKinds)
-        else assertEquals(CustomerKind.ANONYMOUS, beforeRestart.featureUseCustomerKinds?.get(operationId))
+        if (legacy) assertNull(beforeRestart.featureUseCustomerKinds(customer))
+        else assertEquals(CustomerKind.ANONYMOUS, beforeRestart.featureUseCustomerKinds(customer)?.get(operationId))
         core.stop()
 
         val reopened = FilePurchaseEvidenceStore(directory)
@@ -170,7 +170,7 @@ class PurchaseFeatureUseTest {
         assertNotNull(restarted.useFeatureWithPendingPurchase(customer, "credits", 1.0, null, null))
         val replay = restartedTransport.requests.single { it.url.path == "/feature/consume" }.body.decodeToString()
         assertEquals(bodies[0], replay)
-        if (legacy) assertNull(reopened.load().getValue("token-1").featureUseCustomerKinds)
+        if (legacy) assertNull(reopened.load().getValue("token-1").featureUseCustomerKinds(customer))
         restartedCore.stop()
     }
 
@@ -213,7 +213,7 @@ class PurchaseFeatureUseTest {
             val file = File(directory, "purchase-evidence.json")
             val rows = Json.parseToJsonElement(file.readText()).jsonObject
             file.writeText(kotlinx.serialization.json.JsonObject(rows + ("token-1" to
-                kotlinx.serialization.json.JsonObject(rows.getValue("token-1").jsonObject - "featureUseCustomerKinds"))).toString())
+                kotlinx.serialization.json.JsonObject(rows.getValue("token-1").jsonObject - "featureUseDeclarations"))).toString())
         }
         val billing = object : PlayBillingGateway by NoopBilling {
             override suspend fun launch(activity: Activity, request: CheckoutRequest): BillingResult =
@@ -269,10 +269,140 @@ class PurchaseFeatureUseTest {
         assertEquals("The original consume declaration is immutable across claims",
             if (legacy) null else "anonymous", replay["customerKind"]?.jsonPrimitive?.content)
         assertEquals("Retries send the exact command admitted before the claims", consumes[0], consumes[1])
-        val saved = reopened.load().getValue("token-1").featureUseCustomerKinds
+        val saved = reopened.load().getValue("token-1").featureUseCustomerKinds(customer)
         if (legacy) assertNull(saved)
         else assertEquals(CustomerKind.ANONYMOUS, saved?.get(original.getValue("operationId").jsonPrimitive.content))
         restartedCore.stop()
+    }
+
+    @Test
+    fun newCustomerAdmitsOwnKindAfterOwnershipMoveAndFailedPurchaseSync() = runBlocking {
+        assertNewCustomerAdmitsOwnKind(legacy = false, settledCheckout = false)
+        assertNewCustomerAdmitsOwnKind(legacy = false, settledCheckout = true)
+    }
+
+    @Test
+    fun legacyUndeclaredUsesBelongOnlyToTheOriginalCustomer() = runBlocking {
+        assertNewCustomerAdmitsOwnKind(legacy = true, settledCheckout = false)
+        assertNewCustomerAdmitsOwnKind(legacy = true, settledCheckout = true)
+    }
+
+    private suspend fun assertNewCustomerAdmitsOwnKind(legacy: Boolean, settledCheckout: Boolean) {
+        val directory = temporaryFolder.newFolder()
+        val consumes = mutableListOf<kotlinx.serialization.json.JsonObject>()
+        var acceptOriginalPurchase = false
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                when (request.url.path) {
+                    "/feature/consume" -> {
+                        consumes += Json.parseToJsonElement(request.body.decodeToString()).jsonObject
+                        if (consumes.size < 3) throw java.io.IOException("Consume reply lost")
+                        featureCommandResponse(request, balance = 0.0)
+                    }
+                    "/purchase" -> if (acceptOriginalPurchase) {
+                        val customer = Json.parseToJsonElement(request.body.decodeToString()).jsonObject
+                            .getValue("distinct_id").jsonPrimitive.content
+                        HttpTransport.Response(200, """{"success":true,"customer_id":"$customer","features":[],"catalog_product":{"id":"credit-pack","store_product_id":"play-credit-pack","store_product_type":"nonConsumable","base_plan_id":null,"purchase_option_id":null,"offer_id":null}}""".encodeToByteArray())
+                    } else HttpTransport.Response(503, ByteArray(0))
+                    else -> canonicalJourneyProfileResponse()
+                }
+            }
+        }
+        val core = core(transport)
+        core.identity.reset(keepAnonymousId = true)
+        val customerA = core.identity.distinctId()
+        val store = FilePurchaseEvidenceStore(directory)
+        assertTrue(store.upsert(evidence(buyerDistinctId = customerA).copy(
+            retryDueAtMillis = SERVICE_CLOCK_START + 3_600_000,
+        )))
+        if (legacy) {
+            val file = File(directory, "purchase-evidence.json")
+            val rows = Json.parseToJsonElement(file.readText()).jsonObject
+            file.writeText(kotlinx.serialization.json.JsonObject(rows + ("token-1" to
+                kotlinx.serialization.json.JsonObject(rows.getValue("token-1").jsonObject - "featureUseDeclarations"))).toString())
+        }
+        var playCustomer = customerA
+        var playOwnsPurchase = true
+        lateinit var service: PurchaseService
+        fun playPurchase() = PlayPurchase("token-1", "com.example.app", listOf("play-credit-pack"),
+            StoredPurchaseState.PURCHASED, false, playAccountId(playCustomer), "{}", "")
+        val billing = object : PlayBillingGateway by NoopBilling {
+            override suspend fun launch(activity: Activity, request: CheckoutRequest): BillingResult {
+                val code = if (settledCheckout) BillingClient.BillingResponseCode.OK
+                    else BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED
+                if (settledCheckout) {
+                    playOwnsPurchase = true
+                    service.onPurchasesUpdated(PurchaseUpdate(
+                        BillingResult.newBuilder().setResponseCode(code).build(), listOf(playPurchase()),
+                    ))
+                }
+                return BillingResult.newBuilder().setResponseCode(code).build()
+            }
+
+            override suspend fun queryActive(productType: String): ActivePurchasesResult =
+                ActivePurchasesResult.Success(if (playOwnsPurchase && productType == BillingClient.ProductType.INAPP)
+                    listOf(playPurchase()) else emptyList())
+        }
+        service = service(core, store, billing = billing, ownedOnPlay = mutableSetOf(),
+            synchronizer = NuxieApiPurchaseSynchronizer(core.api), outboxRetryMillis = 3_600_000)
+        val first = runCatching { service.useFeatureWithPendingPurchase(customerA, "credits", 1.0, "entity", null) }
+        assertTrue("A's consume reply is lost", first.exceptionOrNull() is java.io.IOException)
+
+        if (settledCheckout) {
+            // As on iOS, settle A's /purchase independently of its lost consume,
+            // then replace the settled row through B's verified checkout delivery.
+            acceptOriginalPurchase = true
+            service.recover()
+            acceptOriginalPurchase = false
+            assertTrue("A's row is settled before B's checkout", store.load().getValue("token-1").isSettled)
+            playOwnsPurchase = false
+        }
+        core.identity.setDistinctId("customer-b")
+        playCustomer = "customer-b"
+        val product = StoreProduct(
+            productId = "credit-pack", storeProductId = "play-credit-pack", basePlanId = null, offerId = null,
+            placementId = null, rawProduct = null, offerToken = null, isOfferPersonalized = false,
+            productType = BillingClient.ProductType.INAPP, consumable = true,
+            featureAllowances = listOf(FeatureAllowance("credits", FeatureType.CREDIT_SYSTEM, allowance = 1.0)),
+        )
+        val owned = service.purchase(Robolectric.buildActivity(Activity::class.java).get(), product, null)
+        if (settledCheckout) assertEquals(PurchaseResult.Purchased, owned)
+        else assertTrue((owned as? PurchaseResult.Failed)?.cause is PurchaseAlreadyOwnedException)
+        val purchase = transport.requests.last { it.url.path == "/purchase" }
+        val body = Json.parseToJsonElement(purchase.body.decodeToString()).jsonObject
+        assertEquals("customer-b", body.getValue("distinct_id").jsonPrimitive.content)
+        assertEquals("identified", body.getValue("customer_kind").jsonPrimitive.content)
+        val pending = store.load().getValue("token-1")
+        assertEquals("customer-b", pending.pendingSend?.distinctId)
+        assertFalse(pending.synced)
+        core.stop()
+
+        // B's first use and retry each reopen durable storage. Their inputs
+        // produce A's operation id but must admit B's own identified kind.
+        for (attempt in 0 until 2) {
+            val reopened = FilePurchaseEvidenceStore(directory)
+            val restartedCore = core(transport)
+            restartedCore.identity.setDistinctId("customer-b")
+            val restarted = service(restartedCore, reopened, billing = billing, ownedOnPlay = mutableSetOf(),
+                synchronizer = NuxieApiPurchaseSynchronizer(restartedCore.api), outboxRetryMillis = 3_600_000)
+            val result = runCatching {
+                restarted.useFeatureWithPendingPurchase("customer-b", "credits", 1.0, "entity", null)
+            }
+            if (attempt == 0) assertTrue(result.exceptionOrNull() is java.io.IOException)
+            else assertNotNull(result.getOrThrow())
+            restartedCore.stop()
+        }
+        assertEquals(3, consumes.size)
+        assertEquals(listOf(customerA, "customer-b", "customer-b"), consumes.map { it["customerId"]?.jsonPrimitive?.content })
+        assertEquals(listOf(if (legacy) null else "anonymous", "identified", "identified"),
+            consumes.map { it["customerKind"]?.jsonPrimitive?.content })
+        assertEquals(1, consumes.map { it["operationId"] }.toSet().size)
+        assertEquals(consumes[1], consumes[2])
+        val retained = FilePurchaseEvidenceStore(directory).load().getValue("token-1")
+        val operationId = consumes[0].getValue("operationId").jsonPrimitive.content
+        if (legacy) assertNull(retained.featureUseCustomerKinds(customerA))
+        else assertEquals(mapOf(operationId to CustomerKind.ANONYMOUS), retained.featureUseCustomerKinds(customerA))
+        assertEquals(mapOf(operationId to CustomerKind.IDENTIFIED), retained.featureUseCustomerKinds("customer-b"))
     }
 
     @Test
@@ -287,7 +417,7 @@ class PurchaseFeatureUseTest {
         assertNull(service.useFeatureWithPendingPurchase("customer-a", "credits", 1.0, null, null))
         assertTrue(store.refusedWrites.get() > 0)
         assertTrue(transport.requests.none { it.url.path == "/feature/consume" })
-        assertEquals(emptyMap<String, CustomerKind>(), store.load().getValue("token-1").featureUseCustomerKinds)
+        assertEquals(emptyMap<String, CustomerKind>(), store.load().getValue("token-1").featureUseCustomerKinds("customer-a"))
         core.stop()
     }
 
