@@ -1,13 +1,13 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "5d2f592bf6a3f29a7cdd406ab5c7fd77e2fe9773",
+  "sourceCommit": "12477f8ebc00817212bfbae5dc4527e3d099f139",
   "files": {
-    "README.md": "0e5ea9c03863716cdbb0dfce762b8d79176041ca4c2b4a3eaba03bc66fbd2b1d",
+    "README.md": "8180a2e17f3edc2148ff040d7979c22c523333bb03cef4bb348b8e842b64879e",
     "accessibility/control-state.json": "6a4e35c6c2f55575344f4a26a2bdb5f22728a41845464c3beeb93251082e97f2",
     "accessibility/focus-restoration.json": "65b3d626a9229eab9ce215513b12d1d1cc5e79c51339bc05b0c5d5633826933e",
     "encodings/activity-identity.json": "6f6c5010911fac834706a986f4a94d7d7a63c7f34bfb7cdf7f616246b1f896a2",
     "encodings/app-action.json": "9f231e210002140f300308cd2d98a878346241de6c34e01c26a42d16c4acd415",
-    "encodings/feature-consumption.json": "8b34dd248e9f28a0bead3b07f146b3579cb47f1f486489c46afefaf21f914b72",
+    "encodings/feature-consumption.json": "827b4ac215c4fb1d5a2b1b15fe1c7934f77bb1bccd985c425f33b10413dcd149",
     "encodings/feature-usage.json": "2606a5062e041237fb7245dd919e921c383d94735d537e509aab429855b17c69",
     "encodings/forwarded-activity.json": "700ae41432546c0abecaae5f52f74aa6115bfe64e2d3f7b9f4c578a9b95552e3",
     "encodings/text-size-device-properties.json": "d39d96c7164111c854c4c2ce0bbb430018018c97db31baae871a3022a031f02f",
