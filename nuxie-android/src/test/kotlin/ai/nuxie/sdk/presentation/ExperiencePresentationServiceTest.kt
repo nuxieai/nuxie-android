@@ -1628,7 +1628,7 @@ class ExperiencePresentationServiceTest {
 
         assertEquals(listOf(JourneySurfaceOutcome.DISMISSED), secondOutcomes)
         assertTrue(secondLease.closed.get())
-        assertEquals(2, emitted.count { it == SystemEventNames.EXPERIENCE_SHOWN })
+        assertEquals(1, emitted.count { it == SystemEventNames.EXPERIENCE_SHOWN })
         assertEquals(1, emitted.count { it == SystemEventNames.EXPERIENCE_DISMISSED })
 
         val nextReservation = requireNotNull(service.reserveJourney("customer-1"))
@@ -1649,7 +1649,35 @@ class ExperiencePresentationServiceTest {
         assertNull(freshDraft.read("input_email"))
         PresentationRegistry.reportFirstFrame(launched.last())
         nextJourney.await()
+        assertEquals(2, emitted.count { it == SystemEventNames.EXPERIENCE_SHOWN })
         service.dismissFromHost("customer-1")
+    }
+
+    @Test
+    fun `fully dismissed Journey emits Experience shown again when presented again`() = runTest {
+        val release = renderedJourneyRelease()
+        val emitted = mutableListOf<Emitted>()
+        val launched = mutableListOf<String>()
+        val service = service(this, emit = { name, properties, distinctId ->
+            emitted += Emitted(name, properties, distinctId)
+        }, launch = launched::add)
+
+        repeat(2) { index ->
+            val presentation = async {
+                service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
+                    service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
+                    onScreenDismissed = { _, _, _ -> JourneyScreenDismissalResult.HANDLED }, onOutcome = {})
+            }
+            runCurrent()
+            assertEquals(index, emitted.count { it.name == SystemEventNames.EXPERIENCE_SHOWN })
+            PresentationRegistry.reportFirstFrame(launched.last())
+            presentation.await()
+            PresentationRegistry.reportFirstFrame(launched.last())
+            assertEquals(index + 1, emitted.count { it.name == SystemEventNames.EXPERIENCE_SHOWN })
+            service.dismissFromHost("customer-1")
+        }
+        assertEquals(listOf("journey-1", "journey-1"), emitted.filter { it.name == SystemEventNames.EXPERIENCE_SHOWN }
+            .map { it.properties["journey_id"] })
     }
 
     @Test
@@ -2359,6 +2387,7 @@ class ExperiencePresentationServiceTest {
             val edges = mutableListOf<String>()
             val nestedReports = mutableListOf<String>()
             val batches = mutableListOf<JourneyScreenEmissionBatch>()
+            val emitted = mutableListOf<String>()
             val sharedValues = ExperienceRunValues()
             var heldNavigation: CompletableDeferred<Unit>? = null
             var refuseClose = false
@@ -2419,7 +2448,7 @@ class ExperiencePresentationServiceTest {
                     }
                 }
             }
-            service = service(this, launch = { id ->
+            service = service(this, emit = { name, _, _ -> emitted += name }, launch = { id ->
                 val host = Host(id)
                 hosts[id] = host
                 nativeLayers += id
@@ -2447,6 +2476,8 @@ class ExperiencePresentationServiceTest {
                 runCurrent()
                 if (initial) PresentationRegistry.reportFirstFrame(nativeLayers.single())
                 presentation.await()
+                assertEquals(vector.getValue("name").jsonPrimitive.content, 1,
+                    emitted.count { it == SystemEventNames.EXPERIENCE_SHOWN })
             }
             navigate(screen(vector.getValue("root").jsonPrimitive.content), initial = true)
             val baseId = nativeLayers.single()

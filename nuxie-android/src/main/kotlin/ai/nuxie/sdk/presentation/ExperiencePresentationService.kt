@@ -650,6 +650,9 @@ internal class ExperiencePresentationService(
         val firstFrame: CompletableDeferred<ExperienceRef>,
         val closed: AtomicBoolean = AtomicBoolean(false),
         val shown: AtomicBoolean = AtomicBoolean(false),
+        // Shared by every screen and layer in this Journey's presented surface.
+        // A fully dismissed surface starts a fresh fact, even for the same Journey.
+        val experienceShown: AtomicBoolean = AtomicBoolean(false),
         val fontFailureReported: AtomicBoolean = AtomicBoolean(false),
         val finished: CompletableDeferred<Unit> = CompletableDeferred(),
         // Shown and the run-terminal observation are one fact-pairing decision.
@@ -1133,6 +1136,7 @@ internal class ExperiencePresentationService(
                 val ref = ExperienceRef(source.identity.experienceId, source.identity.experienceVersionId, journeyId)
                 val pending = ActivePresentation(id = id, ref = ref, acquired = source.acquired,
                     ownerDistinctId = request.ownerDistinctId, journey = journey, nativeRecovery = acquiringId != null,
+                    experienceShown = existing?.experienceShown ?: AtomicBoolean(false),
                     firstFrame = CompletableDeferred())
                 checkOwnership()
 
@@ -1781,16 +1785,18 @@ internal class ExperiencePresentationService(
                 active.runTransitionFinished.isCompleted ||
                 !active.shown.compareAndSet(false, true)
             ) return@synchronized false
-            runCatching {
-                emit(
-                    SystemEventNames.EXPERIENCE_SHOWN,
-                    mapOf(
-                        "journey_id" to active.ref.journeyId,
-                        "experience_id" to active.ref.experienceId,
-                        "experience_version_id" to active.ref.experienceVersion,
-                    ),
-                    active.ownerDistinctId,
-                )
+            if (active.experienceShown.compareAndSet(false, true)) {
+                runCatching {
+                    emit(
+                        SystemEventNames.EXPERIENCE_SHOWN,
+                        mapOf(
+                            "journey_id" to active.ref.journeyId,
+                            "experience_id" to active.ref.experienceId,
+                            "experience_version_id" to active.ref.experienceVersion,
+                        ),
+                        active.ownerDistinctId,
+                    )
+                }
             }
             true
         }

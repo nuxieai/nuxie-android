@@ -1291,6 +1291,110 @@ class JourneyServiceTest {
         )
     }
 
+    @Test fun `two screen push emits one Experience shown and each screen lifecycle event`() = runBlocking {
+        val identity = identity("customer")
+        val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(renderedEntry)
+        val renderedAuthority = authority(renderedEntry)
+        catalog.commit("customer", catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority))
+        val baseline = requireNotNull(catalog.snapshot("customer"))
+        val original = baseline.releasesByDigest.values.single()
+        val leg = original.leg
+        val render = original.descriptor.getValue("render").jsonObject
+        val legScreens = leg.getValue("screens").jsonArray
+        val renderScreens = render.getValue("screens").jsonArray
+        val nextLegScreen = JsonObject(legScreens.first().jsonObject + ("id" to JsonPrimitive("screen_details")))
+        val nextRenderScreen = JsonObject(renderScreens.first().jsonObject + ("id" to JsonPrimitive("screen_details")))
+        val release = AuthenticatedJourneyRelease(
+            JourneyReleaseEnvelope.authenticate(renderedEntry.getValue("envelope").toString().encodeToByteArray(),
+                mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(fixture.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP))),
+            original.identity,
+            JsonObject(original.descriptor + mapOf(
+                "leg" to JsonObject(leg + ("screens" to JsonArray(legScreens + nextLegScreen))),
+                "render" to JsonObject(render + ("screens" to JsonArray(renderScreens + nextRenderScreen))),
+            )),
+            original.publishedAtSeqToPromote,
+        )
+        val snapshot = baseline.copy(releasesByDigest = mapOf(release.descriptorSha256 to release))
+        val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
+        val launched = CopyOnWriteArrayList<String>()
+        val presentations = ExperiencePresentationService(
+            emit = { name, properties, _ -> captures += name to properties },
+            scope = scope, runtimeAvailable = { true }, currentDistinctId = identity::distinctId,
+            launch = launched::add,
+        )
+        var firstRequest: JourneyPresentationRequest? = null
+        val presenter = object : JourneyPresenting {
+            override suspend fun openLink(owner: JourneyPresentationOwner, link: JourneyLinkRequest) =
+                presentations.openJourneyLink(owner, link)
+            override fun reserve(ownerDistinctId: String) = presentations.reserveJourney(ownerDistinctId)
+            override fun owns(owner: JourneyPresentationOwner) = presentations.ownsJourney(owner)
+            override fun screenId(owner: JourneyPresentationOwner) = presentations.journeyScreenId(owner)
+            override suspend fun shutdownOwnedBy(ownerDistinctId: String) = presentations.shutdownOwnedBy(ownerDistinctId)
+            override suspend fun shutdownPresentation(ownerDistinctId: String, journeyId: String) =
+                presentations.shutdownJourney(ownerDistinctId, journeyId)
+            override suspend fun present(request: JourneyPresentationRequest): JourneyPresentationResult {
+                if (firstRequest == null) firstRequest = request
+                val previousLaunchCount = launched.size
+                val file = File(directory, "shown-scene").apply { writeBytes(byteArrayOf(1)) }
+                val showing = scope.async {
+                    presentations.presentJourney(request.fences, request.release, request.screenId, request.journeyId,
+                        request.ownerDistinctId, request.reservation,
+                        acquire = { AcquiredJourneyRelease(identity = request.release.identity,
+                            artifactsByKey = mapOf("renders/main.riv" to file), sceneFile = file, protection = Closeable {}) },
+                        canPresent = request.canPresent, transition = request.transition,
+                        onScreenChanged = request.onScreenChanged, onScreenDismissed = request.onScreenDismissed,
+                        onPresentationRevealed = request.onPresentationRevealed, onOutcome = request.onOutcome)
+                }
+                withTimeout(5_000) {
+                    while (launched.size == previousLaunchCount || PresentationRegistry.resolve(launched.last()) == null) {
+                        kotlinx.coroutines.delay(10)
+                    }
+                }
+                PresentationRegistry.reportFirstFrame(launched.last())
+                showing.await()
+                return JourneyPresentationResult.Shown
+            }
+        }
+        val journeys = JourneyService(identity = identity, events = store, catalog = catalog,
+            journalDirectory = directory, scope = scope, presenter = presenter, nowMillis = { 100_000L },
+            capture = { name, properties, _, _ -> captures += name to properties; true })
+        try {
+            journeys.initialize()
+            journeys.onAppWillEnterForeground()
+            journeys.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+            val request = requireNotNull(firstRequest)
+            assertEquals(listOf("screen_welcome"), captures.filter { it.first == SystemEventNames.SCREEN_SHOWN }
+                .map { it.second["screen_id"] })
+            assertEquals(1, captures.count { it.first == SystemEventNames.EXPERIENCE_SHOWN })
+
+            assertEquals(JourneyPresentationResult.Shown, presenter.present(request.copy(
+                screenId = "screen_details", reservation = null,
+                transition = buildJsonObject { put("type", "push") },
+            )))
+
+            val lifecycleNames = setOf(SystemEventNames.EXPERIENCE_SHOWN, SystemEventNames.SCREEN_SHOWN,
+                SystemEventNames.SCREEN_DISMISSED)
+            val lifecycle = captures.filter { it.first in lifecycleNames }
+            assertEquals(1, lifecycle.count { it.first == SystemEventNames.EXPERIENCE_SHOWN })
+            assertEquals(listOf(SystemEventNames.SCREEN_SHOWN, SystemEventNames.EXPERIENCE_SHOWN,
+                SystemEventNames.SCREEN_DISMISSED, SystemEventNames.SCREEN_SHOWN), lifecycle.map { it.first })
+            assertEquals(listOf("screen_welcome", "screen_details"), lifecycle.filter { it.first == SystemEventNames.SCREEN_SHOWN }
+                .map { it.second["screen_id"] })
+            val dismissed = lifecycle.single { it.first == SystemEventNames.SCREEN_DISMISSED }.second
+            assertEquals("screen_welcome", dismissed["screen_id"])
+            assertEquals("screen_details", dismissed["revealing_screen_id"])
+            assertEquals("navigate", dismissed["method"])
+            assertEquals(mapOf("journey_id" to request.journeyId, "experience_id" to release.identity.experienceId,
+                "experience_version_id" to release.identity.experienceVersionId),
+                lifecycle.single { it.first == SystemEventNames.EXPERIENCE_SHOWN }.second)
+            assertTrue(lifecycle.all { it.second["journey_id"] == request.journeyId })
+        } finally {
+            firstRequest?.let { presentations.shutdownJourney("customer", it.journeyId) }
+            PresentationRegistry.clearForTesting()
+        }
+    }
+
     @Test fun `screen lifecycle events publish with run identity and own user dismissal`() =
         runBlocking {
             val identity = identity("customer")
