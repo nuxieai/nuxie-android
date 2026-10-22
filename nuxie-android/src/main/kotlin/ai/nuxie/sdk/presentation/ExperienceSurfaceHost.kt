@@ -884,7 +884,12 @@ internal class ExperienceSurfaceHost(
         val bindings = environmentBindings ?: return
         val scheme = requestedColorScheme
         if (appliedColorScheme == scheme) return
-        bindings.colorSchemeMutation(scheme)?.let { environment?.restoreWrites(listOf(it)) }
+        bindings.colorSchemeMutation(scheme)?.let { mutation ->
+            environment?.let { env ->
+                env.restoreWrites(listOf(mutation))
+                active.requestInteractionStep()
+            }
+        }
         bindings.themeSelection(scheme)?.let { selection ->
             val instance = themeInstances.getOrPut(selection) {
                 selection.authoredInstanceIndex?.let {

@@ -41,6 +41,30 @@ class ExperienceColorSchemeHostTest {
         }
     }
 
+    @Test fun `env-only appearance changes wake the auxiliary on the next frame without input`() {
+        withHost(ExperienceColorScheme.LIGHT, declaresTheme = false, hasAuxiliary = true) { host, lane, native ->
+            load(host, lane)
+            assertEquals("Initialization has advanced both players", listOf(3L, 5L), native.steppedPlayers)
+            native.steppedPlayers.clear()
+            advanceFrame(host, lane)
+            assertEquals("The auxiliary is idle after initialization", listOf(3L), native.steppedPlayers)
+
+            for (scheme in listOf(ExperienceColorScheme.DARK, ExperienceColorScheme.LIGHT)) {
+                native.steppedPlayers.clear()
+                change(host, lane, scheme)
+                assertEquals(scheme.ordinal.toLong(), native.enumValue)
+                assertTrue("There is no Theme to rebind", native.createdThemes.isEmpty())
+                assertTrue("The change schedules an advance rather than stepping immediately", native.steppedPlayers.isEmpty())
+                advanceFrame(host, lane)
+                assertEquals("An env-only change must advance the auxiliary on the next frame",
+                    listOf(3L, 5L), native.steppedPlayers)
+                native.steppedPlayers.clear()
+                advanceFrame(host, lane)
+                assertEquals("One appearance write wakes the auxiliary once", listOf(3L), native.steppedPlayers)
+            }
+        }
+    }
+
     @Test fun `a submitted frame keeps its appearance and the next hidden step uses only the latest change`() {
         withHost(ExperienceColorScheme.LIGHT) { host, lane, native ->
             load(host, lane)
@@ -94,13 +118,23 @@ class ExperienceColorSchemeHostTest {
         drain(lane)
     }
 
+    private fun advanceFrame(host: ExperienceSurfaceHost, lane: NuxieRuntimeLane) = runBlocking {
+        lane.call {
+            val player = ExperienceSurfaceHost::class.java.getDeclaredField("player")
+                .apply { isAccessible = true }.get(host) as NuxieRuntimePlayer
+            player.stepTyped(elapsedSeconds = 0.016)
+        }
+    }
+
     private fun withHost(
         scheme: ExperienceColorScheme,
         declaresAppearance: Boolean = true,
+        declaresTheme: Boolean = true,
+        hasAuxiliary: Boolean = false,
         block: (ExperienceSurfaceHost, NuxieRuntimeLane, RecordingNative) -> Unit,
     ) {
         RuntimeEnvironment.setQualifiers(if (scheme == ExperienceColorScheme.DARK) "+night" else "+notnight")
-        val native = RecordingNative(declaresAppearance)
+        val native = RecordingNative(declaresAppearance, declaresTheme, hasAuxiliary)
         val lane = NuxieRuntimeLane()
         val failures = mutableListOf<ExperiencePresentationException>()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native),
@@ -125,13 +159,18 @@ class ExperienceColorSchemeHostTest {
     private fun mode(scheme: ExperienceColorScheme) =
         if (scheme == ExperienceColorScheme.DARK) Configuration.UI_MODE_NIGHT_YES else Configuration.UI_MODE_NIGHT_NO
 
-    private class RecordingNative(private val declaresAppearance: Boolean) : NuxieTypedRuntimeNative {
+    private class RecordingNative(
+        private val declaresAppearance: Boolean,
+        private val declaresTheme: Boolean,
+        private val hasAuxiliary: Boolean,
+    ) : NuxieTypedRuntimeNative {
         override val isAvailable = true
         val order = mutableListOf<String>()
         val allocated = mutableListOf<Long>()
         val freed = mutableListOf<Long>()
         val createdThemes = mutableListOf<Int?>()
         val themeIndex = mutableMapOf<Long, Int?>()
+        val steppedPlayers = mutableListOf<Long>()
         var boundTheme = 0L
         var enumValue: Long? = null
         override fun inspectFileAssets(bytes: ByteArray) = emptyList<ExpectedFileAsset>()
@@ -143,10 +182,11 @@ class ExperienceColorSchemeHostTest {
         override fun newDefaultArtboard(fileHandle: Long) = 2L
         override fun freeArtboard(handle: Long) = Unit
         override fun viewModelCatalog(fileHandle: Long) = NativeCallResult(0, if (declaresAppearance) NativeViewModelCatalog(
-            arrayOf(NativeViewModelSchema(0, "env", 0, 1, 0, 0, -1, true),
-                NativeViewModelSchema(1, "Theme", 1, 0, 0, 2, 0, true)),
+            arrayOf(NativeViewModelSchema(0, "env", 0, 1, 0, 0, -1, true)) +
+                if (declaresTheme) arrayOf(NativeViewModelSchema(1, "Theme", 1, 0, 0, 2, 0, true)) else emptyArray(),
             arrayOf(NativeViewModelProperty(0, 0, "colorScheme", 5, -1, arrayOf("light", "dark"))),
-            arrayOf(NativeViewModelAuthoredInstance(1, 0, "light"), NativeViewModelAuthoredInstance(1, 1, "dark")),
+            if (declaresTheme) arrayOf(NativeViewModelAuthoredInstance(1, 0, "light"),
+                NativeViewModelAuthoredInstance(1, 1, "dark")) else emptyArray(),
         ) else NativeViewModelCatalog(emptyArray(), emptyArray(), emptyArray()))
         override fun newViewModel(fileHandle: Long, schemaIndex: Int, authoredInstanceIndex: Int?): NativeCallResult<Long> {
             val handle = 10L + allocated.size
@@ -162,7 +202,10 @@ class ExperienceColorSchemeHostTest {
             order += "colorScheme:${write.integerValue}"
             return 0
         }
-        override fun stateMachineNames(fileHandle: Long, artboardName: String?) = NativeCallResult(0, emptyList<String>())
+        override fun stateMachineNames(fileHandle: Long, artboardName: String?) =
+            NativeCallResult(0, if (hasAuxiliary) listOf("Generated Nuxie Interaction") else emptyList())
+        override fun playerStateMachineName(playerHandle: Long) = NativeCallResult(0, "Authored")
+        override fun newNamedStateMachinePlayer(artboardHandle: Long, name: String) = 5L
         override fun newDefaultPlayer(artboardHandle: Long) = 3L
         override fun playerKind(playerHandle: Long) = NativeCallResult(0, 1)
         override fun freePlayer(handle: Long) = Unit
@@ -179,7 +222,8 @@ class ExperienceColorSchemeHostTest {
         override fun playerFocusState(playerHandle: Long) = NativeCallResult(0, NuxieFocusState(false, false))
         override fun stepPlayer(playerHandle: Long, inputs: List<NativePlayerInput>, pointers: List<NativePlayerPointer>,
             elapsedSeconds: Float, correlationId: Long, textRunNames: List<String>, focusInputs: List<NativeFocusInput>): NativeCallResult<NativePlayerStepOutcome> {
-            if (declaresAppearance) assertEquals(enumValue?.toInt(), themeIndex.getValue(boundTheme))
+            if (declaresAppearance && declaresTheme) assertEquals(enumValue?.toInt(), themeIndex.getValue(boundTheme))
+            steppedPlayers += playerHandle
             order += "step:$enumValue"
             return NativeCallResult(0, NativePlayerStepOutcome(false, intArrayOf(), emptyArray(), emptyArray(), emptyArray()))
         }

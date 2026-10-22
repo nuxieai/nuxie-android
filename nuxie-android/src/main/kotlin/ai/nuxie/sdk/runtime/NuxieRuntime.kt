@@ -647,6 +647,11 @@ internal class NuxieRuntimePlayer internal constructor(
             native.setPlayerGlobalViewModel(requireHandle(), name.toByteArray(Charsets.UTF_8), value.requireHandle()),
             "bind named global")
         interactionPlayer?.bindGlobalViewModel(name, value)
+        requestInteractionStep()
+    }
+
+    /** Bound value changes must reach the auxiliary on the next frame, even without input. */
+    fun requestInteractionStep() {
         interactionStepPending = true
     }
 
@@ -744,7 +749,7 @@ internal class NuxieRuntimePlayer internal constructor(
     /** Queue the exact authored action; normal stepping drains its generated listener output. */
     fun queueSemanticAction(snapshot: NuxieSemanticSnapshot, nodeId: Long, action: Int): Int {
         val status = snapshot.queueAction(requireHandle(), nodeId, action)
-        if (status == NUX_STATUS_OK) interactionStepPending = true
+        if (status == NUX_STATUS_OK) requestInteractionStep()
         return status
     }
 
@@ -775,7 +780,7 @@ internal class NuxieRuntimePlayer internal constructor(
 
     /** Generated VM triggers may belong to the auxiliary interaction machine. */
     fun stepAfterStateMutation(correlationId: ULong, textRunNames: List<String> = emptyList()): NuxiePlayerStepOutcome {
-        interactionStepPending = true
+        requestInteractionStep()
         return stepTyped(elapsedSeconds = 0.0, correlationId = correlationId, textRunNames = textRunNames)
     }
 
