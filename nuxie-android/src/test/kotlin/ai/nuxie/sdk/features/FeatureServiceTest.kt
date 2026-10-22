@@ -18,6 +18,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -1621,14 +1622,25 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun globalPurchaseWidensFeatureInfoWithoutSupersedingEntityScopedAuthority() = runBlocking {
-        val checksStarted = CountDownLatch(2)
+    fun globalPurchaseOverlayKeepsEntityAuthoritySeparateAndCachesOnlyTheNewestCheck() =
+        assertGlobalPurchaseKeepsEntityAuthoritySeparate(accepted = false)
+
+    @Test
+    fun globalPurchaseAnswerKeepsEntityAuthoritySeparateWithoutCachingInFlightChecks() =
+        assertGlobalPurchaseKeepsEntityAuthoritySeparate(accepted = true)
+
+    private fun assertGlobalPurchaseKeepsEntityAuthoritySeparate(accepted: Boolean) = runBlocking {
+        val remoteStarted = CountDownLatch(1)
+        val cacheFirstStarted = CountDownLatch(1)
         val releaseChecks = CountDownLatch(1)
         lateinit var core: NuxieCore
         val transport = FakeTransport().apply {
             respond = { request ->
                 if (request.url.path == "/entitled") {
-                    checksStarted.countDown()
+                    val entityId = Json.parseToJsonElement(request.body.decodeToString())
+                        .jsonObject.getValue("entityId").jsonPrimitive.content
+                    if (entityId == "remote-project") remoteStarted.countDown()
+                    else cacheFirstStarted.countDown()
                     assertTrue(releaseChecks.await(5, TimeUnit.SECONDS))
                     HttpTransport.Response(
                         200,
@@ -1657,6 +1669,9 @@ class FeatureServiceTest {
         val remote = async(Dispatchers.Default) {
             core.features.check("exports", entityId = "remote-project")
         }
+        // iOS revisions are per Feature, so the newer entity check prevents
+        // the older check's cache write even though both callers get answers.
+        assertTrue(remoteStarted.await(5, TimeUnit.SECONDS))
         val cacheFirst = async(Dispatchers.Default) {
             core.features.checkWithCache(
                 "exports",
@@ -1664,21 +1679,45 @@ class FeatureServiceTest {
                 forceRefresh = true,
             )
         }
-        assertTrue(checksStarted.await(5, TimeUnit.SECONDS))
-        applyTestPurchase(core,
-            listOf(FeatureAllowance("exports", FeatureType.METERED, unlimited = true)),
-            "global-purchase",
-        )
-        releaseChecks.countDown()
+        try {
+            assertTrue(cacheFirstStarted.await(5, TimeUnit.SECONDS))
+            if (accepted) {
+                // A server purchase answer advances the Feature revision too,
+                // so neither in-flight entity check writes its cache on iOS.
+                core.features.publishStaged(
+                    core.features.stagePurchaseAnswer(
+                        core.identity.distinctId(),
+                        Json.parseToJsonElement(
+                            """{"success":true,"features":[{"id":"internal-exports","ext_id":"exports","type":"metered","allowed":true,"unlimited":true,"balance":null}]}""",
+                        ).jsonObject,
+                        emptyMap(),
+                    ),
+                )
+            } else {
+                applyTestPurchase(core,
+                    listOf(FeatureAllowance("exports", FeatureType.METERED, unlimited = true)),
+                    "global-purchase",
+                )
+            }
+        } finally {
+            releaseChecks.countDown()
+        }
 
         assertEquals(3.0, remote.await().balance!!, 0.0)
         assertEquals(3.0, cacheFirst.await().balance!!, 0.0)
-        val cachedEntityChecks = listOf(
-            core.features.getCached("exports", "remote-project")!!,
-            core.features.getCached("exports", "cache-first-project")!!,
-        )
-        assertEquals(2, cachedEntityChecks.count { it.allowed })
-        assertTrue(cachedEntityChecks.none { it.unlimited })
+        assertEquals(null, core.features.getCached("exports", "remote-project"))
+        if (accepted) {
+            assertEquals(null, core.features.getCached("exports", "cache-first-project"))
+            assertTrue(core.features.getCached("exports", null)!!.unlimited)
+        } else {
+            val cached = core.features.getCached("exports", "cache-first-project")!!
+            assertEquals(3.0, cached.balance!!, 0.0)
+            assertTrue(cached.allowed)
+            assertFalse(cached.unlimited)
+            assertFalse(core.features.getCached("exports", null)!!.unlimited)
+        }
+        assertEquals(0.0, core.features.getCached("exports", "other-project")!!.balance!!, 0.0)
+        assertEquals(2, transport.requests.count { it.url.path == "/entitled" })
         assertTrue(core.featureInfo.all.value.getValue("exports").unlimited)
         core.stop()
     }
