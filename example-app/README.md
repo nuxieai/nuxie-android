@@ -96,8 +96,10 @@ disable the sample controls before provider setup. Do not enable Test Store in
 a provider build: it would bypass the delegate, so the sample rejects that
 combination. Configure the provider project and Google Play for this app's
 package and products before expecting real checkout. Provider-specific product
-limitations still apply. The sample checks Nuxie Features; only use those
-decisions for provider-owned access after Connector cutover.
+limitations still apply. The sample checks Nuxie Features, but delegate purchases
+do not change them today: the server refuses the Play purchase as
+`customer_identity_unverified`. Keep using provider access. The Connectors feed
+only Automations and server-side Journeys; access support is planned in UNIV-5244.
 
 Provider configuration is retained across Activity recreation. The application
 tracks its current resumed Activity with a weak reference, including Nuxie's
