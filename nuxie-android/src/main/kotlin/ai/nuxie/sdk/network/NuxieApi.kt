@@ -99,6 +99,8 @@ internal class NuxieApi(
         val eventData: FeatureUseEventData,
         val entityId: String?,
         val purchase: PlayPurchaseUseReport,
+        /** Recorded at consume admission; older commands have no declaration. */
+        val customerKind: CustomerKind? = null,
     )
 
     data class VerifiedCatalogProduct(
@@ -433,6 +435,7 @@ internal class NuxieApi(
             put("quantity", JsonPrimitive(report.eventData.value.toLong()))
             report.entityId?.let { put("entityId", JsonPrimitive(it)) }
             put("purchase", evidence)
+            report.customerKind?.let { put("customerKind", JsonPrimitive(it.wireValue)) }
         })
         val result = consumeFeature(command)
         if (result["accepted"] != JsonPrimitive(true)) throw IOException("Feature purchase consumption denied")

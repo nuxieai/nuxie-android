@@ -236,6 +236,11 @@ internal data class PurchaseEvidence(
     val refused: Boolean = false,
     /** The outbox entry: the send still owed for this purchase, or null when none is. */
     val pendingSend: PurchaseSend? = null,
+    /**
+     * Consume admission kinds keyed by stable operation id. Fresh evidence starts
+     * empty; absent on legacy evidence whose retries must remain undeclared.
+     */
+    val featureUseCustomerKinds: Map<String, CustomerKind>? = emptyMap(),
     val context: StoredPurchaseContext? = null,
     /** Purchase-token-scoped allowance snapshot; null is unresolved and empty carries no Feature allowances. */
     val pinnedFeatureAllowances: List<StoredFeatureAllowance>? = null,
@@ -711,6 +716,9 @@ internal class FilePurchaseEvidenceStore(
                     "admissionId" to JsonPrimitive(send.admissionId),
                 )))
             }
+            evidence.featureUseCustomerKinds?.let { kinds ->
+                put("featureUseCustomerKinds", JsonObject(kinds.mapValues { JsonPrimitive(it.value.wireValue) }))
+            }
             evidence.context?.let { put("context", encodeContext(it)) }
             evidence.pinnedFeatureAllowances?.let { allowances ->
                 put("pinnedFeatureAllowances", JsonArray(allowances.map(::encodeAllowance)))
@@ -759,6 +767,10 @@ internal class FilePurchaseEvidenceStore(
         ownerDistinctId = raw.optionalString("ownerDistinctId"),
         refused = raw.optionalBoolean("refused") ?: throw MalformedField("refused"),
         pendingSend = raw.optionalObject("pendingSend")?.let(::decodeSend),
+        featureUseCustomerKinds = raw.optionalObject("featureUseCustomerKinds")?.mapValues { (_, value) ->
+            CustomerKind.entries.firstOrNull { it.wireValue == (value as? JsonPrimitive)?.takeIf { it.isString }?.content }
+                ?: throw MalformedField("featureUseCustomerKinds")
+        },
         context = raw.optionalObject("context")?.let(::decodeContext),
         pinnedFeatureAllowances = raw.optionalArray("pinnedFeatureAllowances")
             ?.map { decodeAllowance(it, "pinnedFeatureAllowances") },

@@ -68,6 +68,127 @@ class PurchaseFeatureUseTest {
     }
 
     @Test
+    fun purchaseBackedUseCarriesTheKindAtConsumeAdmission() = runBlocking {
+        for (kind in CustomerKind.entries) {
+            val transport = FakeTransport().apply {
+                respond = { request ->
+                    if (request.url.path == "/feature/consume") featureCommandResponse(request, balance = 0.0)
+                    else canonicalJourneyProfileResponse()
+                }
+            }
+            val core = core(transport)
+            core.identity.reset(keepAnonymousId = true)
+            val customer = core.identity.distinctId()
+            if (kind == CustomerKind.IDENTIFIED) core.identity.setDistinctId(customer)
+            val store = InMemoryPurchaseEvidenceStore()
+            val earlierKind = if (kind == CustomerKind.ANONYMOUS) CustomerKind.IDENTIFIED else CustomerKind.ANONYMOUS
+            val send = PurchaseSend.admit(PurchaseSyncReason.PURCHASE, customer, earlierKind)
+            assertTrue(store.upsert(evidence(buyerDistinctId = customer).copy(pendingSend = send)))
+            val service = service(core, store)
+
+            assertNotNull(service.useFeatureWithPendingPurchase(customer, "credits", 1.0, null, null))
+
+            val body = Json.parseToJsonElement(transport.requests.single { it.url.path == "/feature/consume" }
+                .body.decodeToString()).jsonObject
+            assertEquals(kind.wireValue, body.getValue("customerKind").jsonPrimitive.content)
+            assertFalse(body.containsKey("customer_kind"))
+            val operationId = body.getValue("operationId").jsonPrimitive.content
+            assertEquals(kind, store.load().getValue("token-1").featureUseCustomerKinds?.get(operationId))
+            core.stop()
+        }
+    }
+
+    @Test
+    fun retryAndRestartKeepAnonymousKindAfterSignIn() = runBlocking {
+        assertRetryAndRestartKeepKind(legacy = false)
+    }
+
+    @Test
+    fun legacyEvidenceRetryAfterSignInKeepsCustomerKindUndeclared() = runBlocking {
+        assertRetryAndRestartKeepKind(legacy = true)
+    }
+
+    private suspend fun assertRetryAndRestartKeepKind(legacy: Boolean) {
+        val directory = temporaryFolder.newFolder()
+        val transport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/feature/consume") HttpTransport.Response(503, ByteArray(0))
+                else canonicalJourneyProfileResponse()
+            }
+        }
+        val core = core(transport)
+        core.identity.reset(keepAnonymousId = true)
+        val customer = core.identity.distinctId()
+        val store = FilePurchaseEvidenceStore(directory)
+        val send = PurchaseSend.admit(PurchaseSyncReason.PURCHASE, customer, CustomerKind.IDENTIFIED)
+        assertTrue(store.upsert(evidence(buyerDistinctId = customer).copy(pendingSend = send)))
+        if (legacy) {
+            // Before the upgrade only the evidence survived a lost consume reply.
+            val file = File(directory, "purchase-evidence.json")
+            val rows = Json.parseToJsonElement(file.readText()).jsonObject
+            file.writeText(kotlinx.serialization.json.JsonObject(rows + ("token-1" to
+                kotlinx.serialization.json.JsonObject(rows.getValue("token-1").jsonObject - "featureUseCustomerKinds"))).toString())
+        }
+        val first = service(core, store, outboxRetryMillis = 3_600_000)
+        suspend fun attempt(service: PurchaseService) {
+            val failure = runCatching {
+                service.useFeatureWithPendingPurchase(customer, "credits", 1.0, null, null)
+            }.exceptionOrNull()
+            assertTrue("The consume must reach the wire and fail with 503", failure is NuxieApi.RequestRejectedException)
+        }
+        attempt(first)
+        // Identifying the same id changes its kind without changing the customer fence.
+        core.identity.setDistinctId(customer)
+        attempt(first)
+        assertEquals(CustomerKind.IDENTIFIED, core.identity.customerKind(customer))
+        val bodies = transport.requests.filter { it.url.path == "/feature/consume" }.map { it.body.decodeToString() }
+        assertEquals(2, bodies.size)
+        assertEquals(bodies[0], bodies[1])
+        val command = Json.parseToJsonElement(bodies[0]).jsonObject
+        assertEquals(if (legacy) null else "anonymous", command["customerKind"]?.jsonPrimitive?.content)
+        assertFalse(command.containsKey("customer_kind"))
+        val operationId = command.getValue("operationId").jsonPrimitive.content
+        val beforeRestart = store.load().getValue("token-1")
+        assertEquals(send, beforeRestart.pendingSend)
+        if (legacy) assertNull(beforeRestart.featureUseCustomerKinds)
+        else assertEquals(CustomerKind.ANONYMOUS, beforeRestart.featureUseCustomerKinds?.get(operationId))
+        core.stop()
+
+        val reopened = FilePurchaseEvidenceStore(directory)
+        assertEquals(beforeRestart, reopened.load().getValue("token-1"))
+        val restartedTransport = FakeTransport().apply {
+            respond = { request ->
+                if (request.url.path == "/feature/consume") featureCommandResponse(request, balance = 0.0)
+                else canonicalJourneyProfileResponse()
+            }
+        }
+        val restartedCore = core(restartedTransport)
+        restartedCore.identity.setDistinctId(customer)
+        val restarted = service(restartedCore, reopened, outboxRetryMillis = 3_600_000)
+        assertNotNull(restarted.useFeatureWithPendingPurchase(customer, "credits", 1.0, null, null))
+        val replay = restartedTransport.requests.single { it.url.path == "/feature/consume" }.body.decodeToString()
+        assertEquals(bodies[0], replay)
+        if (legacy) assertNull(reopened.load().getValue("token-1").featureUseCustomerKinds)
+        restartedCore.stop()
+    }
+
+    @Test
+    fun unsavedConsumeAdmissionFallsBackWithoutSendingEvidence() = runBlocking {
+        val transport = FakeTransport()
+        val core = core(transport)
+        val store = EntryWritesFailStore(evidence().copy(
+            retryDueAtMillis = SERVICE_CLOCK_START + 3_600_000,
+            pinnedFeatureAllowances = featureDescriptor().featureAllowances,
+        ))
+        val service = service(core, store)
+        assertNull(service.useFeatureWithPendingPurchase("customer-a", "credits", 1.0, null, null))
+        assertTrue(store.refusedWrites.get() > 0)
+        assertTrue(transport.requests.none { it.url.path == "/feature/consume" })
+        assertEquals(emptyMap<String, CustomerKind>(), store.load().getValue("token-1").featureUseCustomerKinds)
+        core.stop()
+    }
+
+    @Test
     fun identityChangeMidFlightCommitsForTheOwnerThenCancelsTheCaller() = runBlocking {
         val fixture = concurrentFixture(firstStatus = 200)
         val use = async(Dispatchers.Default) { runCatching { fixture.use() } }
@@ -972,6 +1093,7 @@ class PurchaseFeatureUseTest {
             features = core.features,
             distinctId = core.identity::distinctId,
             customerKind = core.identity::customerKind,
+            identity = core.identity,
             emit = { _, _ -> },
             settings = PurchaseSettings(null, PurchaseHandlingMode.NUXIE_MANAGED),
             scope = core.scope,
