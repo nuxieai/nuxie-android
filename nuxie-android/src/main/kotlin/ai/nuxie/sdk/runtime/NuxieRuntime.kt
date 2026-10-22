@@ -647,6 +647,7 @@ internal class NuxieRuntimePlayer internal constructor(
             native.setPlayerGlobalViewModel(requireHandle(), name.toByteArray(Charsets.UTF_8), value.requireHandle()),
             "bind named global")
         interactionPlayer?.bindGlobalViewModel(name, value)
+        interactionStepPending = true
     }
 
     fun setLayoutSize(width: Float, height: Float) {
