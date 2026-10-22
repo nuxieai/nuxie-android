@@ -527,6 +527,77 @@ class FeatureServiceTest {
     }
 
     @Test
+    fun remoteCheckRejectsFeatureCommandInvalidation() =
+        assertCheckRejectsFeatureCommandInvalidation(cacheFirst = false, hydrateAfterCommand = false)
+
+    @Test
+    fun cacheFirstCheckRejectsFeatureCommandInvalidation() =
+        assertCheckRejectsFeatureCommandInvalidation(cacheFirst = true, hydrateAfterCommand = false)
+
+    @Test
+    fun cacheFirstCheckStillRejectsFeatureCommandInvalidationAfterANewerProfile() =
+        assertCheckRejectsFeatureCommandInvalidation(cacheFirst = true, hydrateAfterCommand = true)
+
+    private fun assertCheckRejectsFeatureCommandInvalidation(
+        cacheFirst: Boolean,
+        hydrateAfterCommand: Boolean,
+    ) = runBlocking {
+        // A command invalidates every scope, even when its receipt is for another entity.
+        for (spentEntity in listOf(null, "project-a", "project-b")) {
+            val checkStarted = CountDownLatch(1)
+            val releaseCheck = CountDownLatch(1)
+            lateinit var core: NuxieCore
+            val transport = FakeTransport().apply {
+                respond = { request ->
+                    if (request.url.path == "/entitled") {
+                        checkStarted.countDown()
+                        assertTrue(releaseCheck.await(5, TimeUnit.SECONDS))
+                        HttpTransport.Response(
+                            200,
+                            featureResponse(core.identity.distinctId(), "credits", 1.0, balance = "10")
+                                .encodeToByteArray(),
+                        )
+                    } else profileResponse("[]")
+                }
+            }
+            core = core(transport)
+            val customer = core.identity.distinctId()
+            val checking = async(Dispatchers.Default) {
+                runCatching {
+                    if (cacheFirst) {
+                        core.features.checkWithCache("credits", entityId = "project-a")
+                    } else {
+                        core.features.check("credits", entityId = "project-a")
+                    }
+                }
+            }
+            try {
+                assertTrue(checkStarted.await(5, TimeUnit.SECONDS))
+                core.features.applyAuthoritativeUse(
+                    result = authoritativeResult(customer, "credits", balance = 0.0),
+                    requestedFeatureId = "credits",
+                    distinctId = customer,
+                    entityId = spentEntity,
+                    expectedScope = core.features.captureAuthoritativeUseScope(customer),
+                )
+                if (hydrateAfterCommand) {
+                    core.features.hydrateProfile(
+                        customer,
+                        Json.parseToJsonElement(profile("[]")).jsonObject,
+                    )
+                }
+            } finally {
+                releaseCheck.countDown()
+            }
+
+            assertTrue(checking.await().exceptionOrNull() is CancellationException)
+            assertEquals(1, transport.requests.count { it.url.path == "/entitled" })
+            assertTrue(core.features.getCached("credits", "project-a")?.balance != 10.0)
+            core.stop()
+        }
+    }
+
+    @Test
     fun authoritativeUseScopeGenerationRejectsReturnToOriginalIdentity() = runBlocking {
         val core = core(FakeTransport())
         val customer = core.identity.distinctId()
@@ -1316,7 +1387,7 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun profileSnapshotRevisionFencesAnOlderRemoteCheck() = runBlocking {
+    fun remoteCheckReturnsAndCachesItsAnswerAfterAProfileRetiresNoHold() = runBlocking {
         val checkStarted = CountDownLatch(1)
         val releaseCheck = CountDownLatch(1)
         lateinit var core: NuxieCore
@@ -1357,8 +1428,9 @@ class FeatureServiceTest {
         )
         releaseCheck.countDown()
 
-        assertTrue(runCatching { check.await() }.exceptionOrNull() is CancellationException)
-        assertTrue(core.features.getCached("pro", null)!!.allowed)
+        assertFalse(check.await().allowed)
+        assertFalse(core.features.getCached("pro", null)!!.allowed)
+        assertTrue(core.featureInfo.isAllowed("pro"))
         core.stop()
     }
 
@@ -1395,7 +1467,7 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun profileCommitMarkerFencesAnOlderCheckWhenANewerCheckOnlyMintsAToken() = runBlocking {
+    fun profileRetiringNoHoldDoesNotRejectAnOlderCheckWhileANewerCheckIsPending() = runBlocking {
         val checks = AtomicInteger()
         val firstStarted = CountDownLatch(1)
         val secondStarted = CountDownLatch(1)
@@ -1450,7 +1522,7 @@ class FeatureServiceTest {
 
         releaseFirst.countDown()
 
-        assertTrue(first.await().exceptionOrNull() is CancellationException)
+        assertFalse(first.await().getOrThrow().allowed)
         assertTrue(core.features.getCached("pro", null)!!.allowed)
         assertTrue(core.featureInfo.isAllowed("pro"))
 
@@ -1460,7 +1532,7 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun cacheFirstSupersessionDoesNotFallBackToThePreRequestProfile() = runBlocking {
+    fun cacheFirstCheckReturnsAndCachesItsAnswerAfterAProfileRetiresNoHold() = runBlocking {
         val checkStarted = CountDownLatch(1)
         val releaseCheck = CountDownLatch(1)
         lateinit var core: NuxieCore
@@ -1503,8 +1575,9 @@ class FeatureServiceTest {
         core.features.hydrateProfile(customer, allowedProfile)
         releaseCheck.countDown()
 
-        assertTrue(check.await().allowed)
-        assertTrue(core.features.getCached("pro", null)!!.allowed)
+        assertFalse(check.await().allowed)
+        assertFalse(core.features.getCached("pro", null)!!.allowed)
+        assertTrue(core.featureInfo.isAllowed("pro"))
         core.stop()
     }
 
@@ -2215,7 +2288,14 @@ class FeatureServiceTest {
     }
 
     @Test
-    fun newerBalanceSourceCommitSupersedesOlderDependentResponse() = runBlocking {
+    fun cacheFirstCheckWritesAndReturnsItsAnswerAfterANewerBalanceSourceCommit() =
+        assertCheckWritesAfterANewerBalanceSourceCommit(cacheFirst = true)
+
+    @Test
+    fun remoteCheckWritesAndReturnsItsAnswerAfterANewerBalanceSourceCommit() =
+        assertCheckWritesAfterANewerBalanceSourceCommit(cacheFirst = false)
+
+    private fun assertCheckWritesAfterANewerBalanceSourceCommit(cacheFirst: Boolean) = runBlocking {
         val exportsStarted = CountDownLatch(1)
         val walletStarted = CountDownLatch(1)
         val releaseExports = CountDownLatch(1)
@@ -2260,11 +2340,11 @@ class FeatureServiceTest {
         core = core(transport)
 
         val exports = async(Dispatchers.Default) {
-            core.features.checkWithCache(
-                "exports",
-                requiredBalance = 2.0,
-                forceRefresh = true,
-            )
+            if (cacheFirst) {
+                core.features.checkWithCache("exports", requiredBalance = 2.0, forceRefresh = true)
+            } else {
+                core.features.check("exports", requiredBalance = 2.0)
+            }
         }
         assertTrue(exportsStarted.await(5, TimeUnit.SECONDS))
         val wallet = async(Dispatchers.Default) { core.features.check("wallet") }
@@ -2273,19 +2353,24 @@ class FeatureServiceTest {
         assertEquals(1.0, wallet.await().balance!!, 0.0)
         releaseExports.countDown()
 
-        assertTrue(runCatching { exports.await() }.exceptionOrNull() is CancellationException)
-        assertEquals(1.0, core.features.getCached("wallet", null)!!.balance!!, 0.0)
-        assertEquals(
-            1.0,
-            core.features.checkWithCache("exports", requiredBalance = 2.0).balance!!,
-            0.0,
-        )
-        assertEquals(2, exportsChecks.get())
+        assertEquals(8.0, exports.await().balance!!, 0.0)
+        assertEquals(8.0, core.features.getCached("wallet", null)!!.balance!!, 0.0)
+        assertEquals(8.0, core.featureInfo.balance("wallet")!!, 0.0)
+        assertTrue(core.features.getCached("exports", requiredBalance = 2.0, entityId = null)!!.allowed)
+        assertTrue(core.features.checkWithCache("exports", requiredBalance = 2.0).allowed)
+        assertEquals(1, exportsChecks.get())
         core.stop()
     }
 
     @Test
-    fun newerPurchaseAuthoritySupersedesOlderDependentResponse() = runBlocking {
+    fun remoteCheckWritesAndReturnsItsAnswerAfterABalanceSourcePurchase() =
+        assertCheckWritesAfterABalanceSourcePurchase(cacheFirst = false)
+
+    @Test
+    fun cacheFirstCheckWritesAndReturnsItsAnswerAfterABalanceSourcePurchase() =
+        assertCheckWritesAfterABalanceSourcePurchase(cacheFirst = true)
+
+    private fun assertCheckWritesAfterABalanceSourcePurchase(cacheFirst: Boolean) = runBlocking {
         val exportsStarted = CountDownLatch(1)
         val releaseExports = CountDownLatch(1)
         val exportsChecks = AtomicInteger()
@@ -2315,7 +2400,11 @@ class FeatureServiceTest {
         core = core(transport)
 
         val exports = async(Dispatchers.Default) {
-            core.features.check("exports", requiredBalance = 2.0)
+            if (cacheFirst) {
+                core.features.checkWithCache("exports", requiredBalance = 2.0, forceRefresh = true)
+            } else {
+                core.features.check("exports", requiredBalance = 2.0)
+            }
         }
         assertTrue(exportsStarted.await(5, TimeUnit.SECONDS))
         core.features.publishStaged(
@@ -2329,14 +2418,12 @@ class FeatureServiceTest {
         )
         releaseExports.countDown()
 
-        assertTrue(runCatching { exports.await() }.exceptionOrNull() is CancellationException)
-        assertEquals(1.0, core.features.getCached("wallet", null)!!.balance!!, 0.0)
-        assertEquals(
-            1.0,
-            core.features.checkWithCache("exports", requiredBalance = 2.0).balance!!,
-            0.0,
-        )
-        assertEquals(2, exportsChecks.get())
+        assertEquals(8.0, exports.await().balance!!, 0.0)
+        assertEquals(8.0, core.features.getCached("wallet", null)!!.balance!!, 0.0)
+        assertEquals(8.0, core.featureInfo.balance("wallet")!!, 0.0)
+        assertTrue(core.features.getCached("exports", requiredBalance = 2.0, entityId = null)!!.allowed)
+        assertTrue(core.features.checkWithCache("exports", requiredBalance = 2.0).allowed)
+        assertEquals(1, exportsChecks.get())
         core.stop()
     }
 
