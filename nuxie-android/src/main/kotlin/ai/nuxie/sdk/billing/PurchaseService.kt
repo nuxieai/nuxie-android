@@ -2180,11 +2180,11 @@ internal class PurchaseService(
                     // whose customer is no longer the current one is dropped, so it can
                     // never move the purchase back after another customer's Restore.
                     if (requested.distinctId != distinctId()) return@withLock null
+                    // Only the /purchase admission changes. Consume operation ids
+                    // survive customer claims, so keep their original declarations
+                    // and the null marker for undeclared legacy evidence.
                     saveEntry(current.copy(
                         pendingSend = claim,
-                        featureUseCustomerKinds = if (
-                            (current.pendingSend?.distinctId ?: current.ownerDistinctId ?: current.buyerDistinctId) == claim.distinctId
-                        ) current.featureUseCustomerKinds else emptyMap(),
                         syncAttempts = 0,
                         retryDueAtMillis = null,
                     ))
