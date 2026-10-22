@@ -5,7 +5,9 @@
   "endpoint": "/feature/consume",
   "statusCode": 503,
   "body": {
-    "code": "commerce_unavailable"
+    "success": false,
+    "error": "App Store purchase processing is unavailable",
+    "code": "app_store_purchase_unavailable"
   },
-  "bodyText": "{\"code\":\"commerce_unavailable\"}"
+  "bodyText": "{\"success\":false,\"error\":\"App Store purchase processing is unavailable\",\"code\":\"app_store_purchase_unavailable\"}"
 }

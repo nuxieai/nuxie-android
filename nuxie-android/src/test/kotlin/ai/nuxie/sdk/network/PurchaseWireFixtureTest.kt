@@ -122,7 +122,7 @@ class PurchaseWireFixtureTest {
         )
         val responseFiles = PurchaseWireResponses.files()
         assertEquals(
-            "Every purchase request needs TypeScript and Rust worker response fixtures.",
+            "Every purchase request needs a Rust worker response fixture.",
             PurchaseWireResponses.requiredFileNames(),
             responseFiles.mapTo(sortedSetOf()) { it.fileName.toString() },
         )
@@ -712,7 +712,7 @@ private object PurchaseWireResponses {
     fun isPending(): Boolean = Files.exists(responseDirectory().resolve("PENDING"))
 
     fun requiredFileNames(): Set<String> = PurchaseWireFixtures.requests()
-        .flatMap { fixture -> listOf("${fixture.name}.ts.json", "${fixture.name}.rs.json") }
+        .map { fixture -> "${fixture.name}.rs.json" }
         .toSortedSet()
 
     fun files(): List<Path> {

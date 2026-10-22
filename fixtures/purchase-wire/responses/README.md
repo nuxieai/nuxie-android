@@ -1,22 +1,23 @@
 # Worker response handshake
 
 The parent `nuxie-dev` conformance suite (`worker-tests`) replays every request
-in `../requests/` against the real TypeScript and Rust ingest workers. It owns
+in `../requests/` against the real Rust ingest worker. It owns
 and commits the resulting response fixtures in this directory; the Android
 fixture generator does not create or delete them.
 
 While [`PENDING`](PENDING) exists, the Android response conformance test skips
 with the named assumption that parent-worker responses are pending. The parent
 repository's response-landing commit deletes `PENDING`. From that point on,
-the test requires both `<case>.ts.json` and `<case>.rs.json` for every request
-case and fails if any lane response is missing.
+the test requires `<case>.rs.json` for every request case and fails if any
+response is missing. The qualification test records only the `rs` lane;
+the former `.ts.json` responses can no longer be regenerated.
 
 Every response fixture has this shape:
 
 ```json
 {
-  "name": "purchase-one-time.ts",
-  "lane": "ts",
+  "name": "purchase-one-time.rs",
+  "lane": "rs",
   "request": "purchase-one-time",
   "endpoint": "/purchase",
   "statusCode": 200,
@@ -27,7 +28,7 @@ Every response fixture has this shape:
 
 - For a file named `<case>.<lane>.json`, `name` must be exactly
   `<case>.<lane>`, `request` must be exactly `<case>`, and `lane` must be
-  exactly `<lane>` (`ts` or `rs`). The Android test checks all three against
+  exactly `<lane>` (`rs`). The Android test checks all three against
   the filename so duplicated or swapped response files fail conformance.
 - `request` names one committed request fixture and `endpoint` must match it.
 - `bodyText` is the worker's exact UTF-8 response text. For JSON responses,
