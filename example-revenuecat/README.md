@@ -54,9 +54,10 @@ that callback so replacement configuration cannot accidentally remove it.
 Successful checkout returns Purchased; cancellation and pending payments remain
 distinct. Coroutine cancellation is rethrown. Restore returns Restored only
 when RevenueCat reports active entitlements, following the iOS reference.
-A checkout result is not a Nuxie Feature grant. Continue using RevenueCat access
-until your Connector is configured, mapped, synchronized and explicitly cut over
-to Nuxie Feature authority.
+Features do not change from a delegate purchase: Nuxie sees the Play purchase,
+but the server refuses it as `customer_identity_unverified`. Keep using RevenueCat
+access. The Connector feeds only Automations and server-side Journeys, granting
+nothing. Purchase-authority and Connector support is planned in UNIV-5244.
 
 ## Supported scope and outstanding qualification
 

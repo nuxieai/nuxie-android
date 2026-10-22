@@ -36,10 +36,11 @@ the example does not acknowledge or consume through another BillingClient.
 
 Purchased, cancelled, pending and failed results remain distinct; coroutine
 cancellation is rethrown. Restore requires a successful restore plus nonempty
-active Superwall entitlements before returning Restored. Keep using provider
-access until the Connector is configured, mapped, synchronized and explicitly
-cut over to Nuxie Feature authority. Provider checkout success alone grants no
-Nuxie Feature.
+active Superwall entitlements before returning Restored. Features do not change
+from a delegate purchase: Nuxie sees the Play purchase, but the server refuses
+it as `customer_identity_unverified`. Keep using provider access. The Connector
+feeds only Automations and server-side Journeys, granting nothing.
+Purchase-authority and Connector support is planned in UNIV-5244.
 
 The runnable host in `example-app` passes `expectedCustomerId` to the delegate.
 That rejects checkout or restore while Superwall's asynchronous identity state
