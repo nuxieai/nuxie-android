@@ -83,6 +83,8 @@ internal class FeatureService(
     private val featureMutationRevisions = mutableMapOf<String, Long>()
     private val committedMutationRevisions = mutableMapOf<CacheKey, Long>()
     private val usageInvalidationRevisions = mutableMapOf<String, Long>()
+    /** Unlike profile authority, an in-flight check's invalidation survives a newer profile. */
+    private val checkInvalidationRevisions = mutableMapOf<String, Long>()
     /** The revision at which each Feature's latest 200 hold was retired by a profile. */
     private val retiredHoldRevisions = mutableMapOf<String, Long>()
 
@@ -320,6 +322,7 @@ internal class FeatureService(
         // Any spend can change the aggregate and allocation among entity
         // grants. Only a fresh receipt's exact scope has a known balance.
         usageInvalidationRevisions[featureId] = revision
+        checkInvalidationRevisions[featureId] = revision
         realTimeCache.keys.removeAll { it.featureId == featureId }
         durableAccess = durableAccess - featureId
         durableEntities = durableEntities - featureId
@@ -377,6 +380,7 @@ internal class FeatureService(
         featureMutationRevisions.clear()
         committedMutationRevisions.clear()
         usageInvalidationRevisions.clear()
+        checkInvalidationRevisions.clear()
         retiredHoldRevisions.clear()
         scopeGeneration += 1
         featureInfo.stageIdentityChange(
@@ -446,36 +450,19 @@ internal class FeatureService(
                 return@synchronized null
             }
             lastProfileAuthoritativeRevision = snapshotAuthoritativeRevision
-            val replacedFeatureIds = durableAccess.keys + durableEntities.keys
             cacheDistinctId = distinctId
             usageInvalidationRevisions.entries.removeAll { it.value <= snapshotAuthoritativeRevision }
             durableAccess = parsed.first - usageInvalidationRevisions.keys
             durableEntities = parsed.second - usageInvalidationRevisions.keys
             profileAdmitted = true
-            val affectedFeatureIds = linkedSetOf<String>().apply {
-                addAll(replacedFeatureIds)
-                addAll(featureMutationRevisions.keys)
-                addAll(realTimeCache.keys.map { it.featureId })
-                addAll(durableAccess.keys)
-                addAll(durableEntities.keys)
-            }
             realTimeCache.entries.removeAll { (key, _) ->
                 (committedMutationRevisions[key] ?: Long.MIN_VALUE) <= snapshotAuthoritativeRevision
             }
             committedMutationRevisions.entries.removeAll { (_, revision) ->
                 revision <= snapshotAuthoritativeRevision
             }
-            affectedFeatureIds.forEach { featureId ->
-                featureMutationRevisions[featureId] = maxOf(
-                    featureMutationRevisions[featureId] ?: Long.MIN_VALUE,
-                    snapshotAuthoritativeRevision,
-                )
-                val globalKey = CacheKey(featureId, null)
-                committedMutationRevisions[globalKey] = maxOf(
-                    committedMutationRevisions[globalKey] ?: Long.MIN_VALUE,
-                    snapshotAuthoritativeRevision,
-                )
-            }
+            // As on iOS, a profile alone does not supersede an in-flight check.
+            // Only retiring a purchase's 200 hold below advances its Feature revision.
             // A profile requested after an answer retires that answer's grants
             // only; later answers keep theirs until a profile requested after them.
             val (kept, retired) = purchaseAnswers.partition { it.committedRevision > snapshotPurchaseRevision }
@@ -688,6 +675,10 @@ internal class FeatureService(
                 // transition invalidates staged publications and clears the
                 // visible projection before that transition returns.
                 validateCheckScope(distinctId, requestGeneration)
+                if ((checkInvalidationRevisions[featureId] ?: Long.MIN_VALUE) > requestMutationRevision) {
+                    // iOS invalidateAccess rejects both remote and cache-first checks.
+                    throw kotlinx.coroutines.CancellationException()
+                }
                 if (affectedFeatureIds.any { (retiredHoldRevisions[it] ?: Long.MIN_VALUE) > requestMutationRevision }) {
                     return@synchronized null to null
                 }
@@ -699,37 +690,16 @@ internal class FeatureService(
                     requestPurchaseRevision = requestPurchaseRevision,
                     requestMutationRevision = requestMutationRevision,
                     serverAccess = serverAccess,
-                    requestedAccess = requestedAccess,
-                    directAnswer = result.featureId == featureId,
                 )?.let { return@synchronized it to null }
-                val dependencySuperseded = affectedFeatureIds.any { affectedFeatureId ->
-                    affectedFeatureId != featureId &&
-                        (featureMutationRevisions[affectedFeatureId] ?: Long.MIN_VALUE) >
-                        requestMutationRevision
+                // iOS guards the requested Feature's revision, then writes the
+                // answer's balance source even if another mutation changed it.
+                if (result.featureId != featureId) {
+                    advanceFeatureMutationRevision(result.featureId)
                 }
-                if (dependencySuperseded) {
-                    throw kotlinx.coroutines.CancellationException()
-                }
-                val applicableFeatureIds = affectedFeatureIds.filterTo(linkedSetOf()) {
-                    if (it == featureId) {
-                        maxOf(
-                            committedMutationRevisions[key] ?: Long.MIN_VALUE,
-                            committedMutationRevisions[CacheKey(it, null)] ?: Long.MIN_VALUE,
-                        ) <= requestMutationRevision
-                    } else {
-                        (featureMutationRevisions[it] ?: Long.MIN_VALUE) <= requestMutationRevision
-                    }
-                }
-                applicableFeatureIds.forEach { affectedFeatureId ->
-                    featureMutationRevisions[affectedFeatureId] = maxOf(
-                        featureMutationRevisions[affectedFeatureId] ?: Long.MIN_VALUE,
-                        requestMutationRevision,
-                    )
-                }
-                val updates = applicableFeatureIds.associateWith { affectedFeatureId ->
+                val updates = affectedFeatureIds.associateWith { affectedFeatureId ->
                     AuthoritativeAccessUpdate(
                         access = publishedAccess.getValue(affectedFeatureId),
-                        mutationRevision = requestMutationRevision,
+                        mutationRevision = featureMutationRevisions.getValue(affectedFeatureId),
                         opaqueRequiredBalance = result.requiredBalance.takeIf {
                             affectedFeatureId == featureId && result.featureId != featureId
                         },
@@ -765,8 +735,6 @@ internal class FeatureService(
         requestPurchaseRevision: Long?,
         requestMutationRevision: Long,
         serverAccess: FeatureAccess,
-        requestedAccess: FeatureAccess,
-        directAnswer: Boolean,
     ): CheckedAccess? {
         val purchaseRevisionChanged = purchaseRevision(featureId) != requestPurchaseRevision
         val featureRevisionChanged = featureMutationRevisions[featureId] != requestMutationRevision
@@ -779,21 +747,14 @@ internal class FeatureService(
         val supersededByMutation =
             (purchaseRevisionChanged && entityId == null) ||
                 committedRevision > requestMutationRevision
-        // A concurrent request that merely minted a newer token is not a
-        // commit; this check falls through and installs its own result.
-        if (!supersededByMutation) return null
+        // A newer requested-Feature revision prevents writes, as on iOS.
+        // Cache-first callers can use a newer committed answer, but a profile
+        // is never a substitute for the check's response.
         val effectiveAccess = if (supersededByMutation) {
-            // A superseded direct answer defers to the freshest durable
-            // authoritative access; a cross-feature opaque answer is not
-            // representable in the profile, so the live server answer stands.
-            // The optimistic overlay never answers access checks.
             committedCachedAccess(featureId, requiredBalance, entityId)
-                ?: entityAccess(featureId, entityId)
-                    ?.forRequiredBalance(requiredBalance)
-                    ?.takeIf { directAnswer }
                 ?: serverAccess
         } else {
-            requestedAccess
+            serverAccess
         }
         return CheckedAccess(serverAccess, effectiveAccess, supersededByMutation)
     }
@@ -826,6 +787,7 @@ internal class FeatureService(
         featureMutationRevisions.clear()
         committedMutationRevisions.clear()
         usageInvalidationRevisions.clear()
+        checkInvalidationRevisions.clear()
         retiredHoldRevisions.clear()
         scopeGeneration += 1
         return true
