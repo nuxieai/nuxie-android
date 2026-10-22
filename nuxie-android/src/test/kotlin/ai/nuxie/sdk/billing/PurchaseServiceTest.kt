@@ -447,6 +447,13 @@ class PurchaseServiceTest {
         assertEquals(1_200.0, properties["price"])
         assertTrue(properties["price"] is Double)
         assertEquals("¥1,200", properties["display_price"])
+        val catalog = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("events/catalog.json").readText()).jsonObject
+        val storeEnvironment = catalog.getValue(SystemEventNames.PURCHASE_COMPLETED).jsonObject
+            .getValue("properties").jsonObject.getValue("store_environment").jsonObject
+        assertFalse(storeEnvironment.getValue("required").jsonPrimitive.boolean)
+        // StoreKit Sandbox on a live key is an iOS App Review case. Play never sends it.
+        assertFalse(properties.containsKey("store_environment"))
         assertForwardedPrice(
             ai.nuxie.sdk.events.SystemEventNames.PURCHASE_COMPLETED,
             properties,

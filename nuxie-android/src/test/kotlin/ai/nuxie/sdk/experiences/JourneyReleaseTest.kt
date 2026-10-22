@@ -26,6 +26,58 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class JourneyReleaseTest {
+    @Test fun `all copied video Journeys decode through release authentication`() {
+        val envelope = fixture.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
+        val source = JourneyReleaseEnvelope.parseObject(Base64.decode(
+            envelope.getValue("descriptorBytesBase64").jsonPrimitive.content, Base64.NO_WRAP))
+        val oldRender = source.getValue("render").jsonObject
+        val screen = JsonObject(oldRender.getValue("screens").jsonArray.single().jsonObject +
+            ("id" to JsonPrimitive("screen")))
+        val pair = java.security.KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+        for (name in listOf("endpoint", "greeting", "list", "waiting")) {
+            val leg = JourneyReleaseEnvelope.parseObject(FixtureRunner.fixturesRoot()
+                .resolve("video/$name-journey.json").readBytes())
+            // These files contain a Journey, not a signed release. Supply the
+            // surrounding release and sign it locally, preserving the copied Journey.
+            val descriptor = JsonObject(source + mapOf(
+                "leg" to leg,
+                "render" to JsonObject(oldRender + mapOf(
+                    "screens" to JsonArray(listOf(screen)),
+                    "assets" to JsonArray(emptyList()),
+                    "textInputs" to JsonArray(emptyList()),
+                    "transitions" to JsonArray(emptyList()),
+                )),
+                "screenBehaviors" to JsonArray(listOf(buildJsonObject {
+                    put("screenId", "screen"); put("controls", JsonArray(emptyList()))
+                })),
+            ))
+            val bytes = descriptor.toString().encodeToByteArray()
+            val signature = java.security.Signature.getInstance("Ed25519").run {
+                initSign(pair.private)
+                update(JourneyReleaseLimits.SIGNATURE_DOMAIN.encodeToByteArray() + bytes)
+                sign()
+            }
+            val signed = JsonObject(envelope + mapOf(
+                "descriptorBytesBase64" to JsonPrimitive(Base64.encodeToString(bytes, Base64.NO_WRAP)),
+                "descriptorSizeBytes" to JsonPrimitive(bytes.size),
+                "descriptorSha256" to JsonPrimitive(java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(bytes).joinToString("") { "%02x".format(it) }),
+                "signature" to buildJsonObject {
+                    put("version", 1); put("algorithm", "ed25519"); put("keyId", "TEST_ONLY_VIDEO")
+                    put("signatureBase64", Base64.encodeToString(signature, Base64.NO_WRAP))
+                },
+            ))
+            val release = JourneyReleaseVerifier.authenticate(signed.toString().encodeToByteArray(),
+                mapOf("TEST_ONLY_VIDEO" to pair.public.encoded.takeLast(32).toByteArray()),
+                requireNotNull(JourneyReleaseIdentity.fromJson(descriptor.getValue("identity").jsonObject)),
+                leg.getValue("id").jsonPrimitive.content, runtime(descriptor), JourneyReleaseReplayPolicy.Active(0))
+            assertEquals(name, leg, release.leg)
+            assertEquals("every_match", release.leg.getValue("policy").jsonObject
+                .getValue("entry").jsonObject.getValue("frequency").jsonObject.getValue("type").jsonPrimitive.content)
+            assertEquals(JsonArray(emptyList()), release.leg.getValue("offers"))
+        }
+    }
+
     @Test fun formSelectorRejectsMalformedNamesAndOtherFieldKinds() {
         fun field(type: String = "Response.Field", form: kotlinx.serialization.json.JsonElement) = buildJsonObject {
             put("type", type); put("key", "trip_days"); put("form", form)
