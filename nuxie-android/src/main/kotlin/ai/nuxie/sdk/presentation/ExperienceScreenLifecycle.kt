@@ -67,6 +67,6 @@ internal class ExperienceScreenLifecycle {
         "screen/exitReason" to NuxieViewModelScalarValue.StringValue(exitReason.wireValue),
         "screen/transition" to NuxieViewModelScalarValue.StringValue(transition),
         "env/reduceMotion" to NuxieViewModelScalarValue.BooleanValue(reduceMotion),
-        "fontScale" to NuxieViewModelScalarValue.NumberValue(fontScale),
+        "env/fontScale" to NuxieViewModelScalarValue.NumberValue(fontScale),
     )
 }

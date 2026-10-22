@@ -129,7 +129,7 @@ internal class NuxieViewModelArchive private constructor(
 
     companion object {
         private const val STATUS_OK = 0
-        private val reservedRoot = setOf("env", "safeArea", "screen", "nuxieTextInputs", "fontScale")
+        private val reservedRoot = setOf("env", "safeArea", "screen", "nuxieTextInputs")
 
         fun capture(snapshot: NativeViewModelSnapshot, schemaNames: Map<Long, String>, aliases: Map<String, Long>): NuxieViewModelArchive {
             val byOwner = snapshot.values.groupBy { it.ownerInstanceId }

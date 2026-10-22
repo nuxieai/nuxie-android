@@ -17,7 +17,8 @@ class NuxieViewModelArchiveTest {
         assertEquals(listOf(0L, 1L), list.drop(1).map { it.index })
         assertEquals(102L, native.writes.single { it.second.path == "selected" }.second.relatedViewModel)
         assertEquals("second", native.writes.single { it.first == 102L && it.second.path == "placementId" }.second.bytesValue.decodeToString())
-        assertFalse(native.writes.any { it.second.path in setOf("env", "fontScale", "nuxieLayoutPaint", "generated") })
+        assertFalse(native.writes.any { it.second.path in setOf("env", "nuxieLayoutPaint", "generated") })
+        assertEquals(3.12f, native.writes.single { it.first == 100L && it.second.path == "fontScale" }.second.numberValue)
         state.close()
         assertEquals(setOf(100L, 101L, 102L), native.freed.toSet())
         assertEquals(3, native.freed.size)
@@ -55,7 +56,7 @@ class NuxieViewModelArchiveTest {
             arrayOf(NativeViewModelSnapshotInstance(1, 0), NativeViewModelSnapshotInstance(10, 1), NativeViewModelSnapshotInstance(20, 1),
                 NativeViewModelSnapshotInstance(30, 2), NativeViewModelSnapshotInstance(40, 2)),
             arrayOf(entry(1, 0, "plans", 8, items = list), entry(1, 1, "selected", 9, 20),
-                entry(1, 2, "env", 9, 30), entry(1, 3, "fontScale", 2),
+                entry(1, 2, "env", 9, 30), entry(1, 3, "fontScale", 2).copy(numberValue = 3.12f),
                 entry(10, 0, "placementId", 1, text = "first".encodeToByteArray()),
                 entry(20, 0, "placementId", 1, text = bytes), entry(20, 1, "nuxieLayoutPaint", 9, 40),
                 entry(30, 0, "generated", 2), entry(40, 0, "generated", 2))),
