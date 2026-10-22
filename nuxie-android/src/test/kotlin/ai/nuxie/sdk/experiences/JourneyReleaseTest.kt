@@ -26,6 +26,54 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class JourneyReleaseTest {
+    @Test fun googlePlaySelectionAcceptsExactlyOneOfferChoice() {
+        for (type in listOf("subscription", "one-time")) {
+            for (selection in listOf(
+                buildJsonObject { put("noOffer", true) },
+                buildJsonObject { put("offerId", "welcome") },
+            )) JourneySchemaValidator.validate(playSelectionDescriptor(type, selection))
+            JourneySchemaValidator.validate(playSelectionDescriptor(type, null))
+        }
+    }
+
+    @Test fun googlePlaySelectionRejectsAmbiguousOrMalformedChoices() {
+        for (selection in listOf(
+            JsonObject(emptyMap()),
+            buildJsonObject { put("noOffer", true); put("offerId", "welcome") },
+            buildJsonObject { put("noOffer", false) },
+            buildJsonObject { put("noOffer", "true") },
+            buildJsonObject { put("noOffer", 1) },
+            buildJsonObject { put("noOffer", JsonNull) },
+            buildJsonObject { put("noOffer", true); put("unexpected", true) },
+            buildJsonObject { put("offerId", "welcome"); put("unexpected", true) },
+            buildJsonObject { put("offerId", JsonNull) },
+            JsonNull,
+        )) {
+            for (type in listOf("subscription", "one-time")) {
+                assertThrows(selection.toString(), JourneyReleaseAuthenticationException::class.java) {
+                    JourneySchemaValidator.validate(playSelectionDescriptor(type, selection))
+                }
+            }
+        }
+    }
+
+    private fun playSelectionDescriptor(type: String, selection: kotlinx.serialization.json.JsonElement?): JsonObject {
+        val corpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("billing/google-play-offer-fallback.json").readText()).jsonObject
+        val entry = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("journeys/rendered-text-input/release-entry.json").readText()).jsonObject
+        val source = JourneyReleaseEnvelope.parseObject(Base64.decode(entry.getValue("envelope").jsonObject
+            .getValue("descriptorBytesBase64").jsonPrimitive.content, Base64.NO_WRAP))
+        val placement = buildJsonObject {
+            put("id", "primary"); put("productId", "pro")
+            selection?.let { put("googlePlay", it) }
+        }
+        return JsonObject(source + mapOf(
+            "products" to JsonArray(listOf(corpus.getValue("releaseProducts").jsonObject.getValue(type))),
+            "placements" to JsonArray(listOf(placement)),
+        ))
+    }
+
     @Test fun `all copied video Journeys decode through release authentication`() {
         val envelope = fixture.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
         val source = JourneyReleaseEnvelope.parseObject(Base64.decode(

@@ -125,6 +125,8 @@ class ProductResolverTest {
                     subscriptionOffers = listOf(
                         offer(basePlanId = "monthly", offerId = null, token = "monthly-base"),
                         offer(basePlanId = "annual", offerId = null, token = "annual-base"),
+                        offer(basePlanId = "annual", offerId = "trial", token = "trial-token",
+                            introductoryPhases = listOf(phase(0, "P1W", 1))),
                     ),
                 ),
             ),
@@ -170,15 +172,28 @@ class ProductResolverTest {
     }
 
     @Test
-    fun exactMissingFailsClosedInsteadOfFallingBackToTheConfiguredBasePlan() = runBlocking {
-        val failure = resolutionFailure {
-            resolverWith(
-                offer(basePlanId = "annual", offerId = null, token = "annual-base"),
-                offer(basePlanId = "annual", offerId = "other", token = "other-token"),
-            ).resolve(listOf(request(OfferSelection.Exact("missing"))))
-        }
+    fun exactMissingUsesTheConfiguredBasePlanWithoutAnOffer() = runBlocking {
+        val product = resolverWith(
+            offer(basePlanId = "monthly", offerId = "missing", token = "wrong-plan"),
+            offer(basePlanId = "annual", offerId = null, token = "annual-base"),
+            offer(basePlanId = "annual", offerId = "other", token = "other-token",
+                introductoryPhases = listOf(phase(0, "P1M", 1))),
+        ).resolve(listOf(request(OfferSelection.Exact("missing")))).single()
 
-        assertTrue(failure.message.orEmpty().contains("configured offer 'missing'"))
+        assertNull(product.offerId)
+        assertEquals("annual", product.basePlanId)
+        assertEquals("annual-base", product.offerToken)
+    }
+
+    @Test
+    fun exactOfferWithInvalidPricingPhasesUsesTheConfiguredBasePlan() = runBlocking {
+        val product = resolverWith(
+            offer("annual", null, "annual-base"),
+            offer("annual", "invalid", "invalid-token").copy(pricingPhases = emptyList()),
+        ).resolve(listOf(request(OfferSelection.Exact("invalid")))).single()
+
+        assertNull(product.offerId)
+        assertEquals("annual-base", product.offerToken)
     }
 
     @Test
@@ -271,6 +286,19 @@ class ProductResolverTest {
 
         assertEquals("available-trial", product.offerId)
         assertEquals("available-token", product.offerToken)
+    }
+
+    @Test
+    fun automaticExcludesTagsContainingIgnoreOfferWithCaseSensitiveComparison() = runBlocking {
+        val product = resolverWith(
+            offer("annual", null, "annual-base"),
+            offer("annual", "ignored", "ignored-token", listOf("summer-ignore-offer-extra"),
+                listOf(phase(0, "P1Y", 1))),
+            offer("annual", "available", "available-token", listOf("summer-IGNORE-offer"),
+                listOf(phase(0, "P1W", 1))),
+        ).resolve(listOf(request(OfferSelection.Automatic))).single()
+
+        assertEquals("available", product.offerId)
     }
 
     @Test
@@ -561,6 +589,103 @@ class ProductResolverTest {
 
         assertEquals("launch", product.offerId)
         assertEquals("launch-token", product.offerToken)
+    }
+
+    @Test
+    fun missingOneTimeOfferUsesTheConfiguredPurchaseOptionWithoutAnOffer() = runBlocking {
+        val store = InMemoryPurchaseEvidenceStore()
+        val resolver = ProductResolver(FakeProductDetailsQuery(listOf(
+            PlayProductDetails(
+                productId = "lifetime", productType = BillingClient.ProductType.INAPP,
+                rawProduct = null, subscriptionOffers = emptyList(),
+                oneTimePurchaseOfferToken = "wrong-default-token",
+                oneTimePurchaseOffers = listOf(
+                    PlayOneTimePurchaseOffer("standard", "missing", "wrong-option-token"),
+                    PlayOneTimePurchaseOffer("rental", "other", "wrong-offer-token"),
+                    PlayOneTimePurchaseOffer("rental", null, "rental-token"),
+                ),
+            ),
+        )), store)
+
+        val product = resolver.resolve(listOf(CatalogProductRequest(
+            productId = "nuxie-lifetime", storeProductId = "lifetime", productType = BillingClient.ProductType.INAPP,
+            purchaseOptionId = "rental", offerSelection = OfferSelection.Exact("missing"),
+        ))).single()
+
+        assertEquals("rental", product.purchaseOptionId)
+        assertNull(product.offerId)
+        assertEquals("rental-token", product.offerToken)
+        assertNull(store.loadProductMappings().single().offerId)
+    }
+
+    @Test
+    fun noOfferWithoutAPurchaseOptionBuysTheOnlyPlainOffer() = runBlocking {
+        val store = InMemoryPurchaseEvidenceStore()
+        val resolver = ProductResolver(FakeProductDetailsQuery(listOf(
+            PlayProductDetails(
+                productId = "lifetime", productType = BillingClient.ProductType.INAPP,
+                rawProduct = null, subscriptionOffers = emptyList(),
+                oneTimePurchaseOfferToken = "discount-token",
+                oneTimePurchaseOffers = listOf(
+                    PlayOneTimePurchaseOffer("standard", "launch-discount", "discount-token"),
+                    PlayOneTimePurchaseOffer("standard", null, "standard-token"),
+                ),
+            ),
+        )), store)
+
+        val product = resolver.resolve(listOf(CatalogProductRequest(
+            productId = "nuxie-lifetime", storeProductId = "lifetime", productType = BillingClient.ProductType.INAPP,
+            offerSelection = OfferSelection.None,
+        ))).single()
+
+        assertNull(product.offerId)
+        assertEquals("standard-token", product.offerToken)
+        assertEquals("standard", product.purchaseOptionId)
+        assertEquals("standard", store.loadProductMappings().single().purchaseOptionId)
+    }
+
+    @Test
+    fun tokenlessLegacyOneTimeProductKeepsItsLegacyPurchasePath() = runBlocking {
+        val product = ProductResolver(FakeProductDetailsQuery(listOf(
+            PlayProductDetails(
+                productId = "lifetime", productType = BillingClient.ProductType.INAPP,
+                rawProduct = null, subscriptionOffers = emptyList(),
+                oneTimePurchaseOfferToken = null,
+                oneTimePurchaseOffers = listOf(PlayOneTimePurchaseOffer(null, null, null)),
+            ),
+        )), InMemoryPurchaseEvidenceStore()).resolve(listOf(CatalogProductRequest(
+            productId = "nuxie-lifetime", storeProductId = "lifetime", productType = BillingClient.ProductType.INAPP,
+            offerSelection = OfferSelection.None,
+        ))).single()
+
+        assertNull(product.offerId)
+        assertNull(product.offerToken)
+        assertNull(product.purchaseOptionId)
+    }
+
+    @Test
+    fun noOfferWithoutAPurchaseOptionFailsWhenPlainOffersAreAmbiguous() = runBlocking {
+        val resolver = ProductResolver(FakeProductDetailsQuery(listOf(
+            PlayProductDetails(
+                productId = "lifetime", productType = BillingClient.ProductType.INAPP,
+                rawProduct = null, subscriptionOffers = emptyList(),
+                oneTimePurchaseOfferToken = "standard-token",
+                oneTimePurchaseOffers = listOf(
+                    PlayOneTimePurchaseOffer("standard", null, "standard-token"),
+                    PlayOneTimePurchaseOffer("rental", null, "rental-token"),
+                ),
+            ),
+        )), InMemoryPurchaseEvidenceStore())
+
+        assertThrows(ProductResolutionException::class.java) {
+            runBlocking {
+                resolver.resolve(listOf(CatalogProductRequest(
+                    productId = "nuxie-lifetime", storeProductId = "lifetime", productType = BillingClient.ProductType.INAPP,
+                    offerSelection = OfferSelection.None,
+                )))
+            }
+        }
+        Unit
     }
 
     @Test

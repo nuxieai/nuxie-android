@@ -59,6 +59,28 @@ missing Play offer token or substitute the Test Store preview.
 These are acceptance targets, not a statement that a particular app has passed.
 Test each applicable product type and exact offer selection.
 
+A Journey placement can select `googlePlay: { "offerId": "welcome" }` or
+`googlePlay: { "noOffer": true }`. Exactly one key is allowed, and `noOffer`
+must be the boolean `true`. Omitting `googlePlay` selects subscription offers
+automatically. Automatic selection skips offers with any tag containing
+`-ignore-offer`, using a case-sensitive comparison. Explicit named selections
+can still use those offers. Paid introductory phases are never free trials.
+
+If a named subscription offer is absent from the customer's ProductDetails or
+has unusable pricing phases, Nuxie uses the configured base plan with no trial
+or introductory wording. A missing named one-time offer uses the configured
+purchase option without an offer. Both fallbacks retain `offerId == null` and
+that plan or option's own token through checkout. `noOffer` selects the same
+plain terms even when offers are available. A missing product, base plan or
+purchase option remains a preparation failure.
+
+The Android-owned contract in
+[`billing/google-play-offer-fallback.json`](../fixtures/billing/google-play-offer-fallback.json)
+pins release selections, display values and purchase tokens. Its runner is
+`PlayBillingFlowParamsTest.googlePlayOfferFallbackFixturePinsDisplayAndCheckout`.
+The fixture is registered in `fixtures/MANIFEST.json` under `repositoryOwned`
+with a null source checksum, so fixture sync retains it.
+
 | Scenario | Nuxie acceptance evidence |
 | --- | --- |
 | Approved checkout | Play terms match the signed selection; durable token evidence precedes backend work; backend verification yields the expected Feature state; Nuxie-managed acknowledgement/consumption completes after backend acceptance |
@@ -91,8 +113,10 @@ coverage; it does not prove backend verification or real store finalization.
 - **No test payment instruments:** check the billing account, license eligibility,
   package, and install provenance before attempting a purchase.
 - **No Product or wrong offer:** compare the signed catalog identity with the
-  active Play catalog and the tester's eligibility. Nuxie intentionally fails
-  unresolved signed terms instead of guessing another offer.
+  active Play catalog and the tester's eligibility. Missing named offers use
+  the configured base plan or purchase option without an offer and log a WARN
+  through the SDK logger. Missing products, plans and purchase options fail
+  preparation.
 - **Play succeeded but access did not converge:** inspect native recovery and
   backend verification independently. Retain the customer, publication and
   operation IDs; don't delete the app's evidence while diagnosing recovery.

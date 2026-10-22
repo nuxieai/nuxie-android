@@ -55,9 +55,14 @@ internal data class JourneyProductCatalog(
                         } else {
                             OfferSelection.None
                         }
-                        is JsonObject -> OfferSelection.Exact(
-                            play.requiredString("offerId", "Placement '$placementId' Google Play selection"),
-                        )
+                        is JsonObject -> when {
+                            play.keys == setOf("noOffer") && play["noOffer"] == JsonPrimitive(true) ->
+                                OfferSelection.None
+                            play.keys == setOf("offerId") -> OfferSelection.Exact(
+                                play.requiredString("offerId", "Placement '$placementId' Google Play selection"),
+                            )
+                            else -> invalid("Placement '$placementId' has invalid Google Play selection")
+                        }
                         else -> invalid("Placement '$placementId' has invalid Google Play selection")
                     }
                     CatalogProductRequest(

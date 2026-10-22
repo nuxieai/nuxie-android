@@ -3,6 +3,7 @@ package ai.nuxie.sdk.billing
 import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.ProductDetails
 import ai.nuxie.sdk.features.FeatureAllowance
+import ai.nuxie.sdk.logging.NuxieLog
 import kotlinx.serialization.json.JsonObject
 
 internal sealed interface OfferSelection {
@@ -163,40 +164,27 @@ internal class ProductResolver(
                     )
                 }
 
-                request.productType == BillingClient.ProductType.SUBS &&
+                request.productType == BillingClient.ProductType.INAPP &&
                     request.offerSelection is OfferSelection.Exact &&
-                    product.subscriptionOffers.none {
-                        it.basePlanId == request.basePlanId &&
-                            it.offerId == request.offerSelection.offerId &&
-                            it.hasTimeOrderedPricingPhases
-                    } -> {
+                    request.purchaseOptionId == null -> {
                     failures += request.failureDescription(
-                        "configured offer '${request.offerSelection.offerId}' is absent or has invalid pricing phases " +
-                            "inside base plan '${request.basePlanId}'",
+                        "one-time offer has no configured purchase option",
                     )
                 }
 
                 request.productType == BillingClient.ProductType.INAPP &&
-                    request.offerSelection is OfferSelection.Exact &&
-                    (request.purchaseOptionId == null ||
-                        product.oneTimePurchaseOffers.none {
-                            it.purchaseOptionId == request.purchaseOptionId &&
-                                it.offerId == request.offerSelection.offerId &&
-                                it.offerToken != null
-                        }) -> {
+                    request.purchaseOptionId == null &&
+                    request.offerSelection == OfferSelection.None &&
+                    product.oneTimePurchaseOffers.any { it.offerToken != null } &&
+                    product.selectOneTimeOffer(request) == null -> {
                     failures += request.failureDescription(
-                        "configured offer '${request.offerSelection.offerId}' is absent from " +
-                            "purchase option '${request.purchaseOptionId}'",
+                        "one-time product has no single purchase option without an offer",
                     )
                 }
 
                 request.productType == BillingClient.ProductType.INAPP &&
                     request.purchaseOptionId != null &&
-                    request.offerSelection == OfferSelection.None &&
-                    product.oneTimePurchaseOffers.none {
-                        it.purchaseOptionId == request.purchaseOptionId &&
-                            it.offerId == null && it.offerToken != null
-                    } -> {
+                    product.selectOneTimeOffer(request) == null -> {
                     failures += request.failureDescription(
                         "configured purchase option '${request.purchaseOptionId}' is absent from ProductDetails",
                     )
@@ -223,25 +211,16 @@ internal class ProductResolver(
         product: PlayProductDetails,
     ): StoreProduct {
         if (request.productType != BillingClient.ProductType.SUBS) {
-            val selectedOffer = when (val selection = request.offerSelection) {
-                OfferSelection.None -> request.purchaseOptionId?.let { purchaseOptionId ->
-                    product.oneTimePurchaseOffers.first {
-                        it.purchaseOptionId == purchaseOptionId &&
-                            it.offerId == null && it.offerToken != null
-                    }
-                }
-                is OfferSelection.Exact -> product.oneTimePurchaseOffers.first {
-                    it.purchaseOptionId == request.purchaseOptionId &&
-                        it.offerId == selection.offerId && it.offerToken != null
-                }
-                OfferSelection.Automatic -> null
+            val selectedOffer = product.selectOneTimeOffer(request)
+            if (request.offerSelection is OfferSelection.Exact && selectedOffer?.offerId == null) {
+                request.logOfferFallback(toBasePlan = false)
             }
             val selectedOfferToken = selectedOffer?.offerToken ?: product.oneTimePurchaseOfferToken
             return StoreProduct(
                 productId = request.productId,
                 storeProductId = request.storeProductId,
                 basePlanId = null,
-                purchaseOptionId = request.purchaseOptionId,
+                purchaseOptionId = selectedOffer?.purchaseOptionId ?: request.purchaseOptionId,
                 offerId = selectedOffer?.offerId,
                 placementId = request.placementId,
                 rawProduct = product.rawProduct,
@@ -268,7 +247,7 @@ internal class ProductResolver(
                 it.basePlanId == basePlanId &&
                     it.offerId == request.offerSelection.offerId &&
                     it.hasTimeOrderedPricingPhases
-            } ?: error("Exact offer availability is validated before resolution.")
+            } ?: basePlan.also { request.logOfferFallback(toBasePlan = true) }
         }
         return StoreProduct(
             productId = request.productId,
@@ -286,6 +265,52 @@ internal class ProductResolver(
             licensingPublicKey = request.licensingPublicKey,
             purchaseContext = PurchaseContext(request.experienceId, request.experienceVersion),
         )
+    }
+
+    private fun PlayProductDetails.selectOneTimeOffer(request: CatalogProductRequest): PlayOneTimePurchaseOffer? {
+        val selection = request.offerSelection
+        val optionId = request.purchaseOptionId
+            // Without a named purchase option, "no offer" still means no offer:
+            // the only plain offer Play lists, never whichever offer comes first.
+            ?: return if (selection == OfferSelection.None) {
+                oneTimePurchaseOffers.filter { it.offerId == null && it.offerToken != null }.singleOrNull()
+            } else {
+                null
+            }
+        if (selection is OfferSelection.Exact) {
+            oneTimePurchaseOffers.firstOrNull {
+                it.purchaseOptionId == optionId && it.offerId == selection.offerId && it.offerToken != null
+            }?.let { return it }
+        }
+        return oneTimePurchaseOffers.firstOrNull {
+            it.purchaseOptionId == optionId && it.offerId == null && it.offerToken != null
+        }
+    }
+
+    private fun CatalogProductRequest.logOfferFallback(toBasePlan: Boolean) {
+        val fields = arrayOf(
+            NuxieLog.sensitive("productId", productId),
+            NuxieLog.sensitive("placementId", placementId),
+            NuxieLog.sensitive("basePlanId", basePlanId),
+            NuxieLog.sensitive("purchaseOptionId", purchaseOptionId),
+            NuxieLog.sensitive("offerId", (offerSelection as OfferSelection.Exact).offerId),
+        )
+        // Log messages stay constant; the values travel as sensitive fields.
+        if (toBasePlan) {
+            NuxieLog.w(
+                "Nuxie",
+                "Configured Play offer is unavailable; using the base plan without an offer.",
+                null,
+                *fields,
+            )
+        } else {
+            NuxieLog.w(
+                "Nuxie",
+                "Configured Play offer is unavailable; using the purchase option without an offer.",
+                null,
+                *fields,
+            )
+        }
     }
 
     private fun CatalogProductRequest.failureDescription(reason: String): String =
@@ -324,7 +349,7 @@ internal class ProductResolver(
     private fun selectAutomatic(offers: List<PlaySubscriptionOffer>): PlaySubscriptionOffer? {
         val eligible = offers.filter {
             it.offerId != null &&
-                IGNORE_OFFER_TAG !in it.offerTags &&
+                it.offerTags.none { tag -> IGNORE_OFFER_TAG in tag } &&
                 it.hasTimeOrderedPricingPhases &&
                 it.introductoryPhases.isNotEmpty()
         }
@@ -365,7 +390,7 @@ internal class ProductResolver(
     }
 
     private companion object {
-        const val IGNORE_OFFER_TAG = "nuxie-ignore-offer"
+        const val IGNORE_OFFER_TAG = "-ignore-offer"
         val ISO_PERIOD = Regex("P(?:(\\d+)Y)?(?:(\\d+)M)?(?:(\\d+)W)?(?:(\\d+)D)?")
     }
 }
