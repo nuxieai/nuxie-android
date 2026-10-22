@@ -7,6 +7,7 @@ import ai.nuxie.sdk.features.FeatureAllowance
 import ai.nuxie.sdk.features.FeatureInfo
 import ai.nuxie.sdk.features.FeatureService
 import ai.nuxie.sdk.features.FeatureUsageResult
+import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.identity.CustomerKind
 import ai.nuxie.sdk.network.NuxieApi
 import android.app.Activity
@@ -176,6 +177,7 @@ internal class PurchaseService(
     private val refreshFeatureAuthority: () -> Unit = {},
     private val outboxRetryInitialDelayMillis: Long = 30_000,
     private val outboxRetryMaxDelayMillis: Long = 3_600_000,
+    private val identity: IdentityProvider? = null,
 ) {
     private data class InFlightPurchase(
         val result: CompletableDeferred<PurchaseResult>,
@@ -742,8 +744,9 @@ internal class PurchaseService(
                 }
                 // The command is built from the entry as it is now that it holds the
                 // purchase, never from the read before it waited for the purchase.
-                val claimed = claimedCandidates.single()
-                val eventId = purchaseUsageEventId(claimed, featureId, amount, entityId)
+                val candidate = claimedCandidates.single()
+                val eventId = purchaseUsageEventId(candidate, featureId, amount, entityId)
+                val claimed = admitFeatureUse(candidate, distinctId, eventId) ?: return null
                 val featureScope = features.captureAuthoritativeUseScope(distinctId)
                 val response = usageApi.useFeatureWithPurchase(
                     NuxieApi.PurchaseBackedFeatureUseReport(
@@ -752,6 +755,7 @@ internal class PurchaseService(
                         requiredBalance = amount,
                         eventData = NuxieApi.FeatureUseEventData(amount, metadata),
                         entityId = entityId,
+                        customerKind = claimed.featureUseCustomerKinds?.get(eventId),
                         purchase = NuxieApi.PlayPurchaseUseReport(
                             packageName = claimed.packageName,
                             productId = claimed.storeProductIds.first(),
@@ -846,6 +850,47 @@ internal class PurchaseService(
                 releasePurchaseUsageClaim(evidence.purchaseToken)
             }
         }
+    }
+
+    /** Freeze the consume's kind before sending, without readmitting `/purchase`. */
+    private suspend fun admitFeatureUse(
+        evidence: PurchaseEvidence,
+        distinctId: String,
+        operationId: String,
+    ): PurchaseEvidence? {
+        var admitted: PurchaseEvidence? = null
+        suspend fun admit() {
+            projectionRefresh.withLock {
+                if (outboxOff) return@withLock
+                val current = readEntries()[evidence.purchaseToken] ?: return@withLock
+                if (current.pendingSend?.admissionId != evidence.pendingSend?.admissionId ||
+                    !current.matchesAtomicUsePayload(evidence)
+                ) return@withLock
+                val kinds = current.featureUseCustomerKinds
+                // A missing map is legacy evidence: the reconstructed operation
+                // may already have been sent undeclared. Never backfill its kind.
+                if (kinds == null || kinds.containsKey(operationId)) {
+                    admitted = current
+                } else {
+                    val updated = current.copy(featureUseCustomerKinds =
+                        kinds + (operationId to customerKind(distinctId)))
+                    // A failed durable admission turns the outbox off. No evidence
+                    // was sent, so the caller can use the ordinary command path.
+                    if (saveEntry(updated)) admitted = updated
+                }
+            }
+        }
+        val provider = identity
+        if (provider != null) {
+            val identityScope = provider.captureScope()
+            if (identityScope.distinctId != distinctId ||
+                provider.withCurrentScopeSuspending(identityScope) { admit(); true } != true
+            ) throw CancellationException()
+        } else {
+            if (this.distinctId() != distinctId) throw CancellationException()
+            admit()
+        }
+        return admitted
     }
 
     /**
@@ -1963,6 +2008,7 @@ internal class PurchaseService(
                 ownerDistinctId = existing?.ownerDistinctId,
                 refused = existing?.refused == true,
                 pendingSend = admittedSend,
+                featureUseCustomerKinds = if (existing == null) emptyMap() else existing.featureUseCustomerKinds,
                 context = existing?.context ?: product?.toStoredContext()
                     ?: catalogBinding?.context ?: catalogMapping?.context,
                 pinnedFeatureAllowances = pinnedFeatureAllowances,
@@ -2134,7 +2180,14 @@ internal class PurchaseService(
                     // whose customer is no longer the current one is dropped, so it can
                     // never move the purchase back after another customer's Restore.
                     if (requested.distinctId != distinctId()) return@withLock null
-                    saveEntry(current.copy(pendingSend = claim, syncAttempts = 0, retryDueAtMillis = null))
+                    saveEntry(current.copy(
+                        pendingSend = claim,
+                        featureUseCustomerKinds = if (
+                            (current.pendingSend?.distinctId ?: current.ownerDistinctId ?: current.buyerDistinctId) == claim.distinctId
+                        ) current.featureUseCustomerKinds else emptyMap(),
+                        syncAttempts = 0,
+                        retryDueAtMillis = null,
+                    ))
                 }
             }
         } ?: return null
@@ -2633,6 +2686,7 @@ internal class PurchaseService(
             buyerDistinctId = candidate.buyerDistinctId ?: current.buyerDistinctId,
             ownerDistinctId = current.ownerDistinctId,
             refused = current.refused,
+            featureUseCustomerKinds = current.featureUseCustomerKinds,
             pendingSend = when {
                 current.pendingSend == null ->
                     candidate.pendingSend.takeUnless { current.synced || current.refused }

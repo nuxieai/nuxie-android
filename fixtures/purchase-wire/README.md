@@ -19,7 +19,9 @@ if a committed file differs. `consume-atomic-use-full` and
 `consume-atomic-replay` come from a failed call followed by a retry through
 `PurchaseService.useFeatureWithPendingPurchase`. The test captures both real
 `/feature/consume` requests and requires byte-identical `bodyText`, including the
-stable `operationId` owned by `PurchaseService`.
+stable `operationId` owned by `PurchaseService` and the `customerKind` recorded
+at consume admission. These two cases declare `identified`; the direct minimal
+Play consume declares `anonymous`. The App Store contract vector stays undeclared.
 
 The remaining Play request cases call `NuxieApi.postPurchase` or
 `NuxieApi.useFeatureWithPurchase` with fixed report values and a capturing

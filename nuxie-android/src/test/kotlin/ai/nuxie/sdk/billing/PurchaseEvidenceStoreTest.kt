@@ -34,6 +34,34 @@ import ai.nuxie.sdk.identity.CustomerKind
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class PurchaseEvidenceStoreTest {
     @Test
+    fun consumeKindsSurviveBookkeepingAndOlderEvidenceStillDecodes(): Unit = kotlinx.coroutines.runBlocking {
+        val directory = Files.createTempDirectory("nuxie-consume-kinds").toFile()
+        try {
+            val store = FilePurchaseEvidenceStore(directory)
+            val original = owed("token")
+            assertEquals(emptyMap<String, CustomerKind>(), original.featureUseCustomerKinds)
+            val admitted = original.copy(featureUseCustomerKinds = mapOf(
+                "use-anonymous" to CustomerKind.ANONYMOUS, "use-identified" to CustomerKind.IDENTIFIED,
+            ))
+            assertTrue(store.upsert(admitted.copy(syncAttempts = 1, retryDueAtMillis = 100)))
+            val reopened = FilePurchaseEvidenceStore(directory).load().getValue("token")
+            assertEquals(admitted.featureUseCustomerKinds, reopened.featureUseCustomerKinds)
+            assertEquals(original.pendingSend, reopened.pendingSend)
+            assertTrue(store.upsert(reopened.copy(pendingSend = null, ownerDistinctId = "requester")))
+            assertEquals(admitted.featureUseCustomerKinds, store.load().getValue("token").featureUseCustomerKinds)
+
+            val file = File(directory, "purchase-evidence.json")
+            val rows = Json.parseToJsonElement(file.readText()).jsonObject
+            file.writeText(JsonObject(rows + ("token" to JsonObject(rows.getValue("token").jsonObject - "featureUseCustomerKinds"))).toString())
+            val older = FilePurchaseEvidenceStore(directory).load().getValue("token")
+            assertEquals(null, older.featureUseCustomerKinds)
+            assertEquals("requester", older.ownerDistinctId)
+            assertTrue(store.upsert(older.copy(syncAttempts = 2)))
+            assertEquals(null, FilePurchaseEvidenceStore(directory).load().getValue("token").featureUseCustomerKinds)
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test
     fun unreadableAndCorruptEvidenceFilesAreLogged(): Unit = kotlinx.coroutines.runBlocking {
         val directory = Files.createTempDirectory("nuxie-corrupt-evidence").toFile()
         ai.nuxie.sdk.logging.NuxieLog.configure(ai.nuxie.sdk.LogLevel.WARN)

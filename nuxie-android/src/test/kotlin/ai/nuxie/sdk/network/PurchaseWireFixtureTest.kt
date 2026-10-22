@@ -418,6 +418,7 @@ private object PurchaseWireFixtures {
                 name = "consume-atomic-use-minimal",
                 report = NuxieApi.PurchaseBackedFeatureUseReport(
                     customerId = "fixture-customer-minimal",
+                    customerKind = CustomerKind.ANONYMOUS,
                     featureId = "fixture-credits-minimal",
                     requiredBalance = 1.0,
                     eventData = NuxieApi.FeatureUseEventData(value = 1.0, properties = null),
@@ -580,6 +581,7 @@ private object PurchaseWireFixtures {
             features = core.features,
             distinctId = core.identity::distinctId,
             customerKind = core.identity::customerKind,
+            identity = core.identity,
             emit = { _, _ -> },
             settings = PurchaseSettings(null, PurchaseHandlingMode.NUXIE_MANAGED),
             scope = core.scope,

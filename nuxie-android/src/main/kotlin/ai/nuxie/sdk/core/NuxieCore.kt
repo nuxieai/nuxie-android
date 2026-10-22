@@ -273,6 +273,7 @@ internal class NuxieCore(
         features = features,
         distinctId = identity::distinctId,
         customerKind = identity::customerKind,
+        identity = identity,
         emit = eventLog::capture,
         settings = purchaseSettings,
         scope = producerScope,
