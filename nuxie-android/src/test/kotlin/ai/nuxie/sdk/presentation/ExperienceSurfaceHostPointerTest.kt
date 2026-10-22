@@ -876,38 +876,77 @@ class ExperienceSurfaceHostPointerTest {
     }
 
     @Test
-    fun `font scale waits for pending pixels and coalesces before the next step`() {
-        val native = RecordingNative("fontScale")
+    fun `env font scale is set before player creation and configuration updates wait for pending pixels`() {
+        val native = RecordingNative("fontScale", globalEnvironment = true)
         val lane = NuxieRuntimeLane()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
         val texture = SurfaceTexture(0)
+        val lifecycle = ExperienceScreenLifecycle()
+        val configuration = android.content.res.Configuration().apply { fontScale = 1.3f }
         try {
-            host.updateRuntimeValues(mapOf("fontScale" to NuxieViewModelScalarValue.NumberValue(1.0)))
+            host.updateRuntimeValues(lifecycle.updateFontScale(configuration.fontScale))
             host.loadArtboard(byteArrayOf(1), null, viewModelProjection =
                 NuxieViewModelListProjection("Root", "products", null, "Product", emptyList()))
             host.onSurfaceTextureAvailable(texture, 100, 100)
             drain(lane)
+            assertEquals(listOf(1.3f), native.stateAtPlayerCreation)
             native.presentation = 4
             host.doFrame(1_000_000_000L)
             drain(lane)
-            host.updateRuntimeValues(mapOf("fontScale" to NuxieViewModelScalarValue.NumberValue(2.0)))
-            host.updateRuntimeValues(mapOf("fontScale" to NuxieViewModelScalarValue.NumberValue(3.12)))
+            configuration.fontScale = 2f
+            host.updateRuntimeValues(lifecycle.updateFontScale(configuration.fontScale))
+            configuration.fontScale = 3.12f
+            host.updateRuntimeValues(lifecycle.updateFontScale(configuration.fontScale))
             drain(lane)
-            assertEquals("Pending pixels retain their original model revision", listOf(1f), native.stateWrites)
+            assertEquals("Pending pixels retain their original model revision", listOf(1.3f), native.stateWrites)
             native.presentation = 1
             host.doFrame(1_016_000_000L)
             drain(lane)
-            assertEquals(listOf(1f), native.stateWrites)
+            assertEquals(listOf(1.3f), native.stateWrites)
             host.onSurfaceTextureUpdated(texture)
             host.doFrame(1_032_000_000L)
             drain(lane)
-            assertEquals(listOf(1f, 3.12f), native.stateWrites)
-            assertEquals(listOf(1f, 3.12f), native.stateAtSteps)
+            assertEquals(listOf(1.3f, 3.12f), native.stateWrites)
+            assertEquals(listOf(1.3f, 3.12f), native.stateAtSteps)
         } finally {
             host.release()
             lane.shutdown()
             assertTrue(lane.awaitQuiescence(2_000))
             texture.release()
+        }
+    }
+
+    @Test
+    fun `an absent env font scale does not block sibling environment writes or loading`() {
+        for (globalEnvironment in listOf(false, true)) {
+            val native = RecordingNative(globalEnvironment = globalEnvironment)
+            val lane = NuxieRuntimeLane()
+            val failures = mutableListOf<ExperiencePresentationException>()
+            val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native),
+                listener = object : ExperienceSurfaceHost.Listener {
+                    override fun onFirstFrame() = Unit
+                    override fun onFailure(error: ExperiencePresentationException) { failures += error }
+                })
+            try {
+                fun values(scale: Double, top: Double) = linkedMapOf(
+                    "env/fontScale" to NuxieViewModelScalarValue.NumberValue(scale),
+                    "safeArea/top" to NuxieViewModelScalarValue.NumberValue(top),
+                )
+                host.updateRuntimeValues(values(1.3, 24.0))
+                host.loadArtboard(byteArrayOf(1), null, viewModelProjection =
+                    NuxieViewModelListProjection("Root", "products", null, "Product", emptyList()))
+                drain(lane)
+                assertEquals(if (globalEnvironment) listOf(24f) else emptyList<Float>(), native.stateAtPlayerCreation)
+                host.updateRuntimeValues(values(2.0, 12.0))
+                drain(lane)
+                assertEquals(if (globalEnvironment) listOf(24f, 12f) else emptyList<Float>(), native.stateWrites)
+                assertEquals(1, native.playersCreated)
+                assertTrue(failures.toString(), failures.isEmpty())
+            } finally {
+                host.release()
+                lane.shutdown()
+                assertTrue(lane.awaitQuiescence(2_000))
+            }
         }
     }
 

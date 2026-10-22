@@ -9,6 +9,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class ExperienceScreenLifecycleTest {
@@ -32,21 +33,29 @@ class ExperienceScreenLifecycleTest {
         val contract = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("runtime/font-scale-policy/cases.json").readText()).jsonObject
         val source = ExperienceScreenLifecycle()
+        assertEquals(NuxieViewModelScalarValue.NumberValue(1.0), source.snapshot()["env/fontScale"])
+        assertFalse(source.snapshot().containsKey("fontScale"))
         source.move(ExperienceScreenLifecycle.Phase.ENTERING, exitReason = ExperienceScreenLifecycle.ExitReason.NONE)
         source.move(ExperienceScreenLifecycle.Phase.ACTIVE, exitReason = ExperienceScreenLifecycle.ExitReason.NONE)
-        for (item in contract.getValue("cases").jsonArray) {
-            val scale = item.jsonObject.getValue("scale").jsonPrimitive.double.toFloat()
+        val scales = contract.getValue("cases").jsonArray.map {
+            it.jsonObject.getValue("scale").jsonPrimitive.double.toFloat()
+        } + listOf(Float.MIN_VALUE, 4.56789f, Float.MAX_VALUE)
+        for (scale in scales) {
             val values = source.updateFontScale(scale)
-            assertEquals(NuxieViewModelScalarValue.NumberValue(scale.toDouble()), values["fontScale"])
+            assertEquals(NuxieViewModelScalarValue.NumberValue(scale.toDouble()), values["env/fontScale"])
+            assertFalse(values.containsKey("fontScale"))
             assertEquals(ExperienceScreenLifecycle.Phase.ACTIVE, source.phase)
             assertEquals(1uL, source.appearances)
             val target = source.copyForPreparation()
-            assertEquals(values["fontScale"], target.snapshot()["fontScale"])
+            assertEquals(values["env/fontScale"], target.snapshot()["env/fontScale"])
             target.updateFontScale(4f)
-            assertEquals(values["fontScale"], source.snapshot()["fontScale"])
+            assertEquals(values["env/fontScale"], source.snapshot()["env/fontScale"])
         }
-        for (invalid in listOf(Float.NaN, Float.POSITIVE_INFINITY, 0f, -1f)) {
-            assertEquals(NuxieViewModelScalarValue.NumberValue(1.0), source.updateFontScale(invalid)["fontScale"])
+        for (invalid in listOf(Float.NaN, Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY, 0f, -1f)) {
+            source.updateFontScale(2f)
+            val values = source.updateFontScale(invalid)
+            assertEquals(NuxieViewModelScalarValue.NumberValue(1.0), values["env/fontScale"])
+            assertFalse(values.containsKey("fontScale"))
         }
     }
 
@@ -89,7 +98,7 @@ class ExperienceScreenLifecycleTest {
                 "screen/transition" to NuxieViewModelScalarValue.StringValue(transition),
                 "screen/exitReason" to NuxieViewModelScalarValue.StringValue(step.getValue("exitReason").jsonPrimitive.content),
                 "env/reduceMotion" to NuxieViewModelScalarValue.BooleanValue(reduced),
-                "fontScale" to NuxieViewModelScalarValue.NumberValue(1.0),
+                "env/fontScale" to NuxieViewModelScalarValue.NumberValue(1.0),
             ), values)
         }
     }

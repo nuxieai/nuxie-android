@@ -879,9 +879,9 @@ class PublishedTextInputDeviceTest {
                             try {
                                 fun verify(state: Map<String, NuxieViewModelScalarValue>) {
                                     // Production tolerates this absent field in ExperienceSurfaceHost.applyRuntimeValues.
-                                    // This signed fixture predates fontScale. Its absence is pinned below;
+                                    // This signed fixture lacks env/fontScale. Its absence is pinned below;
                                     // TextMetricsBindingDeviceTest covers the published font-scale contract.
-                                    val values = state - "fontScale"
+                                    val values = state - "env/fontScale"
                                     values.forEach { (path, value) -> assertTrue(artboard.setDefaultViewModelValue(path, value)) }
                                     val result = native.snapshotViewModel(root)
                                     assertEquals(0, result.status)
@@ -920,7 +920,7 @@ class PublishedTextInputDeviceTest {
                                     schemaSnapshot.values.filter { it.ownerInstanceId == schemaSnapshot.rootInstanceId }
                                         .map { it.name }.toSet())
                                 assertTrue(runCatching {
-                                    artboard.setDefaultViewModelValue("fontScale", NuxieViewModelScalarValue.NumberValue(1.0))
+                                    artboard.setDefaultViewModelValue("env/fontScale", NuxieViewModelScalarValue.NumberValue(1.0))
                                 }.exceptionOrNull() is IllegalArgumentException)
                                 val lifecycle = ExperienceScreenLifecycle()
                                 verify(lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING, exitReason = ExperienceScreenLifecycle.ExitReason.NONE))
@@ -1054,11 +1054,11 @@ class PublishedTextInputDeviceTest {
         fun awaitFontScale(value: Float) {
             val expected = NuxieViewModelScalarValue.NumberValue(value.toDouble())
             val deadline = SystemClock.uptimeMillis() + 10_000
-            while (prepared.screenLifecycle.snapshot()["fontScale"] != expected && SystemClock.uptimeMillis() < deadline) {
+            while (prepared.screenLifecycle.snapshot()["env/fontScale"] != expected && SystemClock.uptimeMillis() < deadline) {
                 SystemClock.sleep(25)
             }
             assertEquals("System preference must reach the mounted screen", expected,
-                prepared.screenLifecycle.snapshot()["fontScale"])
+                prepared.screenLifecycle.snapshot()["env/fontScale"])
         }
         var monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)

@@ -531,6 +531,7 @@ internal class ExperienceSurfaceHost(
         screenRuntimeValues.apply(values, write = { path, value ->
             val globalPath = when (path) {
                 "env/reduceMotion" -> "reduceMotion"
+                "env/fontScale" -> "fontScale"
                 "safeArea/top", "safeArea/bottom", "safeArea/left", "safeArea/right" -> path
                 else -> null
             }
