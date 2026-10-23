@@ -194,7 +194,7 @@ class ExperienceLayerSurfaceFailureTest {
             val scene = java.io.File.createTempFile("layer-watchdog", ".riv").apply { writeBytes(byteArrayOf(1)) }
             val descriptor = Json.parseToJsonElement("""{"leg":{"screens":[{"id":"a","defaultViewModelName":"A"},
                 {"id":"b","defaultViewModelName":"B"}]},"render":{"screens":[{"id":"a","artboardName":"A"},{"id":"b","artboardName":"B"}],"layerHost":{"artboardName":"LayerList","list":"screens"},
-                "transitions":[{"id":"pair","kind":"layer","sourceScreenId":"a","destinationScreenId":"b","durationMs":100,
+                "transitions":[{"id":"pair","kind":"page","sourceScreenId":"a","destinationScreenId":"b","durationMs":100,
                 "incomingOnTop":true,"source":{"completeEventName":"leave"},"destination":{"completeEventName":"arrive"}}]}}""").jsonObject
             val source = PreparedPresentation(scene, "A", 0, PresentationShell.FullScreen(), "a", descriptor)
             val target = source.copy(screenId = "b", artboardName = "B", transition = Json.parseToJsonElement(

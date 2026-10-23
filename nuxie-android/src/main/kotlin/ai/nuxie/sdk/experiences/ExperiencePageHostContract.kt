@@ -13,7 +13,7 @@ import ai.nuxie.sdk.experiences.JourneyReleaseJson.text
 import ai.nuxie.sdk.runtime.NuxieViewModelCatalog
 import kotlinx.serialization.json.*
 
-/** Published page names. Legacy release readers remain until the validator follow-up. */
+/** Published page names and transition references shared by admission and playback. */
 internal object ExperiencePageHostContract {
     const val ARTBOARD = "\$nuxie.page"
     const val MACHINE = "\$nuxie.page"
@@ -38,44 +38,47 @@ internal object ExperiencePageHostContract {
     data class RowSelection(val schemaIndex: Int, val authoredInstanceIndex: Int?,
         val rootName: String, val defaultInstanceId: String?)
 
-    // Release admission remains on the interim marker until Q2 and the validator follow-up.
-    // The player always opens the fixed published page names, never this marker's names.
-    fun isEnabled(descriptor: JsonObject?): Boolean =
-        (descriptor?.get("render") as? JsonObject)?.containsKey("layerHost") == true
+    // Signed rendered Experiences use pages. The imported file must supply the fixed artboard.
+    fun isEnabled(descriptor: JsonObject?): Boolean = descriptor?.get("render") is JsonObject
 
     fun readHost(value: JsonElement): Host {
         val host = exact(value, setOf("artboardName", "list"))
         return Host(id(host["artboardName"], 256), oneOf(host["list"], "screens"))
     }
 
-    fun transitionKind(value: JsonElement?): Kind = when (oneOf(value, "page", "layer", "choreographed")) {
-        "page" -> Kind.PAGE
-        "layer" -> Kind.LAYER
-        else -> Kind.CHOREOGRAPHED
+    fun transitionKind(value: JsonElement?): Kind {
+        oneOf(value, "page")
+        return Kind.PAGE
     }
 
-    fun intent(input: JsonElement): Intent {
+    fun intent(input: JsonElement, source: String? = null): Intent {
+        JourneyReleaseSchema.transition(input)
         val value = record(input)
         val style = when (text(value["type"])) {
             "magic-move" -> Style.MAGIC_MOVE
             "push" -> Style.PUSH
             "fade" -> Style.FADE
             "none" -> Style.NONE
-            "custom" -> Style.CUSTOM
-            "modal" -> Style.MODAL
-            else -> fail("transition")
+            else -> Style.MODAL
         }
-        when (style) {
-            Style.MAGIC_MOVE, Style.CUSTOM -> exact(value, setOf("type", "transitionId"))
-            Style.MODAL -> {
-                exact(value, setOf("type"), setOf("present", "height", "closedby"))
-                value["present"]?.let { oneOf(it, "sheet", "fullscreen") }
-                value["height"]?.let { oneOf(it, "large", "medium", "fit-content") }
-                value["closedby"]?.let { oneOf(it, "any", "none") }
-            }
-            else -> exact(value, setOf("type"), setOf("transitionId"))
+        val id = value["transitionId"] ?: (value["transitionIds"] as? JsonObject)?.get(source)
+        return Intent(style, id?.let(JourneyReleaseSchema::releaseId))
+    }
+
+    /** Freeze a route's actual reference before adding its visit to page history. */
+    fun resolveIntent(input: JsonObject?, source: String?): JsonObject? {
+        if (input == null) return null
+        val selected = intent(input, source)
+        if (input.containsKey("transitionIds")) {
+            return selected.transitionId?.let { id -> buildJsonObject {
+                put("type", text(input["type"])); put("transitionId", id)
+            } } ?: buildJsonObject { put("type", "none") }
         }
-        return Intent(style, value["transitionId"]?.let(::journeyId))
+        if (selected.style == Style.FADE && selected.transitionId == null) {
+            ai.nuxie.sdk.logging.NuxieLog.w("ExperiencePageStep", "Published fade has no transitionId; using a cut")
+            return buildJsonObject { put("type", "none") }
+        }
+        return input
     }
 
     fun transitions(render: JsonObject): List<Transition> = array(render["transitions"]).map { input ->

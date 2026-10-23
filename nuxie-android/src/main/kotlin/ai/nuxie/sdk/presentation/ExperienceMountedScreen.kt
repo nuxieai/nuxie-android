@@ -284,16 +284,23 @@ internal class ExperienceMountedScreen(
         var phasePresented = true
         var loggedPresentationTimeout = false
         val mutations = mutableListOf<(ExperienceInteractivePage) -> Unit>()
+        var collecting = false
         try {
             ExperiencePageStep.perform(sourceId, targetId, style, isBack, plan, layerExit(prepared), reduceMotionEnabled,
                 object : ExperiencePageStep.Operations {
                     override fun input(enabled: Boolean) { setInputEnabled(enabled) }
                     override suspend fun prepare() = Unit
-                    override suspend fun register(screenId: String, event: String): kotlinx.coroutines.Deferred<Unit> =
-                        surface.layerOperation { it.registerCompletionOnLane(screenId, event) }.also { waiters += screenId to it }
+                    override suspend fun register(screenId: String, event: String): kotlinx.coroutines.Deferred<Unit> {
+                        val waiter = kotlinx.coroutines.CompletableDeferred<Unit>()
+                        if (collecting) mutations += { it.registerCompletionOnLane(screenId, event, waiter) }
+                        else surface.layerOperation { it.registerCompletionOnLane(screenId, event, waiter) }
+                        waiters += screenId to waiter
+                        return waiter
+                    }
                     override suspend fun batch(present: Boolean, watchdogMs: Long, writes: suspend () -> Unit) {
                         check(mutations.isEmpty())
-                        writes()
+                        collecting = true
+                        try { writes() } finally { collecting = false }
                         val batch = mutations.toList()
                         mutations.clear()
                         val work: (ExperienceInteractivePage) -> Unit = { page -> batch.forEach { it(page) } }
@@ -304,7 +311,7 @@ internal class ExperienceMountedScreen(
                             logPresentationTimeout(watchdogMs)
                         }
                     }
-                    override suspend fun takeIncoming() { mutations += { it.takeIncomingOnLane(targetId, sourceId, isBack) } }
+                    override suspend fun takeIncoming() { mutations += { surface.takePageIncomingOnLane(it, targetId, sourceId, isBack) } }
                     override suspend fun phases(values: List<Pair<String, ExperienceScreenLifecycle.Phase>>, transition: String) {
                         mutations += { it.setPhasesOnLane(values, transition) }
                     }

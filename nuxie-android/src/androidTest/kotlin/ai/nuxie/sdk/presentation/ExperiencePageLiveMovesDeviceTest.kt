@@ -121,11 +121,20 @@ class ExperiencePageLiveMovesDeviceTest {
             move(page, lane, "B", "A", "back", setOf("A"))
             assertEquals(listOf("A"), page.mountedScreenIds())
             assertEquals(identity, page.snapshot("A").nativeRootInstanceId)
+            try { page.step(1.0 / 60) }
+            catch (error: Throwable) { throw AssertionError("Timed step after Back removed B", error) }
+        }
+    }
+
+    @Test fun forwardThenBackRemovalAllowsTheNextOrdinaryStep() = runBlocking {
+        withPage(2) { page, lane ->
+            move(page, lane, "A", "B", "t1", setOf("A", "B"))
+            move(page, lane, "B", "A", "back", setOf("A"))
             page.step(1.0 / 60)
         }
     }
 
-    @Test fun freshlyAppendedIncomingRowBeginsInThePhaseBatchWithoutAnotherAdvance() = runBlocking {
+    @Test fun freshlyAppendedIncomingRowBeginsAfterMountStepWithoutDrawingBetween() = runBlocking {
         withPage(2) { page, lane ->
             page.prepare("B")
             lane.call {
