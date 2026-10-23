@@ -467,7 +467,9 @@ internal class NuxieCore(
         presenter = journeyPresenter,
         nowMillis = nowMillis,
         replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
-        awaitEventsDrained = eventLog::awaitBarrier,
+        enqueueJourneyDeadline = eventLog::enqueueJourneyDeadline,
+        deferCommittedRouting = eventLog::deferCommittedRouting,
+        releaseCommittedRouting = eventLog::releaseCommittedRouting,
         artifactManager = releaseArtifactAcquirer,
         prepareNativeValues = { values, release, delivery ->
             if (release.descriptor["render"] is kotlinx.serialization.json.JsonObject) releaseArtifactAcquirer.acquire(release, delivery).use { acquired ->
@@ -539,6 +541,7 @@ internal class NuxieCore(
     fun start(initialActivity: android.app.Activity? = null) {
         featureUsage.startRecovery()
         val activityForwarder = ActivityForwarder(deliver = forwardActivity)
+        eventLog.setJourneyDeadlineHandler(journeys::handleJourneyDeadline)
         eventLog.subscribeCommittedWithAdmission(
             sampleGeneration = journeys::eventAdmissionGeneration,
         ) { event, admittedGeneration ->

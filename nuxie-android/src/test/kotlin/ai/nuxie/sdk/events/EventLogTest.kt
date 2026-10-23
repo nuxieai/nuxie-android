@@ -15,6 +15,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -63,10 +64,13 @@ class EventLogTest {
         val pending = java.util.concurrent.CopyOnWriteArrayList<StoredEvent>()
         val stableDrops = mutableListOf<String>()
         val delivered = mutableListOf<StoredEvent>()
-        val pendingLocalRoutes = linkedSetOf<String>()
+        val pendingLocalRoutes = java.util.Collections.synchronizedSet(linkedSetOf<String>())
+        var beforeInsert: suspend () -> Unit = {}
+        @Volatile var failRouteAcknowledgement = false
         var onPendingInserted: (StoredEvent) -> Unit = {}
 
         override suspend fun insertPending(event: StoredEvent) {
+            beforeInsert()
             pending.add(event)
             onPendingInserted(event)
         }
@@ -143,12 +147,13 @@ class EventLogTest {
             return true
         }
         override suspend fun queryPendingLocalRoutes(distinctId: String): List<StoredEvent> =
-            pendingLocalRoutes.mapNotNull { eventId ->
+            synchronized(pendingLocalRoutes) { pendingLocalRoutes.mapNotNull { eventId ->
                 (pending + delivered).firstOrNull {
                     it.id == eventId && it.distinctId == distinctId
                 }
-            }
+            } }
         override suspend fun markLocalRouteDelivered(eventId: String) {
+            check(!failRouteAcknowledgement) { "Receipt acknowledgement failed" }
             pendingLocalRoutes -= eventId
         }
         override suspend fun pendingBatch(limit: Int): List<StoredEvent> = pending.take(limit)
@@ -179,6 +184,91 @@ class EventLogTest {
         sessionIdProvider = sessionIdProvider,
     ).also { eventLog ->
         eventLog.subscribeForwarding(isEnabled = forwardingEnabled) {}
+    }
+
+    @Test fun deadlineSharesCaptureOrderAndRoutingHoldWithoutBecomingAnEvent() = runBlocking {
+        val store = RecordingStore()
+        val log = log(store, forwardingEnabled = { true })
+        val observed = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val ordinary = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val forwarded = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val inserting = CompletableDeferred<Unit>()
+        val finishInsert = CompletableDeferred<Unit>()
+        store.beforeInsert = { inserting.complete(Unit); finishInsert.await() }
+        log.subscribeCommitted { ordinary += it.name; observed += it.name }
+        log.subscribeForwarding { forwarded += it.name }
+        log.setJourneyDeadlineHandler { observed += "deadline"; true }
+        val hold = log.deferCommittedRouting()
+        log.capture("in_window")
+        try {
+            withTimeout(5_000L) { inserting.await() }
+            log.enqueueJourneyDeadline(JourneyDeadline("anon-1", "run", "wait", 0L, 1_000L))
+            log.capture("later")
+            finishInsert.complete(Unit)
+            log.awaitBarrier()
+            assertTrue(observed.isEmpty())
+            log.releaseCommittedRouting(hold)
+            log.awaitBarrier()
+            assertEquals(listOf("in_window", "deadline", "later"), observed.toList())
+            assertEquals(listOf("in_window", "later"), ordinary.toList())
+            assertEquals(ordinary.toList(), forwarded.toList())
+            assertEquals(ordinary.toList(), store.pending.map { it.name })
+        } finally { finishInsert.complete(Unit); log.closeWorkers() }
+    }
+
+    @Test fun failedHeadRetainsDeadlinePositionAndRetriesWithoutAnotherCapture() = runBlocking {
+        val log = log(RecordingStore())
+        val observed = java.util.concurrent.CopyOnWriteArrayList<String>()
+        var attempts = 0
+        log.subscribeCommittedWithAdmission(sampleGeneration = { 1L }) { event, _ ->
+            if (event.name == "earlier" && ++attempts == 1) false
+            else { observed += event.name; true }
+        }
+        log.setJourneyDeadlineHandler { observed += "deadline"; true }
+        log.capture("earlier")
+        log.enqueueJourneyDeadline(JourneyDeadline("anon-1", "run", "wait", null, 0L))
+        log.capture("later")
+        log.awaitBarrier()
+        assertTrue(observed.isEmpty())
+        withTimeout(5_000L) { while (observed.size < 3) delay(10) }
+        assertEquals(listOf("earlier", "deadline", "later"), observed.toList())
+        log.closeWorkers()
+    }
+
+    @Test fun unavailableDeadlineIsConsumedWithoutBlockingLaterEvents() = runBlocking {
+        val log = log(RecordingStore())
+        val observed = java.util.concurrent.CopyOnWriteArrayList<String>()
+        log.setJourneyDeadlineHandler { observed += "unavailable-deadline"; false }
+        log.subscribeCommitted { observed += it.name }
+        log.enqueueJourneyDeadline(JourneyDeadline("anon-1", "run", "wait", null, 0L))
+        log.capture("later")
+        log.awaitBarrier()
+        assertEquals(listOf("unavailable-deadline", "later"), observed.toList())
+        log.closeWorkers()
+    }
+
+    @Test fun deadlinesAndLaterEventsPassDeliveredReceiptsWhoseAcknowledgementFails() = runBlocking {
+        // Android stages ordinary and stable local receipts in the same table.
+        for (stable in listOf(false, true)) {
+            val store = RecordingStore().also { it.failRouteAcknowledgement = true }
+            val log = log(store)
+            val observed = java.util.concurrent.CopyOnWriteArrayList<String>()
+            log.subscribeCommitted { observed += it.name }
+            log.setJourneyDeadlineHandler { observed += "deadline"; true }
+            if (stable) assertTrue(log.captureIdempotently("earlier", emptyMap(), "earlier", "anon-1"))
+            else log.capture("earlier")
+            log.enqueueJourneyDeadline(JourneyDeadline("anon-1", "run", "wait", null, 0L))
+            log.capture("later")
+            log.awaitBarrier()
+            val order = listOf("earlier", "deadline", "later")
+            assertEquals(order, observed.toList())
+            assertTrue(store.pendingLocalRoutes.isNotEmpty())
+            store.failRouteAcknowledgement = false
+            // No barrier, capture or recovery call rescues acknowledgement cleanup.
+            withTimeout(5_000L) { while (store.pendingLocalRoutes.isNotEmpty()) delay(10) }
+            assertEquals(order, observed.toList())
+            log.closeWorkers()
+        }
     }
 
     @Test fun authoredOriginSurvivesRedactionRoutingReopenAndDelivery(): Unit = runBlocking {
@@ -595,11 +685,11 @@ class EventLogTest {
     fun rejectedAdmissionKeepsOrdinaryRoutePendingForReplay() = runBlocking {
         val store = RecordingStore()
         val eventLog = log(store)
-        var accepts = false
+        val accepts = java.util.concurrent.atomic.AtomicBoolean(false)
         var attempts = 0
         eventLog.subscribeCommittedWithAdmission(sampleGeneration = { 1L }) { _, _ ->
             attempts += 1
-            accepts
+            accepts.get()
         }
 
         eventLog.capture("offline-trigger")
@@ -608,13 +698,10 @@ class EventLogTest {
         assertEquals(1, attempts)
         assertEquals(1, store.pendingLocalRoutes.size)
 
-        assertFalse(eventLog.replayPendingLocalRoutes("anon-1"))
-
-        accepts = true
-        assertTrue(eventLog.replayPendingLocalRoutes("anon-1"))
-
-        assertEquals(3, attempts)
-        assertTrue(store.pendingLocalRoutes.isEmpty())
+        // Recovery excludes the live head; its one-second timer owns delivery.
+        accepts.set(true)
+        withTimeout(5_000L) { while (store.pendingLocalRoutes.isNotEmpty()) delay(10) }
+        assertEquals(2, attempts)
     }
 
     @Test

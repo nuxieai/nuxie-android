@@ -65,6 +65,27 @@ class JourneyRunJournalTest {
         Unit
     }
 
+    @Test fun `timed resume saves outlet with checkpoint consumption or retains park on failure`() {
+        var failWrite = false
+        val journal = JourneyRunJournal(directory, "customer", beforePersist = { check(!failWrite) { "write failed" } })
+        val run = requireNotNull(journal.admit(arm(), JourneyFrequency.EveryMatch, "wait", 100_000L))
+        journal.markStartedQueued(run)
+        journal.transition(run.id, "wait", run.context, JourneyControlExecutor.Checkpoint(100_000L, 200_000L))
+        val park = requireNotNull(journal.runs().single().park)
+        failWrite = true
+        assertTrue(runCatching {
+            journal.resumeParked(run.id, "wait", park, advancingTo = "timeout" to run.context)
+        }.isFailure)
+        val retained = JourneyRunJournal(directory, "customer").runs().single()
+        assertEquals("wait", retained.stepId)
+        assertEquals(park, retained.park)
+        failWrite = false
+        assertNotNull(journal.resumeParked(run.id, "wait", park, advancingTo = "timeout" to run.context))
+        val consumed = JourneyRunJournal(directory, "customer").runs().single()
+        assertEquals("timeout", consumed.stepId)
+        assertNull(consumed.park)
+    }
+
     @Test fun `derived form answers are never persisted as journey context`() {
         val journal = JourneyRunJournal(directory, "customer")
         val run = requireNotNull(journal.admit(arm(), JourneyFrequency.OneTime, "wait", 100))

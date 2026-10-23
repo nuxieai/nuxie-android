@@ -3,6 +3,7 @@ package ai.nuxie.sdk.journey
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.events.EventLog
+import ai.nuxie.sdk.events.JourneyDeadline
 import ai.nuxie.sdk.events.NuxieContextBuilder
 import ai.nuxie.sdk.events.SQLiteEventStore
 import ai.nuxie.sdk.events.StoredEvent
@@ -13,6 +14,7 @@ import ai.nuxie.sdk.experiences.JourneyReleaseSupportedRuntime
 import ai.nuxie.sdk.fixtures.FixtureRunner
 import ai.nuxie.sdk.identity.IdentityProvider
 import ai.nuxie.sdk.network.ProfileDeliveryAuthority
+import ai.nuxie.sdk.util.IsoDates
 import android.util.Base64
 import java.io.File
 import java.security.KeyPairGenerator
@@ -22,14 +24,18 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.addJsonObject
@@ -88,6 +94,646 @@ class JourneyRefetchEventHoldTest {
         runBlocking { launches.toList().forEach { it.close() } }
         scope.cancel()
         directory.deleteRecursively()
+    }
+
+    @Test fun `failed journal inspection retries a head without any park or deadline`() = runBlocking {
+        val failing = java.util.concurrent.atomic.AtomicBoolean(false)
+        val head = CopyOnWriteArrayList<Boolean>()
+        val later = CopyOnWriteArrayList<Boolean>()
+        val launch = Launch("customer", readRuns = { journal ->
+            check(!failing.get()) { "journal unavailable" }; journal.runs()
+        }, afterJourney = { event, accepted ->
+            if (event.name == "ordinary") head += accepted
+            if (event.name == "later") later += accepted
+        })
+        val snapshot = launch.copy("customer", 1, "start_waiting")
+        launch.start(); launch.commit("customer", snapshot)
+        failing.set(true)
+        launch.eventLog.capture("ordinary")
+        launch.eventLog.capture("later")
+        withTimeout(5_000L) { while (head.size < 3) delay(10) }
+        assertTrue(head.all { !it })
+        assertTrue(later.isEmpty())
+        assertEquals(listOf("ordinary", "later"), launch.store.queryPendingLocalRoutes("customer").map { it.name })
+        failing.set(false)
+        // Only the route retry timer can release this head, with no timed runs.
+        withTimeout(5_000L) { while (later.isEmpty()) delay(10) }
+        assertEquals(true, head.last())
+        assertEquals(listOf(true), later.toList())
+        launch.eventLog.awaitBarrier()
+        assertTrue(launch.journal().runs().isEmpty())
+        assertTrue(launch.store.queryPendingLocalRoutes("customer").isEmpty())
+    }
+
+    @Test fun `future screenless deadline runs in background without another event`() = runBlocking {
+        val sleeper = WakeSleeper()
+        val launch = Launch("customer", dropJourneyStarted = true, sleep = sleeper::sleep)
+        val snapshot = launch.copy("customer", 1, "start_waiting", waitSteps(maxTimeMillis = 500L))
+        launch.start(); launch.commit("customer", snapshot); launch.track("start_waiting")
+        launch.journeys.onAppDidEnterBackground()
+        withTimeout(5_000L) { while (500L !in sleeper.pendingDurations) delay(10) }
+        launch.clock.addAndGet(500L)
+        sleeper.complete(500L)
+        withTimeout(5_000L) { while (launch.outcomes("customer", "timed_out") == 0) delay(10) }
+        assertEquals(1, launch.outcomes("customer", "timed_out"))
+        assertTrue(launch.store.pendingBatch(100).none { it.name == JourneyEventNames.LEG_STARTED })
+    }
+
+    @Test fun `deadline failures are consumed and retry from the durable park`() = runBlocking {
+        for (failure in listOf("read", "write", "native")) {
+            directory.deleteRecursively()
+            context.getSharedPreferences("nuxie_journey_release_high_water", 0).edit().clear().commit()
+            val sleeper = WakeSleeper()
+            val armed = java.util.concurrent.atomic.AtomicBoolean(false)
+            val failedWrite = java.util.concurrent.atomic.AtomicBoolean(false)
+            val launch = Launch("customer", sleep = sleeper::sleep,
+                readRuns = { journal -> check(failure != "read" || !armed.get()); journal.runs() },
+                readValues = { values -> check(failure != "native" || !armed.get()); values.journeyValues() },
+                beforePersist = { if (failure == "write" && armed.get() && !failedWrite.getAndSet(true)) error("write failed") })
+            val snapshot = launch.copy("customer", 1, "start_waiting", waitSteps(maxTimeMillis = 500L))
+            launch.start(); launch.commit("customer", snapshot); launch.track("start_waiting")
+            val parked = launch.journal().runs().single()
+            val controls = CopyOnWriteArrayList<Boolean>()
+            launch.eventLog.setJourneyDeadlineHandler { deadline ->
+                launch.journeys.handleJourneyDeadline(deadline).also { controls += it }
+            }
+            armed.set(true)
+            launch.clock.addAndGet(1_000L)
+            launch.eventLog.enqueueJourneyDeadline(deadline(parked))
+            launch.eventLog.awaitBarrier()
+            assertEquals(listOf(true), controls.toList())
+            assertEquals(parked.park, launch.journal().runs().single().park)
+            if (failure == "write") assertTrue(failedWrite.get())
+            // A later event passes the consumed control even while the park is unavailable.
+            launch.eventLog.capture(JourneyEventNames.LEG_STARTED)
+            launch.eventLog.awaitBarrier()
+            assertTrue(launch.store.queryPendingLocalRoutes("customer").isEmpty())
+            armed.set(false)
+            val retry = if (failure == "native") 5_000L else 1_000L
+            launch.clock.addAndGet(retry)
+            withTimeout(5_000L) {
+                while (launch.outcomes("customer", "timed_out") == 0) {
+                    sleeper.complete(retry)
+                    delay(10)
+                }
+            }
+            assertEquals(1, launch.outcomes("customer", "timed_out"))
+            launch.close()
+        }
+    }
+
+    @Test fun `background rendered deadline skips failing native reads and lets later events through`() = runBlocking {
+        val failing = java.util.concurrent.atomic.AtomicBoolean(false)
+        val reads = java.util.concurrent.atomic.AtomicInteger()
+        val delivered = CopyOnWriteArrayList<Boolean>()
+        val launch = Launch("customer", withScreens = true, readValues = { values ->
+            reads.incrementAndGet(); check(!failing.get()); values.journeyValues()
+        }, afterJourney = { event, accepted -> if (event.name == "unrelated") delivered += accepted })
+        val snapshot = launch.copy("customer", 1, "start_waiting", waitSteps(maxTimeMillis = 500L))
+        launch.start(); launch.commit("customer", snapshot); launch.track("start_waiting")
+        val parked = launch.journal().runs().single()
+        launch.journeys.onAppDidEnterBackground()
+        val before = reads.get()
+        failing.set(true)
+        launch.clock.addAndGet(1_000L)
+        launch.eventLog.enqueueJourneyDeadline(deadline(parked))
+        launch.eventLog.awaitBarrier()
+        assertEquals(before, reads.get())
+        launch.track("unrelated")
+        assertEquals(listOf(true), delivered.toList())
+        assertTrue(launch.store.queryPendingLocalRoutes("customer").isEmpty())
+        failing.set(false)
+        // A separate screenless release can still start and finish in the background.
+        val screenless = launch.copy("customer", 2, "start_screenless", waitSteps(maxTimeMillis = 500L), screens = false)
+        launch.commit("customer", screenless)
+        launch.clock.addAndGet(800L)
+        assertTrue(launch.journeys.handleEvent(StoredEvent("screenless-trigger", "start_screenless",
+            timestampMillis = launch.clock.get() - 800L, distinctId = "customer"), launch.journeys.eventAdmissionGeneration()))
+        launch.eventLog.awaitBarrier()
+        assertEquals(1, launch.outcomes("customer", "timed_out"))
+        assertTrue(launch.journal().runs().any { it.id == parked.id && it.park != null })
+        launch.clock.addAndGet(5_000L)
+        launch.journeys.onAppWillEnterForeground()
+        launch.eventLog.awaitBarrier()
+        assertEquals(2, launch.outcomes("customer", "timed_out"))
+    }
+
+    @Test fun `replacing a failed recovery journal clears enqueued deadline markers`() = runBlocking {
+        val queued = CopyOnWriteArrayList<JourneyDeadline>()
+        var failRecovery = true
+        lateinit var launch: Launch
+        launch = Launch("customer", enqueueDeadline = { queued += it }, replay = {
+            if (failRecovery) {
+                launch.journeys.handleEvent(StoredEvent("recovery-trigger", "start_waiting",
+                    timestampMillis = launch.clock.get() - 1_000L, distinctId = "customer"),
+                    launch.journeys.eventAdmissionGeneration())
+                false
+            } else true
+        })
+        val snapshot = launch.copy("customer", 1, "start_waiting", waitSteps(maxTimeMillis = 500L))
+        launch.start()
+        launch.commit("customer", snapshot)
+        assertEquals(1, queued.size)
+        failRecovery = false
+        launch.commit("customer", snapshot)
+        assertEquals(2, queued.size)
+        assertEquals(queued.first(), queued.last())
+        assertTrue(launch.journeys.handleJourneyDeadline(queued.last()))
+        assertEquals(1, launch.outcomes("customer", "timed_out"))
+    }
+
+    @Test fun `a stale deadline cannot consume a moved on checkpoint`() = runBlocking {
+        val sleeper = WakeSleeper()
+        val launch = Launch("customer", sleep = sleeper::sleep)
+        val first = waitSteps(maxTimeMillis = 500L).first().jsonObject
+        val second = waitSteps(eventName = "finish", maxTimeMillis = 2_000L).first().jsonObject
+        val steps = JsonArray(listOf(JsonObject(first + ("outlets" to buildJsonObject {
+            put("satisfied", "second_wait"); put("timeout", "timed_out")
+        }))) + waitSteps().drop(1) + JsonObject(second + ("id" to JsonPrimitive("second_wait"))))
+        val snapshot = launch.copy("customer", 1, "start_waiting", steps)
+        launch.start(); launch.commit("customer", snapshot); launch.track("start_waiting")
+        val stale = deadline(launch.journal().runs().single())
+        launch.clock.addAndGet(250L)
+        launch.track("go")
+        val current = launch.journal().runs().single()
+        assertEquals("second_wait", current.stepId)
+        launch.clock.addAndGet(500L)
+        assertTrue(launch.journeys.handleJourneyDeadline(stale))
+        assertEquals(current.park, launch.journal().runs().single().park)
+        assertEquals(0, launch.outcomes("customer", "timed_out"))
+        launch.clock.addAndGet(2_000L)
+        assertTrue(launch.journeys.handleJourneyDeadline(deadline(current)))
+        assertEquals(1, launch.outcomes("customer", "timed_out"))
+    }
+
+    @Test fun `restart recreates overdue deadlines after recovery replay`() = runBlocking {
+        for (followUp in listOf(true, false)) {
+            directory.deleteRecursively()
+            context.getSharedPreferences("nuxie_journey_release_high_water", 0).edit().clear().commit()
+            val initial = Launch("customer", sleep = WakeSleeper()::sleep)
+            val snapshot = initial.copy("customer", 1, "start_waiting", waitSteps(maxTimeMillis = 500L))
+            initial.start(); initial.commit("customer", snapshot); initial.track("start_waiting")
+            val parked = initial.journal().runs().single()
+            if (followUp) initial.store.insertPendingIfAbsentAndStageRoute(StoredEvent(
+                "restart-go", "go", timestampMillis = initial.clock.get() + 100L, distinctId = "customer"))
+            initial.close()
+            val recovered = Launch("customer")
+            recovered.copy("customer", 1, "start_waiting", waitSteps(maxTimeMillis = 500L))
+            recovered.clock.set(parked.startedAtMillis + 1_000L)
+            recovered.start()
+            recovered.eventLog.awaitBarrier()
+            val outcome = if (followUp) "took_go" else "timed_out"
+            assertEquals(1, recovered.outcomes("customer", outcome))
+            assertTrue(recovered.store.queryPendingLocalRoutes("customer").isEmpty())
+            recovered.close()
+        }
+    }
+
+    private fun deadline(run: JourneyRun): JourneyDeadline {
+        val park = requireNotNull(run.park)
+        return JourneyDeadline("customer", run.id, run.stepId, park.anchorAtMillis, requireNotNull(park.wakeAtMillis))
+    }
+
+    @Test fun `overdue screenless waits and delays catch up in background when started is dropped`() = runBlocking {
+        for (step in listOf(waitSteps(maxTimeMillis = 500L).first().jsonObject, delayStep(500L))) {
+            directory.deleteRecursively()
+            context.getSharedPreferences("nuxie_journey_release_high_water", 0).edit().clear().commit()
+            val sleeper = WakeSleeper()
+            lateinit var launch: Launch
+            launch = Launch("customer", dropJourneyStarted = true, sleep = sleeper::sleep, beforeJourney = { event ->
+                if (event.name == "start_waiting") launch.clock.addAndGet(800L)
+            })
+            val snapshot = launch.copy("customer", 1, "start_waiting", JsonArray(listOf(step) + waitSteps().drop(1)))
+            launch.start()
+            launch.commit("customer", snapshot)
+            launch.journeys.onAppDidEnterBackground()
+            launch.track("start_waiting")
+            assertTrue(launch.store.pendingBatch(100).none { it.name == JourneyEventNames.LEG_STARTED })
+            // Parking itself enqueues the overdue checkpoint, with no later activity.
+            val outcome = if (step.getValue("id").jsonPrimitive.content == "delay") "took_go" else "timed_out"
+            withTimeout(5_000L) { while (launch.outcomes("customer", outcome) == 0) delay(10) }
+            launch.eventLog.awaitBarrier()
+            assertEquals(1, launch.outcomes("customer", outcome))
+            assertEquals(1_000_800L, launch.clock.get())
+            launch.close()
+        }
+    }
+
+    @Test fun `an overdue Journey with screens keeps background catch-up closed`() = runBlocking {
+        val sleeper = WakeSleeper()
+        val preparing = CompletableDeferred<Unit>()
+        val releasePreparation = CompletableDeferred<Unit>()
+        var firstPreparation = true
+        lateinit var launch: Launch
+        launch = Launch("customer", withScreens = true, dropJourneyStarted = true, sleep = sleeper::sleep,
+            prepare = {
+                if (firstPreparation) {
+                    firstPreparation = false
+                    preparing.complete(Unit)
+                    releasePreparation.await()
+                }
+            }, beforeJourney = { event ->
+                if (event.name == "start_waiting") launch.clock.addAndGet(800L)
+            })
+        val snapshot = launch.copy("customer", 1, "start_waiting", waitSteps(maxTimeMillis = 500L))
+        launch.start()
+        launch.commit("customer", snapshot)
+        launch.eventLog.capture("start_waiting")
+        try {
+            withTimeout(5_000L) {
+                preparing.await()
+                // Admission happened in the foreground. Change visibility while
+                // preparation is suspended, before its overdue park is saved.
+                launch.journeys.onAppVisibilityChanged(false)
+                val backgrounding = async(start = CoroutineStart.UNDISPATCHED) { launch.journeys.settleAppBackground() }
+                releasePreparation.complete(Unit)
+                backgrounding.await()
+                launch.eventLog.awaitBarrier()
+            }
+            assertEquals(1_000_500L, launch.journal().runs().single().park?.wakeAtMillis)
+            assertTrue(0L !in sleeper.pendingDurations)
+            assertEquals(0, launch.outcomes("customer", "timed_out"))
+            assertTrue(launch.store.pendingBatch(100).none { it.name == JourneyEventNames.LEG_STARTED })
+
+            launch.journeys.onAppWillEnterForeground()
+            launch.eventLog.awaitBarrier()
+            assertEquals(1, launch.outcomes("customer", "timed_out"))
+        } finally { releasePreparation.complete(Unit) }
+    }
+
+    @Test fun `initial park survives native preparation failure for waits and delays`() = runBlocking {
+        for (step in listOf(waitSteps().first().jsonObject, delayStep())) {
+            directory.deleteRecursively()
+            context.getSharedPreferences("nuxie_journey_release_high_water", 0).edit().clear().commit()
+            val sleeper = WakeSleeper()
+            var failPreparation = true
+            var preparations = 0
+            lateinit var launch: Launch
+            launch = Launch("customer", sleep = sleeper::sleep, prepare = {
+                preparations++
+                check(!failPreparation) { "native preparation failed" }
+            }, beforeJourney = { event ->
+                if (event.name == "start_waiting") launch.clock.set(1_000_800L)
+            })
+            val snapshot = launch.copy("customer", 1, "start_waiting", JsonArray(listOf(step) + waitSteps().drop(1)))
+            launch.start()
+            launch.commit("customer", snapshot)
+            // Captured at 0 ms, handled 800 ms late, with no native reads
+            // before the initial park tries and fails to prepare its values.
+            launch.track("start_waiting")
+            val parked = launch.journal().runs().single()
+            assertTrue(preparations > 0)
+            assertEquals(step.getValue("id").jsonPrimitive.content, parked.stepId)
+            assertEquals(1_000_000L, parked.park?.anchorAtMillis)
+            assertEquals(1_060_000L, parked.park?.wakeAtMillis)
+            assertTrue(parked.completion == null)
+            assertTrue(launch.store.queryPendingLocalRoutes("customer").isEmpty())
+            // A fresh journal must retain the checkpoint rather than abandon
+            // an admitted run with no recovery cursor.
+            assertEquals(parked.park, launch.journal().recover(launch.clock.get()).single().park)
+
+            val attemptsBeforeRetry = preparations
+            withTimeout(5_000L) { while (5_000L !in sleeper.pendingDurations) delay(10) }
+            failPreparation = false
+            launch.clock.addAndGet(5_000L)
+            sleeper.complete(5_000L)
+            // Only the retry timer enters the future checkpoint. Its original
+            // deadline timer must then be restored, with 54.2 seconds left.
+            withTimeout(5_000L) { while (54_200L !in sleeper.pendingDurations) delay(10) }
+            assertTrue(preparations > attemptsBeforeRetry)
+            assertEquals(parked.park, launch.journal().runs().single().park)
+            assertEquals(1, launch.starts("customer"))
+
+            launch.clock.set(1_060_800L)
+            if (step.getValue("id").jsonPrimitive.content == "wait") {
+                assertTrue(launch.journeys.handleEvent(StoredEvent("held-follow-up", "go",
+                    timestampMillis = 1_000_100L, distinctId = "customer"), launch.journeys.eventAdmissionGeneration()))
+            } else launch.journeys.onAppWillEnterForeground()
+            launch.eventLog.awaitBarrier()
+            assertEquals(1, launch.outcomes("customer", "took_go"))
+            assertEquals(0, launch.outcomes("customer", "timed_out"))
+            launch.close()
+        }
+    }
+
+    @Test fun `a failed journal inspection keeps the follow-up route replayable and retries`() = runBlocking {
+        val failInspection = java.util.concurrent.atomic.AtomicBoolean(false)
+        val deliveries = CopyOnWriteArrayList<Boolean>()
+        lateinit var launch: Launch
+        launch = Launch("customer", readRuns = { journal ->
+            check(!failInspection.get()) { "journal inspection failed" }
+            journal.runs()
+        }, afterJourney = { event, accepted ->
+            if (event.id == "replayable-follow-up") deliveries += accepted
+        })
+        val snapshot = launch.copy("customer", 1, "start_waiting", waitSteps(maxTimeMillis = 500L))
+        launch.start()
+        launch.commit("customer", snapshot)
+        launch.track("start_waiting")
+        launch.clock.addAndGet(100L)
+        failInspection.set(true)
+        assertTrue(launch.eventLog.captureIdempotently("go", emptyMap(), "replayable-follow-up", "customer"))
+        launch.eventLog.awaitBarrier()
+
+        assertTrue(deliveries.isNotEmpty() && deliveries.all { !it })
+        assertTrue(launch.store.queryPendingLocalRoutes("customer").any { it.id == "replayable-follow-up" })
+        assertTrue(launch.journal().runs().single().park?.candidateEvents?.isEmpty() == true)
+
+        failInspection.set(false)
+        launch.clock.addAndGet(700L)
+        // The route timer replays after the deadline, offering the captured
+        // 100 ms event to its saved window without another capture or lifecycle call.
+        withTimeout(5_000L) { while (deliveries.lastOrNull() != true) delay(10) }
+        launch.eventLog.awaitBarrier()
+        assertEquals(true, deliveries.last())
+        assertTrue(deliveries.dropLast(1).all { !it })
+        assertTrue(launch.store.queryPendingLocalRoutes("customer").isEmpty())
+        assertEquals(1, launch.outcomes("customer", "took_go"))
+        assertEquals(0, launch.outcomes("customer", "timed_out"))
+    }
+
+    @Test fun `queued live event timeout vectors`() = runBlocking {
+        val vectors = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
+            .resolve("sdk/committed-event-timeout-order.json").readText()).jsonObject.getValue("cases").jsonArray
+        assertTrue(vectors.isNotEmpty())
+        for (vector in vectors.map { it.jsonObject }) {
+            directory.deleteRecursively()
+            context.getSharedPreferences("nuxie_journey_release_high_water", 0).edit().clear().commit()
+            val name = vector.getValue("name").jsonPrimitive.content
+            val trigger = vector.getValue("trigger").jsonObject
+            val followUp = vector["followUp"] as? JsonObject
+            val preparing = CompletableDeferred<Unit>()
+            val releasePreparation = CompletableDeferred<Unit>()
+            val origin = 1_000_000L
+            var firstPreparation = true
+            lateinit var launch: Launch
+            launch = Launch("customer", prepare = {
+                if (firstPreparation) {
+                    firstPreparation = false
+                    preparing.complete(Unit)
+                    releasePreparation.await()
+                }
+            }, afterJourney = { event, accepted ->
+                if (accepted && event.name == trigger.getValue("name").jsonPrimitive.content) {
+                    // The trigger still occupies EventLog's route worker.
+                    // Activation queues the deadline behind the accepted follow-up.
+                    launch.journeys.onAppWillEnterForeground()
+                    if (followUp != null) assertEquals(name, 0, launch.outcomes("customer", "timeout"))
+                }
+            }, beforeJourney = { event ->
+                if (event.name == trigger.getValue("name").jsonPrimitive.content) {
+                    launch.clock.set(origin + trigger.getValue("handledAtMillis").jsonPrimitive.long)
+                }
+            })
+            val snapshot = launch.copy("customer", 1, trigger.getValue("name").jsonPrimitive.content,
+                waitSteps(vector.getValue("waitEventName").jsonPrimitive.content,
+                    vector.getValue("waitMaxTimeMillis").jsonPrimitive.long, "satisfied", "timeout"))
+            launch.start()
+            launch.commit("customer", snapshot)
+            launch.clock.set(origin + trigger.getValue("atMillis").jsonPrimitive.long)
+            launch.eventLog.capture(trigger.getValue("name").jsonPrimitive.content)
+            try {
+                withTimeout(5_000L) {
+                    preparing.await()
+                    if (followUp != null) {
+                        launch.clock.set(origin + followUp.getValue("atMillis").jsonPrimitive.long)
+                        assertTrue(launch.eventLog.captureIdempotently(
+                            followUp.getValue("name").jsonPrimitive.content, emptyMap(), "queued-follow-up", "customer"))
+                        assertTrue(name, launch.store.queryPendingLocalRoutes("customer").any { it.id == "queued-follow-up" })
+                    }
+                    launch.clock.set(origin + vector.getValue("preparationFinishesAtMillis").jsonPrimitive.long)
+                    releasePreparation.complete(Unit)
+                    launch.eventLog.awaitBarrier()
+                    val outcome = vector.getValue("expectedOutcome").jsonPrimitive.content
+                    while (launch.outcomes("customer", outcome) == 0) delay(10)
+                    assertEquals(name, 1, launch.outcomes("customer", outcome))
+                    assertEquals(name, 1, launch.starts("customer"))
+                }
+            } finally { releasePreparation.complete(Unit) }
+            launch.close()
+        }
+    }
+
+    @Test fun `an empty routing hold release catches up without another event`() = runBlocking {
+        val launch = Launch("customer")
+        val snapshot = launch.copy("customer", 1, "start_waiting", waitSteps(maxTimeMillis = 500L))
+        launch.start(); launch.commit("customer", snapshot); launch.track("start_waiting")
+        val held = launch.eventLog.deferCommittedRouting()
+        launch.clock.addAndGet(1_000L)
+        launch.journeys.onAppWillEnterForeground()
+        assertEquals(0, launch.outcomes("customer", "timed_out"))
+        launch.journeys.onAppDidEnterBackground()
+        // Releasing the hold delivers its queued deadline without another capture.
+        launch.eventLog.releaseCommittedRouting(held)
+        launch.eventLog.awaitBarrier()
+        assertEquals(1, launch.outcomes("customer", "timed_out"))
+    }
+
+    @Test fun `expired screenless waits and delays advance on a background event`() = runBlocking {
+        for (step in listOf(waitSteps(maxTimeMillis = 500L).first().jsonObject, delayStep(500L))) {
+            directory.deleteRecursively()
+            context.getSharedPreferences("nuxie_journey_release_high_water", 0).edit().clear().commit()
+            lateinit var launch: Launch
+            launch = Launch("customer", beforeJourney = { event ->
+                if (event.name == "background_tick") launch.clock.set(1_002_000L)
+            })
+            val snapshot = launch.copy("customer", 1, "start_waiting", JsonArray(listOf(step) + waitSteps().drop(1)))
+            launch.start(); launch.commit("customer", snapshot); launch.track("start_waiting")
+            launch.journeys.onAppDidEnterBackground()
+            // Captured before the deadline, handled after it in the background.
+            // This event must cause a queued catch-up even though its own time is early.
+            launch.clock.addAndGet(100L)
+            launch.track("background_tick")
+            val outcome = if (step.getValue("id").jsonPrimitive.content == "delay") "took_go" else "timed_out"
+            assertEquals(1, launch.outcomes("customer", outcome))
+            launch.close()
+        }
+    }
+
+    /** Both app events use the real first-launch hold and durable route replay. */
+    @Test fun `held event time vectors`() = runBlocking {
+        val vectors = Json.parseToJsonElement(
+            FixtureRunner.fixturesRoot().resolve("sdk/held-event-time.json").readText(),
+        ).jsonObject.getValue("cases").jsonArray
+        assertTrue(vectors.isNotEmpty())
+        for (vector in vectors.map { it.jsonObject }) {
+            val name = vector.getValue("name").jsonPrimitive.content
+            assertEquals(name, "first-launch", vector.getValue("hold").jsonPrimitive.content)
+            directory.deleteRecursively()
+            context.getSharedPreferences("nuxie_journey_release_high_water", 0).edit().clear().commit()
+            val journey = vector.getValue("journey").jsonObject
+            val trigger = journey.getValue("triggerEvent").jsonPrimitive.content
+            val wait = journey.getValue("wait").jsonObject
+            val expected = vector.getValue("expected").jsonObject
+            val origin = 1_000_000L
+            val handledAt = origin + vector.getValue("copyArrivesAtMillis").jsonPrimitive.long
+            var observed: JourneyRun? = null
+            val replayPaused = CompletableDeferred<Unit>()
+            val releaseReplay = CompletableDeferred<Unit>()
+            lateinit var launch: Launch
+            launch = Launch("customer", firstLaunch = true, afterJourney = { event, accepted ->
+                if (event.name == trigger && accepted) {
+                    observed = launch.journal().runs().single()
+                    replayPaused.complete(Unit)
+                    releaseReplay.await()
+                }
+            })
+            launch.start()
+            for (event in vector.getValue("events").jsonArray.map { it.jsonObject }) {
+                launch.clock.set(origin + event.getValue("atMillis").jsonPrimitive.long)
+                launch.track(event.getValue("name").jsonPrimitive.content)
+            }
+            assertEquals(name, 0, launch.starts("customer"))
+            assertEquals(name, 2, launch.store.queryPendingLocalRoutes("customer").size)
+            launch.clock.set(handledAt)
+            val snapshot = launch.copy("customer", 1, trigger, waitSteps(
+                eventName = wait.getValue("eventName").jsonPrimitive.content,
+                maxTimeMillis = wait.getValue("maxTimeMillis").jsonPrimitive.long,
+                satisfied = "satisfied",
+                timeout = "timeout",
+            ))
+            try {
+                withTimeout(5_000L) {
+                    val committing = async { launch.commit("customer", snapshot) }
+                    replayPaused.await()
+                    // Android serializes Journey commands. Queue activation
+                    // between the trigger and follow-up; it and a catch-up wake
+                    // must leave the held follow-up first access to the wait.
+                    val activating = async(start = CoroutineStart.UNDISPATCHED) {
+                        launch.journeys.onAppWillEnterForeground()
+                    }
+                    assertEquals(name, 0, launch.outcomes("customer", "timeout"))
+                    releaseReplay.complete(Unit)
+                    committing.await()
+                    activating.await()
+                    launch.eventLog.awaitBarrier()
+                }
+            } finally {
+                releaseReplay.complete(Unit)
+            }
+
+            val parked = requireNotNull(observed) { name }
+            val anchor = origin + expected.getValue("waitStartedAtMillis").jsonPrimitive.long
+            assertEquals(name, anchor, parked.park?.anchorAtMillis)
+            assertEquals(name, anchor + wait.getValue("maxTimeMillis").jsonPrimitive.long, parked.park?.wakeAtMillis)
+            assertEquals(name, handledAt, parked.startedAtMillis)
+            assertEquals(name, 1, launch.starts("customer"))
+            assertEquals(name, 1, launch.outcomes("customer", expected.getValue("outcome").jsonPrimitive.content))
+            assertEquals(name, 0, launch.outcomes("customer", "timeout"))
+            assertEquals(name, IsoDates.formatMillis(handledAt), launch.report(JourneyEventNames.LEG_STARTED)["started_at"])
+            assertEquals(name, handledAt, launch.store.pendingBatch(100).single {
+                it.id == parked.startedEventId
+            }.timestampMillis)
+            assertTrue(name, launch.store.queryPendingLocalRoutes("customer").isEmpty())
+            launch.close()
+        }
+    }
+
+    @Test fun `event started waits and delays keep the initial lag across steps`() = runBlocking {
+        val handledAt = 1_000_800L
+        for (eventAt in listOf(1_000_000L, handledAt + 1_000L)) {
+            for (timedStep in listOf(waitSteps().first().jsonObject, delayStep())) {
+                directory.deleteRecursively()
+                context.getSharedPreferences("nuxie_journey_release_high_water", 0).edit().clear().commit()
+                lateinit var launch: Launch
+                launch = Launch("customer", dispatcher = JourneyDispatching {
+                    // Async work between the first evaluations must count.
+                    delay(1)
+                    launch.clock.addAndGet(200L)
+                    JourneyDispatchResult.Outlet("next")
+                })
+                val select = Json.parseToJsonElement("""{
+                    "id":"select","kind":"action","action":{"type":"experiment",
+                    "experimentId":"experiment","fallbackVariantId":"variant",
+                    "variants":[{"id":"variant","isHoldout":false}]},"outlets":{"variant":"work"}
+                }""").jsonObject
+                val work = Json.parseToJsonElement("""{
+                    "id":"work","kind":"action","action":{"type":"app_action","name":"work"},
+                    "outlets":{"next":"${timedStep.getValue("id").jsonPrimitive.content}"}
+                }""").jsonObject
+                val steps = JsonArray(listOf(select, work, timedStep) + waitSteps().drop(1))
+                val snapshot = launch.copy("customer", 1, "start_waiting", steps)
+                launch.clock.set(handledAt)
+                launch.start()
+                launch.commit("customer", snapshot)
+                assertTrue(launch.journeys.handleEvent(
+                    StoredEvent("lag-trigger", "start_waiting", timestampMillis = eventAt, distinctId = "customer"),
+                    launch.journeys.eventAdmissionGeneration(),
+                ))
+
+                val run = launch.journal().runs().single()
+                val anchor = handledAt + 200L - (handledAt - eventAt).coerceAtLeast(0L)
+                assertEquals(anchor, run.park?.anchorAtMillis)
+                assertEquals(anchor + 60_000L, run.park?.wakeAtMillis)
+                assertEquals(handledAt, run.startedAtMillis)
+                assertEquals(handledAt, run.experimentExposures.single().selectedAtMillis)
+                assertEquals(IsoDates.formatMillis(handledAt), launch.report(JourneyEventNames.LEG_STARTED)["started_at"])
+                launch.close()
+            }
+        }
+    }
+
+    @Test fun `recovered wait keeps its event anchor and a later delay uses the real clock`() = runBlocking {
+        val initial = Launch("customer")
+        val wait = waitSteps().first().jsonObject
+        val changedWait = JsonObject(wait + ("outlets" to buildJsonObject {
+            put("satisfied", "delay"); put("timeout", "timed_out")
+        }))
+        val steps = JsonArray(listOf(changedWait, delayStep()) + waitSteps().drop(1))
+        val snapshot = initial.copy("customer", 1, "start_waiting", steps)
+        val eventAt = 1_000_000L
+        initial.clock.set(eventAt + 800L)
+        initial.start()
+        initial.commit("customer", snapshot)
+        assertTrue(initial.journeys.handleEvent(
+            StoredEvent("recovery-trigger", "start_waiting", timestampMillis = eventAt, distinctId = "customer"),
+            initial.journeys.eventAdmissionGeneration(),
+        ))
+        initial.close()
+
+        val recovered = Launch("customer")
+        // Bind the new catalog's delivery authority before pinned recovery.
+        recovered.copy("customer", 1, "start_waiting", steps)
+        val later = eventAt + 2_800L
+        recovered.clock.set(later)
+        recovered.start()
+        val saved = recovered.journal().runs().single()
+        assertEquals(eventAt, saved.park?.anchorAtMillis)
+        assertEquals(eventAt + 60_000L, saved.park?.wakeAtMillis)
+        assertTrue(recovered.journeys.handleEvent(
+            StoredEvent("held-go", "go", timestampMillis = eventAt + 100L, distinctId = "customer"),
+            recovered.journeys.eventAdmissionGeneration(),
+        ))
+        val continued = recovered.journal().runs().single()
+        assertEquals("delay", continued.stepId)
+        assertEquals(later, continued.park?.anchorAtMillis)
+        assertEquals(later + 60_000L, continued.park?.wakeAtMillis)
+        assertEquals(0, recovered.starts("customer"))
+    }
+
+    @Test fun `initially overdue delay catches up without another event`() =
+        assertInitiallyOverdueStepCatchesUp(delayStep(500L), "took_go")
+
+    @Test fun `initially overdue wait times out without another event`() =
+        assertInitiallyOverdueStepCatchesUp(waitSteps(maxTimeMillis = 500L).first().jsonObject, "timed_out")
+
+    private fun assertInitiallyOverdueStepCatchesUp(step: JsonObject, outcome: String) = runBlocking {
+        val launch = Launch("customer")
+        val snapshot = launch.copy("customer", 1, "start_waiting", JsonArray(listOf(step) + waitSteps().drop(1)))
+        launch.clock.set(1_000_800L)
+        launch.start()
+        launch.commit("customer", snapshot)
+        assertTrue(launch.journeys.handleEvent(
+            StoredEvent("overdue-trigger", "start_waiting", timestampMillis = 1_000_000L, distinctId = "customer"),
+            launch.journeys.eventAdmissionGeneration(),
+        ))
+        // The clock stays at 800 ms. Only the scheduled wake can rescue it.
+        withTimeout(5_000L) {
+            while (launch.outcomes("customer", outcome) == 0) delay(10)
+        }
+        assertEquals(1, launch.outcomes("customer", outcome))
+        assertEquals(1_000_800L, launch.clock.get())
+        assertEquals(IsoDates.formatMillis(1_000_800L), launch.report(JourneyEventNames.LEG_COMPLETED)["completed_at"])
     }
 
     /** The shared contract, replayed operation by operation. */
@@ -216,7 +862,7 @@ class JourneyRefetchEventHoldTest {
      * An event captured before a wait's deadline but handled after it leaves
      * that timeout to a pass at the current time, which still runs.
      */
-    @Test fun `a late event does not strand a wait that is due`() = runBlocking {
+    @Test fun `a late event resolves an overdue wait when nothing is pending`() = runBlocking {
         val launch = Launch("customer")
         val saved = launch.copy("customer", 1, "start_waiting")
         launch.start()
@@ -228,9 +874,7 @@ class JourneyRefetchEventHoldTest {
             StoredEvent("late-event", "screen_viewed", timestampMillis = capturedAt, distinctId = "customer"),
             launch.journeys.eventAdmissionGeneration(),
         ))
-        withTimeout(5_000L) {
-            while (launch.outcomes("customer", "timed_out") == 0) delay(20)
-        }
+        assertEquals(1, launch.outcomes("customer", "timed_out"))
         assertEquals(0, launch.outcomes("customer", "took_go"))
     }
 
@@ -263,7 +907,7 @@ class JourneyRefetchEventHoldTest {
     }
 
     /**
-     * The copy lands while a go sent during the hold is still in EventLog's
+     * The copy lands while an already accepted go is still in EventLog's
      * route worker. The wait that ran out meanwhile resolves only once that go
      * has reached Journey, so it takes the go.
      */
@@ -280,11 +924,11 @@ class JourneyRefetchEventHoldTest {
         launch.start()
         launch.commit("customer", saved)
         launch.track("start_waiting")
-        launch.journeys.profileRefetchWillBegin("customer")
-        launch.withdraw("customer")
         try {
             launch.eventLog.capture("go")
             withTimeout(5_000L) { goReached.await() }
+            launch.journeys.profileRefetchWillBegin("customer")
+            launch.withdraw("customer")
             launch.clock.addAndGet(70_000L)
 
             // Resolving the wait now would report it through the route worker
@@ -309,23 +953,39 @@ class JourneyRefetchEventHoldTest {
     /** One launch: Journey subscribed to a real EventLog as NuxieCore subscribes it. */
     private inner class Launch(
         distinctId: String,
+        firstLaunch: Boolean = false,
+        dispatcher: JourneyDispatching = JourneyDispatching { JourneyDispatchResult.Unsupported },
+        private val afterJourney: (suspend (StoredEvent, Boolean) -> Unit)? = null,
+        readRuns: suspend (JourneyRunJournal) -> List<JourneyRun> = { it.runs() },
+        readValues: suspend (ai.nuxie.sdk.presentation.ExperienceRunValues) -> JsonObject = { it.journeyValues() },
+        beforePersist: () -> Unit = {},
+        replay: (suspend (String) -> Boolean)? = null,
+        enqueueDeadline: ((JourneyDeadline) -> Unit)? = null,
+        prepare: suspend () -> Unit = {},
+        sleep: suspend (Long) -> Unit = { delay(it) },
+        withScreens: Boolean = false,
+        dropJourneyStarted: Boolean = false,
         /** Runs in EventLog's route worker before Journey sees each event. */
         private val beforeJourney: (suspend (StoredEvent) -> Unit)? = null,
     ) {
+        private val launchScope = CoroutineScope(SupervisorJob(scope.coroutineContext[Job]) + Dispatchers.Default)
+        private val sourceEntry = if (withScreens) releaseFixture.getValue("renderedEntry").jsonObject else entry
         val clock = AtomicLong(1_000_000L)
         val identity = MutableIdentity(distinctId)
-        private val store = SQLiteEventStore(context, nowMillis = { clock.get() })
+        val store = SQLiteEventStore(context, nowMillis = { clock.get() })
         val catalog = JourneyProfileCatalog(
             mapOf(KEY_ID to keys.public.encoded.takeLast(32).toByteArray()),
             JourneyReleaseHighWaterStore(context),
-        ) { runtime() }
+        ) { runtime(sourceEntry) }
         private val reports = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
         val eventLog = EventLog(
             store,
             NuxieContextBuilder(context, NuxieEnvironment.DEVELOPMENT, LogLevel.DEBUG, identity),
             identity,
-            beforeSend = null,
-            scope = scope,
+            beforeSend = { event ->
+                if (dropJourneyStarted && event.name == JourneyEventNames.LEG_STARTED) null else event
+            },
+            scope = launchScope,
             nowMillis = { clock.get() },
         )
         val journeys = JourneyService(
@@ -333,23 +993,32 @@ class JourneyRefetchEventHoldTest {
             events = store,
             catalog = catalog,
             journalDirectory = directory,
-            scope = scope,
+            scope = launchScope,
             capture = { name, properties, eventId, owner ->
                 reports += name to (properties + ("distinct_id" to owner))
                 eventLog.captureIdempotently(name, properties, eventId, owner)
             },
             nowMillis = { clock.get() },
-            replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
-            awaitEventsDrained = eventLog::awaitBarrier,
-            fixedStorageScope = JourneyStorageScope(authority),
+            replayPendingLocalRoutes = replay ?: eventLog::replayPendingLocalRoutes,
+            readNativeValues = readValues,
+            journalBeforePersist = beforePersist,
+            readJournalRuns = readRuns,
+            prepareNativeValues = { _, _, _ -> prepare() },
+            sleepMillis = sleep,
+            enqueueJourneyDeadline = enqueueDeadline ?: eventLog::enqueueJourneyDeadline,
+            deferCommittedRouting = eventLog::deferCommittedRouting,
+            releaseCommittedRouting = eventLog::releaseCommittedRouting,
+            fixedStorageScope = if (firstLaunch) null else JourneyStorageScope(authority),
+            dispatcher = dispatcher,
         )
         private var publication = 0L
 
         init {
             launches += this
             beforeJourney?.let { hook -> eventLog.subscribeCommitted { event -> hook(event) } }
+            eventLog.setJourneyDeadlineHandler(journeys::handleJourneyDeadline)
             eventLog.subscribeCommittedWithAdmission(sampleGeneration = journeys::eventAdmissionGeneration) { event, generation ->
-                journeys.handleEvent(event, generation)
+                journeys.handleEvent(event, generation).also { afterJourney?.invoke(event, it) }
             }
         }
 
@@ -358,13 +1027,20 @@ class JourneyRefetchEventHoldTest {
             journeys.onAppWillEnterForeground()
         }
 
-        /** A signed copy whose Journey starts on [entryEvent] and waits a minute for go. */
-        suspend fun copy(owner: String, sequence: Int, entryEvent: String): JourneyProfileCatalog.Snapshot {
+        /** A signed copy whose Journey starts on [entryEvent] and executes [steps]. */
+        suspend fun copy(
+            owner: String,
+            sequence: Int,
+            entryEvent: String,
+            steps: JsonArray = waitSteps(),
+            screens: Boolean? = null,
+        ): JourneyProfileCatalog.Snapshot {
             val condition = buildJsonObject {
                 put("type", "event")
                 put("eventName", entryEvent)
             }
-            val publication = waitingPublication(sequence, condition)
+            val publication = waitingPublication(sequence, condition, steps,
+                if (screens == false) entry else sourceEntry)
             catalog.commit(owner, catalog.prepare(profile(condition, publication), authority))
             return requireNotNull(catalog.snapshot(owner))
         }
@@ -391,10 +1067,32 @@ class JourneyRefetchEventHoldTest {
                 it.second["outcome"] == outcome
         }
 
+        fun journal() = JourneyRunJournal(directory, identity.distinctId, JourneyStorageScope(authority))
+
+        fun report(name: String) = reports.single { it.first == name }.second
+
         suspend fun close() {
             if (!launches.remove(this)) return
-            eventLog.close()
+            eventLog.closeWorkers()
+            launchScope.cancel()
             store.close()
+        }
+    }
+
+    private class WakeSleeper {
+        private data class Request(val duration: Long, val done: CompletableDeferred<Unit>, val job: Job?)
+        private val requests = CopyOnWriteArrayList<Request>()
+        val pendingDurations: List<Long>
+            get() = requests.filter { it.job?.isActive == true && !it.done.isCompleted }.map { it.duration }
+
+        suspend fun sleep(duration: Long) {
+            val request = Request(duration, CompletableDeferred(), kotlinx.coroutines.currentCoroutineContext()[Job])
+            requests += request
+            try { request.done.await() } finally { requests.remove(request) }
+        }
+
+        fun complete(duration: Long) {
+            requests.filter { it.duration == duration && it.job?.isActive == true }.forEach { it.done.complete(Unit) }
         }
     }
 
@@ -405,8 +1103,39 @@ class JourneyRefetchEventHoldTest {
         override val isIdentified = false
     }
 
-    private fun waitingPublication(sequence: Int, condition: JsonObject): JsonObject {
-        val envelope = entry.getValue("envelope").jsonObject
+    private fun waitSteps(
+        eventName: String = "go",
+        maxTimeMillis: Long = 60_000L,
+        satisfied: String = "took_go",
+        timeout: String = "timed_out",
+    ) = buildJsonArray {
+        addJsonObject {
+            put("id", "wait")
+            put("kind", "action")
+            putJsonObject("action") {
+                put("type", "wait_until")
+                putJsonObject("trigger") { put("kind", "event"); put("eventName", eventName) }
+                putJsonObject("condition") {
+                    put("type", "Truthy")
+                    putJsonObject("value") { put("type", "Boolean"); put("value", true) }
+                }
+                put("maxTimeMs", maxTimeMillis)
+            }
+            putJsonObject("outlets") { put("satisfied", satisfied); put("timeout", timeout) }
+        }
+        addJsonObject { put("id", satisfied); put("kind", "complete"); put("outcome", satisfied) }
+        addJsonObject { put("id", timeout); put("kind", "complete"); put("outcome", timeout) }
+    }
+
+    private fun delayStep(durationMillis: Long = 60_000L) = buildJsonObject {
+        put("id", "delay")
+        put("kind", "action")
+        putJsonObject("action") { put("type", "delay"); put("durationMs", durationMillis) }
+        putJsonObject("outlets") { put("next", "took_go") }
+    }
+
+    private fun waitingPublication(sequence: Int, condition: JsonObject, steps: JsonArray, sourceEntry: JsonObject): JsonObject {
+        val envelope = sourceEntry.getValue("envelope").jsonObject
         val source = Json.parseToJsonElement(Base64.decode(
             envelope.getValue("descriptorBytesBase64").jsonPrimitive.content, Base64.NO_WRAP,
         ).decodeToString()).jsonObject
@@ -421,7 +1150,17 @@ class JourneyRefetchEventHoldTest {
             putJsonArray("eventFields") {}
             putJsonArray("responseFields") {}
         }
+        val experiments = steps.mapNotNull {
+            (it.jsonObject["action"] as? JsonObject)?.takeIf { action ->
+                action["type"] == JsonPrimitive("experiment")
+            }?.get("experimentId")?.jsonPrimitive?.content
+        }.distinct().sorted()
         val leg = JsonObject(source.getValue("leg").jsonObject + mapOf(
+            "facts" to buildJsonObject {
+                putJsonArray("propertyKeys") {}
+                putJsonArray("segmentIds") {}
+                put("experimentIds", JsonArray(experiments.map(::JsonPrimitive)))
+            },
             "entryCondition" to condition,
             "policy" to buildJsonObject {
                 putJsonObject("entry") {
@@ -430,38 +1169,16 @@ class JourneyRefetchEventHoldTest {
                 }
                 putJsonArray("exitWhenAny") {}
             },
-            "entryStepId" to JsonPrimitive("wait"),
+            "entryStepId" to steps.first().jsonObject.getValue("id"),
             "completionOutputs" to buildJsonObject {
-                put("took_go", boundary)
-                put("timed_out", boundary)
-            },
-            "steps" to buildJsonArray {
-                addJsonObject {
-                    put("id", "wait")
-                    put("kind", "action")
-                    putJsonObject("action") {
-                        put("type", "wait_until")
-                        putJsonObject("trigger") {
-                            put("kind", "event")
-                            put("eventName", "go")
-                        }
-                        putJsonObject("condition") {
-                            put("type", "Truthy")
-                            putJsonObject("value") {
-                                put("type", "Boolean")
-                                put("value", true)
-                            }
-                        }
-                        put("maxTimeMs", 60_000)
-                    }
-                    putJsonObject("outlets") {
-                        put("satisfied", "took_go")
-                        put("timeout", "timed_out")
+                for (step in steps.map { it.jsonObject }) {
+                    if (step.getValue("kind").jsonPrimitive.content == "complete") {
+                        put(step.getValue("outcome").jsonPrimitive.content, boundary)
                     }
                 }
-                addJsonObject { put("id", "took_go"); put("kind", "complete"); put("outcome", "took_go") }
-                addJsonObject { put("id", "timed_out"); put("kind", "complete"); put("outcome", "timed_out") }
             },
+            "steps" to steps,
+            "routes" to JsonArray(emptyList()),
         ))
         val descriptor = JsonObject(source + mapOf("identity" to changedIdentity, "leg" to leg))
         val bytes = descriptor.toString().encodeToByteArray()
@@ -470,8 +1187,8 @@ class JourneyRefetchEventHoldTest {
             update(JourneyReleaseLimits.SIGNATURE_DOMAIN.encodeToByteArray() + bytes)
             sign()
         }
-        return JsonObject(entry + mapOf(
-            "locator" to JsonObject(entry.getValue("locator").jsonObject + changedIdentity),
+        return JsonObject(sourceEntry + mapOf(
+            "locator" to JsonObject(sourceEntry.getValue("locator").jsonObject + changedIdentity),
             "envelope" to JsonObject(envelope + mapOf(
                 "descriptorBytesBase64" to JsonPrimitive(Base64.encodeToString(bytes, Base64.NO_WRAP)),
                 "descriptorSizeBytes" to JsonPrimitive(bytes.size),
@@ -488,6 +1205,11 @@ class JourneyRefetchEventHoldTest {
     private fun profile(entryCondition: JsonObject, releaseEntry: JsonObject): JsonObject {
         val locator = releaseEntry.getValue("locator").jsonObject
         val envelope = releaseEntry.getValue("envelope").jsonObject
+        val descriptor = Json.parseToJsonElement(Base64.decode(
+            envelope.getValue("descriptorBytesBase64").jsonPrimitive.content, Base64.NO_WRAP,
+        ).decodeToString()).jsonObject
+        val experiments = descriptor.getValue("leg").jsonObject.getValue("facts").jsonObject
+            .getValue("experimentIds").jsonArray
         return buildJsonObject {
             put("schemaVersion", "nuxie.journey-plane-profile.v2")
             put("status", "ok")
@@ -499,7 +1221,9 @@ class JourneyRefetchEventHoldTest {
             putJsonObject("facts") {
                 putJsonObject("properties") {}
                 putJsonObject("memberships") {}
-                putJsonObject("assignments") {}
+                putJsonObject("assignments") {
+                    experiments.forEach { put(it.jsonPrimitive.content, JsonNull) }
+                }
             }
             put("releases", JsonArray(listOf(releaseEntry)))
             putJsonArray("armedLegs") {
@@ -521,9 +1245,9 @@ class JourneyRefetchEventHoldTest {
         }
     }
 
-    private fun runtime(): JourneyReleaseSupportedRuntime {
+    private fun runtime(sourceEntry: JsonObject): JourneyReleaseSupportedRuntime {
         val descriptor = Json.parseToJsonElement(Base64.decode(
-            entry.getValue("envelope").jsonObject.getValue("descriptorBytesBase64").jsonPrimitive.content,
+            sourceEntry.getValue("envelope").jsonObject.getValue("descriptorBytesBase64").jsonPrimitive.content,
             Base64.NO_WRAP,
         ).decodeToString()).jsonObject
         val requirements = descriptor["requirements"] as? JsonObject

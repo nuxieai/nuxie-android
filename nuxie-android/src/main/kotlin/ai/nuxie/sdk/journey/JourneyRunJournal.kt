@@ -127,6 +127,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
     storageScope: JourneyStorageScope = JourneyStorageScope.testFixture,
     private val ids: TimeBasedEpochGenerator = TimeBasedEpochGenerator.shared,
     private val maximumRunCount: Int = MAX_RUN_COUNT,
+    private val beforePersist: () -> Unit = {},
 ) {
     internal val responseSaveNamespace = storageScope.conversionNamespace
     private val root = File(directory, "journey-state-v2")
@@ -690,11 +691,14 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
     }
 
     /** Consume only the checkpoint observed before asynchronous preparation. */
-    fun resumeParked(id: String, expectedStepId: String, expectedPark: JourneyRun.Park): JourneyRun? = update { state ->
+    fun resumeParked(id: String, expectedStepId: String, expectedPark: JourneyRun.Park,
+        advancingTo: Pair<String, JsonObject>? = null): JourneyRun? = update { state ->
         val run = state.runs[id] ?: return@update null
         if (!run.startedQueued || run.completion != null || run.stepId != expectedStepId ||
             run.park != expectedPark) return@update null
-        run.copy(park = null, nativeSnapshot = null).also { state.runs[id] = it }
+        run.copy(stepId = advancingTo?.first ?: run.stepId,
+            context = advancingTo?.second?.let { JsonObject(it + ("responses" to JsonObject(emptyMap()))) } ?: run.context,
+            park = null, nativeSnapshot = null).also { state.runs[id] = it }
     }
 
     /** Identity teardown blocks admission and retires parked work too. */
@@ -794,6 +798,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
     }
 
     private fun persist(state: Snapshot) {
+        beforePersist()
         val bytes = buildJsonObject {
             put("schemaVersion", JsonPrimitive(VERSION))
             state.responseSaves?.let { put("responseSaves", it.toJson()) }

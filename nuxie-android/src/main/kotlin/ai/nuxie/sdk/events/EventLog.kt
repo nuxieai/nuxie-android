@@ -10,6 +10,17 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+
+/** Process-local control route; durable parks recreate it after recovery replay. */
+internal data class JourneyDeadline(
+    val distinctId: String,
+    val runId: String,
+    val stepId: String,
+    val anchorAtMillis: Long?,
+    val wakeAtMillis: Long,
+)
 
 /**
  * The capture pipeline, ported from the iOS `EventLog` actor:
@@ -38,7 +49,7 @@ internal class EventLog(
     private val contextBuilder: NuxieContextBuilder,
     private val identity: IdentityProvider,
     private val beforeSend: ((NuxieEvent) -> NuxieEvent?)?,
-    scope: CoroutineScope,
+    private val scope: CoroutineScope,
     private val nowMillis: () -> Long = System::currentTimeMillis,
     /** Stamps \$session_id and touches the session; null until sessions exist. */
     private val sessionIdProvider: (() -> String?)? = null,
@@ -127,6 +138,7 @@ internal class EventLog(
             val activityIdentity: ActivityIdentity,
             val done: CompletableDeferred<ServerFactCommitResult>,
         ) : Command
+        data class Deadline(val deadline: JourneyDeadline) : Command
         data class Barrier(val done: CompletableDeferred<Unit>) : Command
     }
 
@@ -138,9 +150,14 @@ internal class EventLog(
     private sealed interface RouteCommand {
         data class Event(
             val event: StoredEvent,
-            val admissionTickets: List<AdmissionTicket>,
+            var admissionTickets: List<AdmissionTicket>,
             val localRouteEventId: String? = null,
+            var nextSubscriber: Int = 0,
+            var nextAdmission: Int = 0,
         ) : RouteCommand
+        data class RecoveryPrefix(val events: List<Event>) : RouteCommand
+        data class Deadline(val deadline: JourneyDeadline) : RouteCommand
+        data object Retry : RouteCommand
         data class Barrier(val done: CompletableDeferred<Unit>) : RouteCommand
     }
 
@@ -159,6 +176,14 @@ internal class EventLog(
     )
     private val failedLocalRouteAcknowledgementIds =
         Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+    private val routingHoldLock = Any()
+    private var routingGeneration = 0L
+    private val routingDeferred = java.util.concurrent.atomic.AtomicBoolean(false)
+    @Volatile private var journeyDeadlineHandler: (suspend (JourneyDeadline) -> Boolean)? = null
+    private val pendingRoutes = ArrayDeque<RouteCommand>()
+    private var routeRetryJob: Job? = null
+    private var acknowledgementRetryJob: Job? = null
+    private val closing = java.util.concurrent.atomic.AtomicBoolean(false)
     private val commitProgress = java.util.concurrent.atomic.AtomicLong(0)
     private val routeProgress = java.util.concurrent.atomic.AtomicLong(0)
     private val forwardingProgress = java.util.concurrent.atomic.AtomicLong(0)
@@ -216,6 +241,7 @@ internal class EventLog(
                         command.activityIdentity,
                     )
                 }.fold(command.done::complete, command.done::completeExceptionally)
+                is Command.Deadline -> routeCommands.trySend(RouteCommand.Deadline(command.deadline))
                 is Command.Barrier -> command.done.complete(Unit)
             }
             if (command !is Command.Barrier) commitProgress.incrementAndGet()
@@ -225,22 +251,116 @@ internal class EventLog(
     private val routeWorker = scope.launch {
         for (command in routeCommands) {
             when (command) {
-                is RouteCommand.Event -> {
-                    var accepted = announce(command.event, command.admissionTickets)
-                    if (!accepted) {
-                        val refreshedAdmissions = sampleAdmissionTickets()
-                        if (refreshedAdmissions != command.admissionTickets) {
-                            accepted = announceAdmissions(command.event, refreshedAdmissions)
-                        }
-                    }
-                    if (accepted) {
-                        acknowledgeLocalRouteIfNeeded(command.localRouteEventId)
-                    } else {
-                        command.localRouteEventId?.let(activeLocalRouteIds::remove)
-                    }
-                    routeProgress.incrementAndGet()
+                is RouteCommand.Event, is RouteCommand.Deadline -> {
+                    pendingRoutes.addLast(command)
+                    // Only the retry timer or a routing release retries a failed head.
+                    if (routeRetryJob == null) drainRoutes()
+                }
+                is RouteCommand.RecoveryPrefix -> {
+                    command.events.asReversed().forEach(pendingRoutes::addFirst)
+                    if (routeRetryJob == null) drainRoutes()
+                }
+                RouteCommand.Retry -> {
+                    routeRetryJob?.cancel()
+                    routeRetryJob = null
+                    drainRoutes()
                 }
                 is RouteCommand.Barrier -> command.done.complete(Unit)
+            }
+        }
+    }
+
+    /** Captures and controls share the commit FIFO, including captures still persisting. */
+    fun enqueueJourneyDeadline(deadline: JourneyDeadline) {
+        if (!closing.get()) commands.trySend(Command.Deadline(deadline))
+    }
+
+    fun setJourneyDeadlineHandler(handler: suspend (JourneyDeadline) -> Boolean) {
+        journeyDeadlineHandler = handler
+    }
+
+    /** A hold stops routes, while capture, storage and recovery replay remain available. */
+    fun deferCommittedRouting(): Long = synchronized(routingHoldLock) {
+        routingGeneration += 1
+        routingDeferred.set(true)
+        routingGeneration
+    }
+
+    fun releaseCommittedRouting(ifGeneration: Long) = synchronized(routingHoldLock) {
+        if (routingGeneration == ifGeneration) {
+            routingDeferred.set(false)
+            routeCommands.trySend(RouteCommand.Retry)
+        }
+        Unit
+    }
+
+    private suspend fun drainRoutes() {
+        while (!routingDeferred.get()) {
+            when (val head = pendingRoutes.firstOrNull() ?: return) {
+                is RouteCommand.Event -> {
+                    if (!deliverRouteHead(head)) {
+                        scheduleRouteRetry()
+                        return
+                    }
+                    acknowledgeLocalRouteIfNeeded(head.localRouteEventId)
+                }
+                is RouteCommand.Deadline -> {
+                    // Unavailable deadline work is derived again from its stored park.
+                    if (head.deadline.distinctId == identity.distinctId()) runCatching {
+                        journeyDeadlineHandler?.invoke(head.deadline)
+                    }.onFailure { Log.w(LOG_TAG, "Journey deadline handling failed", it) }
+                }
+                else -> error("Not a route")
+            }
+            pendingRoutes.removeFirst()
+            routeProgress.incrementAndGet()
+        }
+    }
+
+    private suspend fun deliverRouteHead(head: RouteCommand.Event): Boolean {
+        while (head.nextSubscriber < subscribers.size) {
+            val subscriber = subscribers[head.nextSubscriber++]
+            if (subscriber.predicate(head.event)) runCatching { subscriber.handler.onCommitted(head.event) }
+                .onFailure { Log.w(LOG_TAG, "Committed-event subscriber failed", it) }
+        }
+        while (head.nextAdmission < head.admissionTickets.size) {
+            var ticket = head.admissionTickets[head.nextAdmission]
+            if (ticket.subscriber.predicate(head.event)) {
+                suspend fun accepts() = runCatching {
+                    ticket.subscriber.handler.onCommitted(head.event, ticket.generation)
+                }.onFailure { Log.w(LOG_TAG, "Admission committed-event subscriber failed", it) }.getOrDefault(false)
+                if (!accepts()) {
+                    val refreshed = sampleAdmissionTickets()
+                    if (refreshed == head.admissionTickets) return false
+                    head.admissionTickets = refreshed
+                    ticket = refreshed.getOrNull(head.nextAdmission) ?: return true
+                    if (!accepts()) return false
+                }
+            }
+            head.nextAdmission++
+        }
+        return true
+    }
+
+    private fun scheduleRouteRetry() {
+        if (routeRetryJob != null || closing.get()) return
+        routeRetryJob = scope.launch {
+            delay(1_000L)
+            routeCommands.trySend(RouteCommand.Retry)
+        }
+    }
+
+    private fun scheduleAcknowledgementRetry() {
+        synchronized(failedLocalRouteAcknowledgementIds) {
+            if (acknowledgementRetryJob != null || closing.get()) return
+            acknowledgementRetryJob = scope.launch {
+                delay(1_000L)
+                // Receipt cleanup never occupies the serial route worker.
+                retryFailedLocalRouteAcknowledgements()
+                synchronized(failedLocalRouteAcknowledgementIds) {
+                    acknowledgementRetryJob = null
+                    if (failedLocalRouteAcknowledgementIds.isNotEmpty()) scheduleAcknowledgementRetry()
+                }
             }
         }
     }
@@ -372,6 +492,9 @@ internal class EventLog(
     /** Stop the pipelines without closing the store owned by the composition root. */
     suspend fun closeWorkers() {
         forwardingActive.set(false)
+        closing.set(true)
+        routeRetryJob?.cancel()
+        acknowledgementRetryJob?.cancel()
         awaitBarrier()
         commands.close()
         worker.join()
@@ -815,18 +938,21 @@ internal class EventLog(
      */
     suspend fun replayPendingLocalRoutes(distinctId: String): Boolean = runCatching {
         val admissionTickets = sampleAdmissionTickets()
-        var accepted = true
-        for (event in store.queryPendingLocalRoutes(distinctId)) {
-            if (!activeLocalRouteIds.add(event.id)) continue
-            if (announce(event, admissionTickets)) {
-                acknowledgeLocalRouteIfNeeded(event.id)
-            } else {
-                activeLocalRouteIds.remove(event.id)
-                accepted = false
+        val recovered = store.queryPendingLocalRoutes(distinctId)
+            .filter { activeLocalRouteIds.add(it.id) }
+            .map { RouteCommand.Event(it, admissionTickets, it.id) }
+        for ((index, route) in recovered.withIndex()) {
+            if (!deliverRouteHead(route)) {
+                // Recovery is inline because the Journey worker may own it.
+                // A refused prefix transfers to the same ordered queue for retry.
+                routeCommands.trySend(RouteCommand.RecoveryPrefix(recovered.drop(index)))
+                return@runCatching false
             }
+            acknowledgeLocalRouteIfNeeded(route.localRouteEventId)
         }
-        val acknowledged = retryFailedLocalRouteAcknowledgements()
-        accepted && acknowledged
+        retryFailedLocalRouteAcknowledgements()
+        if (!routingDeferred.get()) routeCommands.trySend(RouteCommand.Retry)
+        true
     }.onFailure {
         Log.w(LOG_TAG, "Failed to replay pending local routes", it)
     }.getOrDefault(false)
@@ -840,6 +966,7 @@ internal class EventLog(
             }
             .onFailure {
                 failedLocalRouteAcknowledgementIds.add(eventId)
+                scheduleAcknowledgementRetry()
                 Log.w(LOG_TAG, "Failed to acknowledge local route", it, Log.sensitive("eventId", eventId))
             }
     }
@@ -849,37 +976,6 @@ internal class EventLog(
             acknowledgeLocalRouteIfNeeded(eventId)
         }
         return failedLocalRouteAcknowledgementIds.isEmpty()
-    }
-
-    private suspend fun announce(
-        event: StoredEvent,
-        admissionTickets: List<AdmissionTicket>,
-    ): Boolean {
-        subscribers.forEach { subscriber ->
-            if (subscriber.predicate(event)) {
-                runCatching { subscriber.handler.onCommitted(event) }
-                    .onFailure { Log.w(LOG_TAG, "Committed-event subscriber failed", it) }
-            }
-        }
-        return announceAdmissions(event, admissionTickets)
-    }
-
-    private suspend fun announceAdmissions(
-        event: StoredEvent,
-        admissionTickets: List<AdmissionTicket>,
-    ): Boolean {
-        var admissionAccepted = true
-        admissionTickets.forEach { ticket ->
-            if (ticket.subscriber.predicate(event)) {
-                val accepted = runCatching {
-                    ticket.subscriber.handler.onCommitted(event, ticket.generation)
-                }.onFailure {
-                    Log.w(LOG_TAG, "Admission committed-event subscriber failed", it)
-                }.getOrDefault(false)
-                admissionAccepted = admissionAccepted && accepted
-            }
-        }
-        return admissionAccepted
     }
 
     private fun sampleAdmissionTickets(): List<AdmissionTicket> =

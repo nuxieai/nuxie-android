@@ -388,6 +388,40 @@ class JourneyServiceTest {
         assertEquals(listOf(entryEvent.id, goalEvent.id), store.queryPendingLocalRoutes("customer").map { it.id })
     }
 
+    @Test fun `production core retries a refused local head without a deadline`() = runBlocking {
+        val core = NuxieCore(context, apiKey = "pk_test_local_head_retry",
+            environment = NuxieEnvironment.DEVELOPMENT, logLevel = LogLevel.NONE, beforeSend = null,
+            overrides = NuxieCore.Overrides(transport = FakeTransport(), registerLifecycle = false,
+                requestInitialProfileRefresh = false, billingClientFactory = InertBillingClientAdapter.factory,
+                eventDatabaseFile = File(directory, "core-local-head.db")))
+        try {
+            core.start()
+            val owner = core.identity.distinctId()
+            val catalog = catalog()
+            catalog.commit(owner, catalog.prepare(profile(), authority))
+            core.journeys.profileDidCommit(requireNotNull(catalog.snapshot(owner)), authority, owner, 1)
+            val accepting = java.util.concurrent.atomic.AtomicBoolean(false)
+            val refusals = AtomicInteger()
+            val delivered = CopyOnWriteArrayList<String>()
+            core.eventLog.subscribeCommittedWithAdmission(sampleGeneration = { 1L }) { event, _ ->
+                if (!event.name.startsWith("retry_")) true
+                else if (!accepting.get()) { refusals.incrementAndGet(); false }
+                else { delivered += event.name; true }
+            }
+            core.eventLog.capture("retry_head")
+            core.eventLog.capture("retry_follower")
+            withTimeout(5_000L) { while (refusals.get() < 2) kotlinx.coroutines.delay(10) }
+            assertTrue(delivered.isEmpty())
+            accepting.set(true)
+            withTimeout(5_000L) { while (delivered.size < 2) kotlinx.coroutines.delay(10) }
+            core.eventLog.awaitBarrier()
+            assertEquals(listOf("retry_head", "retry_follower"), delivered.toList())
+            assertTrue(core.store.queryPendingLocalRoutes(owner).isEmpty())
+            assertEquals(2, core.store.countEvents("retry_head", owner, null, null) +
+                core.store.countEvents("retry_follower", owner, null, null))
+        } finally { core.stopAndAwait() }
+    }
+
     @Test fun `production core completes a screenless release without native preparation`() = runBlocking {
         val core = ai.nuxie.sdk.core.NuxieCore(
             context = RuntimeEnvironment.getApplication(), apiKey = "pk_test_native_screenless",
@@ -710,6 +744,67 @@ class JourneyServiceTest {
         assertFalse("Closing an upper layer does not end the Journey", captures.contains(JourneyEventNames.LEG_COMPLETED))
         assertNull(JourneyRunJournal(directory, "customer", JourneyStorageScope(renderedAuthority)).runs().single().completion)
         assertTrue(recording.shutdowns.isEmpty())
+    }
+
+    @Test fun `direct route ownership survives failed subscriber delivery`() = runBlocking {
+        val identity = identity("customer")
+        val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(renderedEntry)
+        val ownerAuthority = authority(renderedEntry)
+        catalog.commit("customer", catalog.prepare(profile(releaseEntry = renderedEntry), ownerAuthority))
+        val baseline = requireNotNull(catalog.snapshot("customer"))
+        val original = baseline.releasesByDigest.values.single()
+        // Android evaluates the route's signal on its initial pass. Keep the
+        // wait false there, then make native state ready before subscriber replay.
+        val steps = Json.parseToJsonElement("""[
+            {"kind":"action","id":"present","action":{"type":"navigate","screenId":"screen_welcome"},"outlets":{}},
+            {"kind":"action","id":"wait","action":{"type":"wait_until","trigger":{"kind":"event","eventName":"continue"},
+             "condition":{"type":"Truthy","value":{"type":"Response.Field","key":"ready"}},"maxTimeMs":10000},
+             "outlets":{"satisfied":"done","timeout":"timed_out"}},
+            {"kind":"complete","id":"done","outcome":"completed"},
+            {"kind":"complete","id":"timed_out","outcome":"timed_out"}
+        ]""").jsonArray
+        val leg = JsonObject(original.leg + mapOf("entryStepId" to JsonPrimitive("present"), "steps" to steps,
+            "routes" to Json.parseToJsonElement("""[{"host":{"kind":"screen","screenId":"screen_welcome"},"eventName":"continue","entryStepId":"wait"}]""")))
+        val envelope = JourneyReleaseEnvelope.authenticate(renderedEntry.getValue("envelope").toString().encodeToByteArray(),
+            mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(fixture.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP)))
+        val release = AuthenticatedJourneyRelease(envelope, original.identity,
+            JsonObject(original.descriptor + ("leg" to leg)), original.publishedAtSeqToPromote)
+        val snapshot = baseline.copy(releasesByDigest = mapOf(release.descriptorSha256 to release))
+        val presenter = RecordingJourneyPresenter()
+        val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
+        val failReads = java.util.concurrent.atomic.AtomicBoolean(false)
+        val ready = java.util.concurrent.atomic.AtomicBoolean(false)
+        var published: StoredEvent? = null
+        val service = JourneyService(identity, store, catalog, directory, scope,
+            capture = { name, properties, _, _ -> captures += name to properties; true },
+            captureScreenEvent = { name, properties, id, owner, at, _, origin ->
+                val event = StoredEvent(id, name, JsonValueConverter.fromMap(properties), at, owner, journeyOrigin = origin)
+                published = event
+                StableEventCaptureResult(true, event, localRoutePending = true)
+            }, presenter = presenter, nowMillis = { 100_000L },
+            readJournalRuns = { journal -> check(!failReads.get()) { "journal read failed" }; journal.runs() },
+            readNativeValues = { JsonObject(mapOf("ready" to JsonPrimitive(ready.get()))) })
+        service.initialize(); service.onAppWillEnterForeground()
+        service.profileDidCommit(snapshot, ownerAuthority, "customer", 1)
+        val request = requireNotNull(presenter.request)
+        val batch = JourneyScreenEmissionBatch(request.journeyId, 0, "direct-route-followed-by-wait",
+            JourneyScreenEmissionSource("screen_welcome", "continue"), listOf(
+                JourneyScreenEmission("direct-event", 0, 100_000L, "continue", JsonObject(emptyMap()))))
+        assertEquals(JourneyEmissionBatchResult.ACCEPTED, request.onEmissionBatch(batch, null))
+        val journal = JourneyRunJournal(directory, "customer", JourneyStorageScope(ownerAuthority))
+        withTimeout(5_000L) { while (journal.runs().single().park == null) kotlinx.coroutines.delay(10) }
+        val park = journal.runs().single().park
+        val event = requireNotNull(published)
+        ready.set(true)
+        failReads.set(true)
+        assertFalse(service.handleEvent(event, service.eventAdmissionGeneration()))
+        failReads.set(false)
+        assertTrue(service.handleEvent(event, service.eventAdmissionGeneration()))
+        assertEquals(park, journal.runs().single().park)
+        assertNull(journal.runs().single().completion)
+        assertTrue(service.handleEvent(StoredEvent("independent-continue", event.name, event.properties, event.timestampMillis, event.distinctId), service.eventAdmissionGeneration()))
+        assertEquals("completed", captures.single { it.first == JourneyEventNames.LEG_COMPLETED }.second["outcome"])
     }
 
     @Test fun `renderer batches durably publish once and route the owning run`() = runBlocking {
@@ -2216,7 +2311,11 @@ class JourneyServiceTest {
             },
             nowMillis = { 100_000L },
             replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
+            enqueueJourneyDeadline = eventLog::enqueueJourneyDeadline,
+            deferCommittedRouting = eventLog::deferCommittedRouting,
+            releaseCommittedRouting = eventLog::releaseCommittedRouting,
         )
+        eventLog.setJourneyDeadlineHandler(service::handleJourneyDeadline)
         eventLog.subscribeCommittedWithAdmission(
             sampleGeneration = service::eventAdmissionGeneration,
         ) { event, admittedGeneration -> service.handleEvent(event, admittedGeneration) }
