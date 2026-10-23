@@ -245,6 +245,9 @@ internal class SQLiteEventStore(
         }
     }
 
+    override suspend fun hasPendingLocalRoute(eventId: String, distinctId: String): Boolean =
+        isLocalRoutePending(eventId)
+
     override suspend fun isLocalRoutePending(eventId: String): Boolean = onWriter { database ->
         database.prepare(
             "SELECT delivery_state FROM event_local_routes WHERE event_id = ? LIMIT 1;",

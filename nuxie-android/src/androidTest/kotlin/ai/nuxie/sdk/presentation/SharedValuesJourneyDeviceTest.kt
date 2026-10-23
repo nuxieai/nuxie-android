@@ -872,6 +872,7 @@ class SharedValuesJourneyDeviceTest {
                 ai.nuxie.sdk.events.StableEventCaptureResult(settled, event.takeIf { settled })
             }, presenter = presenter, nowMillis = { clock },
             sleepMillis = { duration -> if (failFirstRestore) retrySleeper.sleep(duration) else delay(duration) },
+            retryClockMillis = { clock },
             prepareNativeValues = { values, release, _ ->
                 if (restore) {
                     restorations++
@@ -993,13 +994,13 @@ class SharedValuesJourneyDeviceTest {
             withTimeout(15_000) { current.onAppWillEnterForeground() }
             withTimeout(15_000) { current.profileDidCommit(checkNotNull(catalog.snapshot(owner)), fixture.authority, owner, 1) }
             if (failFirstRestore) {
-                withTimeout(10_000) { while (5_000L !in retrySleeper.pendingDurations) delay(10) }
+                withTimeout(10_000) { while (1_000L !in retrySleeper.pendingDurations) delay(10) }
                 val retained = journal.runs().single()
                 assertNotNull(retained.park)
                 assertEquals(JsonPrimitive(30f), retained.nativeSnapshot?.journeyValues?.get("trip_days"))
                 assertTrue(completed.isEmpty())
-                assertEquals("Restoration exclusively owns this checkpoint's retry", listOf(5_000L), retrySleeper.pendingDurations)
-                clock += 5000
+                assertEquals("The Journey queue exclusively owns this checkpoint's retry", listOf(1_000L), retrySleeper.pendingDurations)
+                clock += 1000
                 retrySleeper.completeAll()
             }
             val event = completed.poll(10, TimeUnit.SECONDS)

@@ -1080,32 +1080,32 @@ class JourneyServiceTest {
         })
         val service = JourneyService(identity, store, catalog, directory, scope,
             capture = { _, _, _, _ -> true }, presenter = presenter, nowMillis = clock::get,
-            sleepMillis = sleeper::sleep, enqueueJourneyDeadline = { deadlines += it })
+            sleepMillis = sleeper::sleep, retryClockMillis = clock::get, enqueueJourneyDeadline = { deadlines += it })
         service.initialize(); service.onAppWillEnterForeground()
         service.profileDidCommit(snapshot, ownerAuthority, "customer", 1)
         val journal = JourneyRunJournal(directory, "customer", JourneyStorageScope(ownerAuthority))
         val runId = journal.runs().single().id
-        val firstWake = requireNotNull(journal.runs().single().park?.wakeAtMillis)
-        assertEquals(attempts.single() + 1_000L, firstWake)
+        val firstPark = requireNotNull(journal.runs().single().park?.wakeAtMillis)
+        assertEquals(attempts.single(), firstPark)
         withTimeout(5_000L) { while (1_000L !in sleeper.pendingDurations) kotlinx.coroutines.delay(10) }
-        clock.set(firstWake - 1L)
+        clock.set(firstPark + 999L)
         service.onAppWillEnterForeground()
         assertEquals(1, attempts.size)
-        assertEquals(firstWake, journal.runs().single().park?.wakeAtMillis)
-        withTimeout(5_000L) { while (1L !in sleeper.pendingDurations) kotlinx.coroutines.delay(10) }
-        clock.set(firstWake)
+        assertEquals(firstPark, journal.runs().single().park?.wakeAtMillis)
+        assertEquals(listOf(1_000L), sleeper.pendingDurations)
+        clock.set(firstPark + 1_000L)
         sleeper.completeAll()
         withTimeout(5_000L) { while (attempts.size < 2) kotlinx.coroutines.delay(10) }
         service.onAppWillEnterForeground() // FIFO barrier after re-parking.
         assertEquals(2, attempts.size)
-        val secondWake = requireNotNull(journal.runs().single().park?.wakeAtMillis)
-        assertEquals(attempts.last() + 1_000L, secondWake)
+        val secondPark = requireNotNull(journal.runs().single().park?.wakeAtMillis)
+        assertEquals(attempts.last(), secondPark)
         occupied.set(false)
-        clock.set(secondWake - 1L)
+        clock.set(secondPark + 999L)
         service.onAppWillEnterForeground()
         assertEquals(2, attempts.size)
-        withTimeout(5_000L) { while (1L !in sleeper.pendingDurations) kotlinx.coroutines.delay(10) }
-        clock.set(secondWake)
+        assertEquals(listOf(1_000L), sleeper.pendingDurations)
+        clock.set(secondPark + 1_000L)
         sleeper.completeAll()
         withTimeout(5_000L) { while (attempts.size < 3) kotlinx.coroutines.delay(10) }
         service.onAppWillEnterForeground()
@@ -1168,7 +1168,7 @@ class JourneyServiceTest {
             "customer",
             JourneyStorageScope(renderedAuthority),
         )
-        assertEquals(101_000L, journal.runs().single().park?.wakeAtMillis)
+        assertEquals(100_000L, journal.runs().single().park?.wakeAtMillis)
         assertEquals(listOf(JourneyEventNames.LEG_STARTED), captures)
 
         presenter.presentationResult = JourneyPresentationResult.Shown
@@ -1185,6 +1185,8 @@ class JourneyServiceTest {
         val replacementSnapshot = requireNotNull(catalog.snapshot("customer"))
         service.profileDidCommit(replacementSnapshot, renderedAuthority, "customer", 2)
 
+        withTimeout(5_000L) { while (presenter.shownCount.get() < 2) kotlinx.coroutines.delay(10) }
+        service.onAppWillEnterForeground()
         assertEquals(2, presenter.shownCount.get())
         assertEquals(snapshot.profile.delivery, presenter.request?.delivery)
         assertNull(journal.runs().single().park)
@@ -2070,17 +2072,28 @@ class JourneyServiceTest {
                     false
                 } else eventLog.captureIdempotently(name, properties, eventId, distinctId)
             }, nowMillis = { 100_000L }, replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
+            enqueueJourneyWork = eventLog::enqueueJourneyWork,
+            resumeJourneyWork = eventLog::resumeJourneyWork,
             beforeAdmission = {
                 val persisted = store.pendingBatch(100).map { it.id }
                 assertTrue(retained.startedEventId in persisted)
                 assertTrue(retained.completedEventId in persisted)
                 admissions++
             })
-        eventLog.subscribeCommittedWithAdmission(sampleGeneration = service::eventAdmissionGeneration) { event, generation ->
+        val generationByEvent = java.util.concurrent.ConcurrentHashMap<String, Long>()
+        eventLog.subscribeJourneyEvents(sampleGeneration = service::eventAdmissionGeneration,
+            afterAttempt = { event, accepted ->
+                if (accepted && event.name == "inventory_opened") attempts += checkNotNull(generationByEvent[event.id]) to true
+            }) { event, generation ->
             kotlinx.coroutines.coroutineScope {
-                val result = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { service.handleEvent(event, generation) }
+                val result = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { service.prepareEventWork(event, generation) }
                 if (event.name == "inventory_opened") routed.complete(Unit)
-                result.await().also { if (event.name == "inventory_opened") attempts += generation to it }
+                result.await().also {
+                    if (event.name == "inventory_opened") {
+                        generationByEvent[event.id] = generation
+                        if (it == null) attempts += generation to false
+                    }
+                }
             }
         }
         try {
@@ -2096,7 +2109,11 @@ class JourneyServiceTest {
                     service.profileDidCommit(snapshot, authority, "customer", 2)
                 }
                 releaseRecovery.complete(Unit)
-                withTimeout(5_000) { replacement.await(); eventLog.awaitBarrier() }
+                withTimeout(5_000) {
+                    replacement.await()
+                    while (attempts.lastOrNull()?.second != true) kotlinx.coroutines.delay(10)
+                    eventLog.awaitBarrier()
+                }
                 assertEquals(listOf(1L to false, 2L to true), attempts)
                 assertEquals(1, admissions)
                 assertTrue(store.queryPendingLocalRoutes("customer").isEmpty())
@@ -2141,14 +2158,16 @@ class JourneyServiceTest {
             capture = { name, properties, eventId, customer ->
                 eventLog.captureIdempotently(name, properties, eventId, customer)
             }, nowMillis = { 100_000L }, replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
+            enqueueJourneyWork = eventLog::enqueueJourneyWork,
+            resumeJourneyWork = eventLog::resumeJourneyWork,
             beforeAdmission = { admissions.incrementAndGet() })
-        eventLog.subscribeCommittedWithAdmission(sampleGeneration = service::eventAdmissionGeneration) { event, generation ->
-            val accepted = service.handleEvent(event, generation)
-            if (event.name == "inventory_opened" && !accepted && !deferred.isCompleted) {
+        eventLog.subscribeJourneyEvents(sampleGeneration = service::eventAdmissionGeneration) { event, generation ->
+            val work = service.prepareEventWork(event, generation)
+            if (event.name == "inventory_opened" && work == null && !deferred.isCompleted) {
                 deferred.complete(Unit)
                 returnDeferred.await()
             }
-            accepted
+            work
         }
         try {
             service.onAppVisibilityChanged(true)
@@ -2161,7 +2180,10 @@ class JourneyServiceTest {
             // Reconciliation excludes the route still owned by EventLog's live worker.
             service.completeForegroundRevalidation(token)
             returnDeferred.complete(Unit)
-            withTimeout(5_000) { eventLog.awaitBarrier() }
+            withTimeout(5_000) {
+                while (store.queryPendingLocalRoutes("customer").any { it.name == "inventory_opened" }) kotlinx.coroutines.delay(10)
+                eventLog.awaitBarrier()
+            }
             assertEquals(contract.getValue("expectedNewRuns").jsonPrimitive.int, admissions.get())
             assertEquals(contract.getValue("expectedPendingLocalRoutes").jsonPrimitive.int,
                 store.queryPendingLocalRoutes("customer").size)
@@ -2395,15 +2417,16 @@ class JourneyServiceTest {
             nowMillis = { 100_000L },
             replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
             enqueueJourneyDeadline = eventLog::enqueueJourneyDeadline,
-            requestJourneyResumeRetry = eventLog::requestJourneyResumeRetry,
+            enqueueJourneyWork = eventLog::enqueueJourneyWork,
+            resumeJourneyWork = eventLog::resumeJourneyWork,
             deferCommittedRouting = eventLog::deferCommittedRouting,
             releaseCommittedRouting = eventLog::releaseCommittedRouting,
         )
         eventLog.setJourneyDeadlineHandler(service::handleJourneyDeadline)
-        eventLog.setJourneyResumeRetryHandler(service::handleJourneyResumeRetry)
-        eventLog.subscribeCommittedWithAdmission(
+        eventLog.subscribeJourneyEvents(
             sampleGeneration = service::eventAdmissionGeneration,
-        ) { event, admittedGeneration -> service.handleEvent(event, admittedGeneration) }
+            plan = service::prepareEventWork,
+        )
         return IdentityTransitionHarness(identity, eventLog, service, snapshot, starts)
     }
 
@@ -3842,7 +3865,7 @@ class JourneyServiceTest {
                     return
                 }
             } else presentations.dismiss(CloseReason.UserDismissed)
-            // This new retry case must span the production five-second retry interval.
+            // Deferred settlement uses the same one-second queue backoff as other Journey work.
             withTimeout(if (deferredFailureRetry) 10_000 else 5_000) {
                 while (captures.none { it.first == JourneyEventNames.LEG_COMPLETED && it.second["journey_id"] == request.journeyId }) kotlinx.coroutines.delay(10)
             }

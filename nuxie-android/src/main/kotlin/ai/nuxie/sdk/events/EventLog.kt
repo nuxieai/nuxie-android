@@ -6,6 +6,7 @@ import ai.nuxie.sdk.journey.JourneyEventNames
 import ai.nuxie.sdk.logging.NuxieLog as Log
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
@@ -20,7 +21,10 @@ internal data class JourneyDeadline(
     val stepId: String,
     val anchorAtMillis: Long?,
     val wakeAtMillis: Long,
-)
+) {
+    internal var work: JourneyWork? = null
+    internal var queueKey: String = "deadline:${this}"
+}
 
 /**
  * The capture pipeline, ported from the iOS `EventLog` actor:
@@ -53,6 +57,7 @@ internal class EventLog(
     private val nowMillis: () -> Long = System::currentTimeMillis,
     /** Stamps \$session_id and touches the session; null until sessions exist. */
     private val sessionIdProvider: (() -> String?)? = null,
+    private val retrySleep: suspend (Long) -> Unit = { delay(it) },
 ) {
     internal data class IdempotentCaptureResult(
         val succeeded: Boolean,
@@ -92,6 +97,8 @@ internal class EventLog(
         val predicate: (StoredEvent) -> Boolean,
         val sampleGeneration: () -> Long,
         val handler: AdmissionCommittedSubscription,
+        val plan: (suspend (StoredEvent, Long) -> List<JourneyWork>?)? = null,
+        val afterAttempt: suspend (StoredEvent, Boolean) -> Unit = { _, _ -> },
     )
 
     private data class AdmissionTicket(
@@ -139,6 +146,7 @@ internal class EventLog(
             val done: CompletableDeferred<ServerFactCommitResult>,
         ) : Command
         data class Deadline(val deadline: JourneyDeadline) : Command
+        data class Work(val work: JourneyWork) : Command
         data class Barrier(val done: CompletableDeferred<Unit>) : Command
     }
 
@@ -154,13 +162,13 @@ internal class EventLog(
             val localRouteEventId: String? = null,
             var nextSubscriber: Int = 0,
             var nextAdmission: Int = 0,
+            val children: MutableList<JourneyWork> = mutableListOf(),
         ) : RouteCommand
-        data class RecoveryPrefix(val events: List<Event>) : RouteCommand
+        data class RecoveryPrefix(val work: List<JourneyWork>) : RouteCommand
+        data class Work(val work: JourneyWork) : RouteCommand
         data class Deadline(val deadline: JourneyDeadline) : RouteCommand
         data object Retry : RouteCommand
         data object RetryTimer : RouteCommand
-        data object RequestJourneyResumeRetry : RouteCommand
-        data object RetryJourneyResume : RouteCommand
         data class Barrier(val done: CompletableDeferred<Unit>) : RouteCommand
     }
 
@@ -182,14 +190,11 @@ internal class EventLog(
     private val routingHoldLock = Any()
     private var routingGeneration = 0L
     private val routingDeferred = java.util.concurrent.atomic.AtomicBoolean(false)
-    @Volatile private var journeyDeadlineHandler: (suspend (JourneyDeadline) -> Boolean)? = null
-    @Volatile private var journeyResumeRetryHandler: (suspend () -> Boolean)? = null
-    private var journeyResumeRetryPending = false
-    private var journeyResumeRetryQueued = false
-    private var journeyResumeRetryDeferred = false
-    private var routeDeliveryFailed = false
-    private val pendingRoutes = ArrayDeque<RouteCommand>()
-    private var routeRetryJob: Job? = null
+    @Volatile private var journeyDeadlineHandler: (suspend (JourneyDeadline) -> JourneyWork.Result)? = null
+    private val routeQueue = JourneyWorkQueue(scope, {
+        routeCommands.trySend(RouteCommand.RetryTimer)
+    }, retrySleep)
+    private val pendingCommittedNotifications = mutableListOf<RouteCommand.Event>()
     private var acknowledgementRetryJob: Job? = null
     private val closing = java.util.concurrent.atomic.AtomicBoolean(false)
     private val commitProgress = java.util.concurrent.atomic.AtomicLong(0)
@@ -250,6 +255,7 @@ internal class EventLog(
                     )
                 }.fold(command.done::complete, command.done::completeExceptionally)
                 is Command.Deadline -> routeCommands.trySend(RouteCommand.Deadline(command.deadline))
+                is Command.Work -> routeCommands.trySend(RouteCommand.Work(command.work))
                 is Command.Barrier -> command.done.complete(Unit)
             }
             if (command !is Command.Barrier) commitProgress.incrementAndGet()
@@ -259,38 +265,34 @@ internal class EventLog(
     private val routeWorker = scope.launch {
         for (command in routeCommands) {
             when (command) {
-                is RouteCommand.Event, is RouteCommand.Deadline -> {
-                    pendingRoutes.addLast(command)
-                    // Only the retry timer or a routing release retries a failed head.
-                    if (!routeDeliveryFailed) drainRoutes()
-                    else if (command is RouteCommand.Event && !routingDeferred.get()) notifyCommittedSubscribers(command)
+                is RouteCommand.Event -> {
+                    pendingCommittedNotifications += command
+                    routeQueue.add(eventWork(command))
+                    drainRoutes()
+                }
+                is RouteCommand.Deadline -> {
+                    val deadline = command.deadline
+                    routeQueue.add(JourneyWork(
+                        key = deadline.queueKey, distinctId = deadline.distinctId, runId = deadline.runId,
+                    ) {
+                        if (deadline.distinctId != identity.distinctId()) JourneyWork.Result.Done()
+                        else journeyDeadlineHandler?.invoke(deadline) ?: JourneyWork.Result.Done()
+                    })
+                    drainRoutes()
+                }
+                is RouteCommand.Work -> {
+                    routeQueue.add(command.work)
+                    drainRoutes()
                 }
                 is RouteCommand.RecoveryPrefix -> {
-                    command.events.asReversed().forEach(pendingRoutes::addFirst)
-                    if (!routeDeliveryFailed) drainRoutes()
-                    else for (route in command.events) {
-                        if (routingDeferred.get()) break
-                        notifyCommittedSubscribers(route)
-                    }
-                }
-                RouteCommand.Retry -> {
+                    command.work.asReversed().forEach { routeQueue.add(it, first = true) }
                     drainRoutes()
-                    if (journeyResumeRetryDeferred) retryJourneyResume()
-                    scheduleRouteRetry()
                 }
+                RouteCommand.Retry -> drainRoutes()
                 RouteCommand.RetryTimer -> {
-                    routeRetryJob = null
-                    if (routeDeliveryFailed) drainRoutes()
-                    if (journeyResumeRetryPending && !journeyResumeRetryQueued) {
-                        journeyResumeRetryQueued = true
-                        routeCommands.trySend(RouteCommand.RetryJourneyResume)
-                    }
+                    routeQueue.retryReady()
+                    drainRoutes()
                 }
-                RouteCommand.RequestJourneyResumeRetry -> {
-                    journeyResumeRetryPending = true
-                    scheduleRouteRetry()
-                }
-                RouteCommand.RetryJourneyResume -> retryJourneyResume()
                 is RouteCommand.Barrier -> command.done.complete(Unit)
             }
         }
@@ -301,32 +303,17 @@ internal class EventLog(
         if (!closing.get()) commands.trySend(Command.Deadline(deadline))
     }
 
-    fun setJourneyDeadlineHandler(handler: suspend (JourneyDeadline) -> Boolean) {
+    fun enqueueJourneyWork(work: JourneyWork) {
+        if (!closing.get()) commands.trySend(Command.Work(work))
+    }
+
+    /** Eligibility changed (for example, foreground); failed entries keep their backoff. */
+    fun resumeJourneyWork() {
+        if (!closing.get()) routeCommands.trySend(RouteCommand.Retry)
+    }
+
+    fun setJourneyDeadlineHandler(handler: suspend (JourneyDeadline) -> JourneyWork.Result) {
         journeyDeadlineHandler = handler
-    }
-
-    fun setJourneyResumeRetryHandler(handler: suspend () -> Boolean) {
-        journeyResumeRetryHandler = handler
-    }
-
-    fun requestJourneyResumeRetry() {
-        if (journeyResumeRetryHandler != null && !closing.get()) {
-            routeCommands.trySend(RouteCommand.RequestJourneyResumeRetry)
-        }
-    }
-
-    private suspend fun retryJourneyResume() {
-        if (routingDeferred.get()) {
-            journeyResumeRetryDeferred = true
-            return
-        }
-        journeyResumeRetryDeferred = false
-        journeyResumeRetryPending = false
-        val resumed = runCatching { journeyResumeRetryHandler?.invoke() ?: true }
-            .onFailure { Log.w(LOG_TAG, "Saved Journey input resume failed", it) }.getOrDefault(false)
-        journeyResumeRetryQueued = false
-        if (!resumed) journeyResumeRetryPending = true
-        scheduleRouteRetry()
     }
 
     /** A hold stops routes, while capture, storage and recovery replay remain available. */
@@ -345,36 +332,13 @@ internal class EventLog(
     }
 
     private suspend fun drainRoutes() {
-        if (!routingDeferred.get()) routeDeliveryFailed = false
-        while (!routingDeferred.get()) {
-            when (val head = pendingRoutes.firstOrNull() ?: return) {
-                is RouteCommand.Event -> {
-                    if (!deliverRouteHead(head)) {
-                        routeDeliveryFailed = true
-                        scheduleRouteRetry()
-                        notifyPendingCommittedSubscribers()
-                        return
-                    }
-                    acknowledgeLocalRouteIfNeeded(head.localRouteEventId)
-                }
-                is RouteCommand.Deadline -> {
-                    // Unavailable deadline work is derived again from its stored park.
-                    if (head.deadline.distinctId == identity.distinctId()) runCatching {
-                        journeyDeadlineHandler?.invoke(head.deadline)
-                    }.onFailure { Log.w(LOG_TAG, "Journey deadline handling failed", it) }
-                }
-                else -> error("Not a route")
-            }
-            pendingRoutes.removeFirst()
-            routeProgress.incrementAndGet()
-        }
-    }
-
-    private suspend fun notifyPendingCommittedSubscribers() {
-        // Journey admission can refuse a head while ordinary analytics continues.
-        for (route in pendingRoutes) {
-            if (routingDeferred.get()) return
-            if (route is RouteCommand.Event) notifyCommittedSubscribers(route)
+        val before = routeQueue.progress
+        routeQueue.drain { routingDeferred.get() }
+        routeProgress.addAndGet(routeQueue.progress - before)
+        // Ordinary subscribers keep progressing even if Journey admission is unavailable.
+        if (!routingDeferred.get()) {
+            for (event in pendingCommittedNotifications) notifyCommittedSubscribers(event)
+            pendingCommittedNotifications.clear()
         }
     }
 
@@ -386,33 +350,39 @@ internal class EventLog(
         }
     }
 
-    private suspend fun deliverRouteHead(head: RouteCommand.Event): Boolean {
+    private fun eventWork(head: RouteCommand.Event): JourneyWork = JourneyWork(
+        key = "event:${head.event.id}", distinctId = head.event.distinctId, kind = JourneyWork.Kind.EVENT,
+    ) {
         notifyCommittedSubscribers(head)
         while (head.nextAdmission < head.admissionTickets.size) {
             var ticket = head.admissionTickets[head.nextAdmission]
             if (ticket.subscriber.predicate(head.event)) {
-                suspend fun accepts() = runCatching {
-                    ticket.subscriber.handler.onCommitted(head.event, ticket.generation)
-                }.onFailure { Log.w(LOG_TAG, "Admission committed-event subscriber failed", it) }.getOrDefault(false)
+                suspend fun accepts(): Boolean {
+                    val plan = ticket.subscriber.plan
+                    if (plan == null) return ticket.subscriber.handler.onCommitted(head.event, ticket.generation)
+                    val children = plan(head.event, ticket.generation) ?: return false
+                    head.children.addAll(children)
+                    return true
+                }
                 if (!accepts()) {
                     val refreshed = sampleAdmissionTickets()
-                    if (refreshed == head.admissionTickets) return false
+                    if (refreshed == head.admissionTickets) return@JourneyWork JourneyWork.Result.Retry
                     head.admissionTickets = refreshed
-                    ticket = refreshed.getOrNull(head.nextAdmission) ?: return true
-                    if (!accepts()) return false
+                    ticket = refreshed.getOrNull(head.nextAdmission)
+                        ?: return@JourneyWork JourneyWork.Result.Expand(head.children)
+                    if (!accepts()) return@JourneyWork JourneyWork.Result.Retry
                 }
             }
             head.nextAdmission++
         }
-        return true
-    }
-
-    private fun scheduleRouteRetry() {
-        if (routeRetryJob != null || closing.get()) return
-        if (!routeDeliveryFailed && !(journeyResumeRetryPending && !journeyResumeRetryQueued)) return
-        routeRetryJob = scope.launch {
-            delay(1_000L)
-            routeCommands.trySend(RouteCommand.RetryTimer)
+        JourneyWork.Result.Expand(head.children)
+    }.also { work ->
+        work.completed = {
+            acknowledgeLocalRouteIfNeeded(head.localRouteEventId)
+            for (ticket in head.admissionTickets) ticket.subscriber.afterAttempt(head.event, true)
+        }
+        work.failed = {
+            for (ticket in head.admissionTickets) ticket.subscriber.afterAttempt(head.event, false)
         }
     }
 
@@ -501,6 +471,17 @@ internal class EventLog(
         )
     }
 
+    /** Expand an event at its queue position into independently ordered Journey inputs. */
+    fun subscribeJourneyEvents(
+        sampleGeneration: () -> Long,
+        afterAttempt: suspend (StoredEvent, Boolean) -> Unit = { _, _ -> },
+        plan: suspend (StoredEvent, Long) -> List<JourneyWork>?,
+    ) {
+        admissionSubscribers.add(AdmissionSubscriber(
+            { true }, sampleGeneration, AdmissionCommittedSubscription { _, _ -> true }, plan, afterAttempt,
+        ))
+    }
+
     /**
      * Register a forwarding-only subscriber. Presence is sampled before the
      * store await and checked again by the FIFO forwarding worker immediately
@@ -559,8 +540,7 @@ internal class EventLog(
     suspend fun closeWorkers() {
         forwardingActive.set(false)
         closing.set(true)
-        journeyResumeRetryHandler = null
-        routeRetryJob?.cancel()
+        routeQueue.close()
         acknowledgementRetryJob?.cancel()
         awaitBarrier()
         commands.close()
@@ -1006,23 +986,74 @@ internal class EventLog(
     suspend fun replayPendingLocalRoutes(distinctId: String): Boolean = runCatching {
         val admissionTickets = sampleAdmissionTickets()
         val recovered = store.queryPendingLocalRoutes(distinctId)
-            .filter { activeLocalRouteIds.add(it.id) }
-            .map { RouteCommand.Event(it, admissionTickets, it.id) }
-        for ((index, route) in recovered.withIndex()) {
-            if (!deliverRouteHead(route)) {
-                // Recovery is inline because the Journey worker may own it.
-                // A refused prefix transfers to the same ordered queue for retry.
-                routeCommands.trySend(RouteCommand.RecoveryPrefix(recovered.drop(index)))
-                return@runCatching false
+        val retained = mutableListOf<JourneyWork>()
+        var accepted = true
+        try {
+            for (event in recovered) {
+                // Check ownership before the suspension: receipt cleanup may finish while
+                // the pending-route snapshot is being read.
+                if (event.id in activeLocalRouteIds) continue
+                if (!store.hasPendingLocalRoute(event.id, distinctId)) continue
+                if (!activeLocalRouteIds.add(event.id)) continue
+                val work = eventWork(RouteCommand.Event(event, admissionTickets, event.id))
+                if (retained.isNotEmpty()) retained += work else {
+                    val attempted = attemptRecoveryWork(work)
+                    retained.addAll(attempted.remaining)
+                    accepted = accepted && attempted.accepted
+                }
             }
-            acknowledgeLocalRouteIfNeeded(route.localRouteEventId)
+        } finally {
+            if (retained.isNotEmpty()) routeCommands.trySend(RouteCommand.RecoveryPrefix(retained))
         }
+        if (retained.isNotEmpty()) return@runCatching accepted
         retryFailedLocalRouteAcknowledgements()
         if (!routingDeferred.get()) routeCommands.trySend(RouteCommand.Retry)
         true
     }.onFailure {
         Log.w(LOG_TAG, "Failed to replay pending local routes", it)
     }.getOrDefault(false)
+
+    // Recovery can run on the Journey worker that a live route is awaiting.
+    // Attempt inline, then transfer refused work to the routing worker without
+    // waiting for that worker or giving recovery a retry timer of its own.
+    private data class RecoveryAttempt(val remaining: List<JourneyWork>, val accepted: Boolean)
+
+    private suspend fun attemptRecoveryWork(work: JourneyWork): RecoveryAttempt {
+        val result = try { work.attempt() }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (error: Exception) {
+            Log.w(LOG_TAG, "Recovered Journey work failed", error)
+            JourneyWork.Result.Retry
+        }
+        return when (result) {
+            JourneyWork.Result.Blocked -> RecoveryAttempt(listOf(work), true)
+            JourneyWork.Result.Retry -> {
+                work.hasFailed = true
+                work.waiting = true
+                work.failed()
+                RecoveryAttempt(listOf(work), false)
+            }
+            is JourneyWork.Result.Done -> { work.completed(); RecoveryAttempt(result.following, true) }
+            is JourneyWork.Result.Expand -> {
+                if (result.children.isEmpty()) { work.completed(); RecoveryAttempt(emptyList(), true) }
+                else {
+                    var remaining = result.children.size
+                    var accepted = true
+                    val retained = mutableListOf<JourneyWork>()
+                    for (child in result.children) {
+                        val completed = child.completed
+                        val failed = child.failed
+                        child.completed = { completed(); remaining--; if (remaining == 0) work.completed() }
+                        child.failed = { failed(); work.failed() }
+                        val attempted = attemptRecoveryWork(child)
+                        retained.addAll(attempted.remaining)
+                        accepted = accepted && attempted.accepted
+                    }
+                    RecoveryAttempt(retained, accepted)
+                }
+            }
+        }
+    }
 
     private suspend fun acknowledgeLocalRouteIfNeeded(eventId: String?) {
         if (eventId == null) return

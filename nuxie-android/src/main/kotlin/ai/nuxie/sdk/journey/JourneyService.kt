@@ -5,6 +5,8 @@ import ai.nuxie.sdk.events.JsonValueConverter
 import ai.nuxie.sdk.events.StableEventCaptureResult
 import ai.nuxie.sdk.events.StableEventCommitAdmission
 import ai.nuxie.sdk.events.JourneyEventOrigin
+import ai.nuxie.sdk.events.JourneyWork
+import ai.nuxie.sdk.events.JourneyWorkQueue
 import ai.nuxie.sdk.events.JourneyDeadline
 import ai.nuxie.sdk.events.StoredEvent
 import ai.nuxie.sdk.events.SystemEventNames
@@ -216,13 +218,15 @@ internal class JourneyService(
     private val beforeParkedResume: suspend () -> Unit = {},
     private val replayPendingLocalRoutes: suspend (String) -> Boolean = { true },
     private val enqueueJourneyDeadline: ((JourneyDeadline) -> Unit)? = null,
-    private val requestJourneyResumeRetry: () -> Unit = {},
+    private val enqueueJourneyWork: ((JourneyWork) -> Unit)? = null,
+    private val resumeJourneyWork: () -> Unit = {},
     private val deferCommittedRouting: () -> Long = { 0L },
     private val releaseCommittedRouting: (Long) -> Unit = {},
     private val readJournalRuns: suspend (JourneyRunJournal) -> List<JourneyRun> = { it.runs() },
     private val journalBeforePersist: () -> Unit = {},
     private val readNativeValues: suspend (ai.nuxie.sdk.presentation.ExperienceRunValues) -> JsonObject = { it.journeyValues() },
     private val sleepMillis: suspend (Long) -> Unit = { delay(it) },
+    private val retryClockMillis: () -> Long = { System.nanoTime() / 1_000_000L },
     private val artifactManager: JourneyArtifactManager? = null,
     private val prepareNativeValues: suspend (ai.nuxie.sdk.presentation.ExperienceRunValues,
         AuthenticatedJourneyRelease, ai.nuxie.sdk.experiences.JourneyReleaseDelivery) -> Unit = { _, _, _ -> },
@@ -260,7 +264,6 @@ internal class JourneyService(
     )
 
     private sealed interface Command {
-        data class SettleCommerce(val key: CommerceExecutionKey, override val done: CompletableDeferred<Unit>? = null) : Command
         val done: CompletableDeferred<Unit>?
 
         data class Initialize(
@@ -357,16 +360,24 @@ internal class JourneyService(
         data class Wake(
             val generation: Long,
             val deadlineMillis: Long,
-            val deadlines: List<JourneyDeadline>?,
+            val deadlines: List<JourneyDeadline>,
             override val done: CompletableDeferred<Unit>? = null,
         ) : Command
-        data class Deadline(val deadline: JourneyDeadline, val accepted: CompletableDeferred<Boolean>? = null) : Command {
+        data class Deadline(val deadline: JourneyDeadline, val accepted: CompletableDeferred<JourneyWork.Result>? = null) : Command {
             override val done: CompletableDeferred<Unit>? = null
         }
-        data class NativeRetry(val runId: String, val checkpoint: ParkCheckpoint) : Command {
+        data class PlanEvent(val event: StoredEvent, val generation: Long,
+            val result: CompletableDeferred<List<JourneyWork>?>) : Command {
             override val done: CompletableDeferred<Unit>? = null
         }
-        data class ResumeRetry(val accepted: CompletableDeferred<Boolean>) : Command {
+        data class Operation(val attempt: suspend () -> JourneyWork.Result,
+            val result: CompletableDeferred<JourneyWork.Result>) : Command {
+            override val done: CompletableDeferred<Unit>? = null
+        }
+        data class QueueWork(val work: JourneyWork) : Command {
+            override val done: CompletableDeferred<Unit>? = null
+        }
+        data object RetryWork : Command {
             override val done: CompletableDeferred<Unit>? = null
         }
         data class PresentationEnded(
@@ -403,31 +414,26 @@ internal class JourneyService(
             }?.takeIf { run.completion == null }
         }
     }
-    private data class NativeRestoreRetry(val checkpoint: ParkCheckpoint, val atMillis: Long)
     private val routingDeferralLock = Any()
     private var routingDeferral: Long? = null
     private val enqueuedDeadlines = mutableSetOf<JourneyDeadline>()
-    private val foregroundDeadlines = mutableSetOf<JourneyDeadline>()
-    private val deadlineRetryAt = mutableMapOf<JourneyDeadline, Long>()
-    private val nativeRestoreRetryJobs = mutableMapOf<String, Job>()
     // Setup can run from a receiver, worker, or service before any Activity is
     // visible. Keep screen-bearing admission closed until the lifecycle
     // coordinator observes the first Activity entering the foreground.
     private val foreground = JourneyForegroundAdmission()
     private var profileState: ProfileState? = null
     private class ParkCommitFailure(val retry: suspend () -> Unit, cause: Exception) : Exception(cause)
-    // Only a refused event delivery retains this continuation; EventLog owns its retry timer.
-    private val pendingEventStarts = mutableMapOf<String, suspend () -> Unit>()
+    private var journalGeneration = 0L
+    private var recoveryPending = false
+    private var replayingRoutes = false
     private var journal: JourneyRunJournal? = null
         set(value) {
             field = value
-            pendingEventStarts.clear()
+            journalGeneration++
+            recoveryPending = value != null
             enqueuedDeadlines.clear()
-            foregroundDeadlines.clear()
-            deadlineRetryAt.clear()
             cancelWake()
         }
-    private val nativeRestoreRetries = mutableMapOf<String, NativeRestoreRetry>()
     private data class NativeRunValues(val owner: String, val values: ai.nuxie.sdk.presentation.ExperienceRunValues,
         val descriptor: JsonObject)
     private val nativeValuesByRun = mutableMapOf<String, NativeRunValues>()
@@ -452,16 +458,12 @@ internal class JourneyService(
     }
 
     private suspend fun retireNativeValues(runId: String) {
-        nativeRestoreRetries.remove(runId)
-        nativeRestoreRetryJobs.remove(runId)?.cancel()
         nativeValuesByRun.remove(runId)?.values?.retire()
     }
 
     private suspend fun retireOwnerValues(owner: String?) {
         val entries = nativeValuesByRun.filterValues { owner == null || it.owner == owner }
         entries.keys.forEach(nativeValuesByRun::remove)
-        entries.keys.forEach(nativeRestoreRetries::remove)
-        entries.keys.forEach { nativeRestoreRetryJobs.remove(it)?.cancel() }
         entries.values.forEach { it.values.retire() }
     }
     private val retainedReleasesByDigest = linkedMapOf<String, AuthenticatedJourneyRelease>()
@@ -479,6 +481,82 @@ internal class JourneyService(
     private val presentationCallbackMutex = Mutex()
     private var wakeJob: Job? = null
     private var wakeGeneration = 0L
+
+    private val localWorkQueue by lazy {
+        JourneyWorkQueue(scope, { commands.trySend(Command.RetryWork) }, sleepMillis, retryClockMillis)
+    }
+
+    private class DeferredPark(val runId: String, val stepId: String, val failed: Boolean,
+        val resume: suspend () -> Unit) : Exception()
+    private class WorkUnavailable : Exception()
+    private class ForegroundRequired : Exception()
+    private var executingWork: JourneyWork? = null
+
+    private fun queueWork(work: JourneyWork) {
+        val enqueue = enqueueJourneyWork
+        if (enqueue != null) enqueue(work) else commands.trySend(Command.QueueWork(work))
+    }
+
+    private suspend fun onWorker(attempt: suspend () -> JourneyWork.Result): JourneyWork.Result {
+        if (coroutineContext[WorkerContext]?.owner === this) return attempt()
+        val result = CompletableDeferred<JourneyWork.Result>()
+        commands.send(Command.Operation(attempt, result))
+        return result.await()
+    }
+
+    private fun operation(
+        key: String, owner: String, runId: String? = null,
+        deferred: Boolean = false, repairsCustomer: Boolean = false,
+        body: suspend (JourneyWork) -> Unit,
+    ): JourneyWork {
+        var continuation: (suspend (JourneyWork) -> Unit) = body
+        var retryingPark = deferred
+        val target = journal
+        lateinit var work: JourneyWork
+        work = JourneyWork(if (repairsCustomer) key else "journal:$journalGeneration:$key",
+            owner, runId, repairsCustomer, initiallyDeferred = deferred) {
+            onWorker {
+                if (identity.distinctId() != owner || (!repairsCustomer && journal !== target)) return@onWorker JourneyWork.Result.Done()
+                val previous = executingWork
+                executingWork = work
+                try {
+                    continuation(work)
+                    JourneyWork.Result.Done()
+                } catch (failure: ParkCommitFailure) {
+                    continuation = { failure.retry() }
+                    JourneyWork.Result.Retry
+                } catch (park: DeferredPark) {
+                    if (retryingPark) {
+                        continuation = { park.resume() }
+                        JourneyWork.Result.Retry
+                    } else {
+                        retryingPark = true
+                        JourneyWork.Result.Done(listOf(operation(
+                            "park:$owner:${park.runId}:${park.stepId}", owner, park.runId, deferred = park.failed,
+                        ) { park.resume() }))
+                    }
+                } catch (_: ForegroundRequired) { JourneyWork.Result.Blocked }
+                catch (cancelled: CancellationException) { throw cancelled }
+                catch (error: Exception) {
+                    Log.w(LOG_TAG, "Queued Journey work will retry", error)
+                    JourneyWork.Result.Retry
+                } finally {
+                    executingWork = previous
+                }
+            }
+        }
+        return work
+    }
+
+    private fun deferredPark(runId: String, stepId: String, checkpoint: ParkCheckpoint?, failed: Boolean = true): DeferredPark =
+        DeferredPark(runId, stepId, failed) {
+            val target = journal ?: throw WorkUnavailable()
+            val current = readJournalRuns(target).firstOrNull { it.id == runId } ?: return@DeferredPark
+            if (current.stepId == stepId && current.park != null &&
+                (checkpoint == null || ParkCheckpoint.of(current) == checkpoint)) {
+                resumeParkedRuns(currentState(), null, onlyRunId = runId, restoreNative = true)
+            }
+        }
 
     private val worker = scope.launch(WorkerContext(this)) {
         for (command in commands) {
@@ -503,7 +581,6 @@ internal class JourneyService(
                         command.event,
                         command.admittedGeneration,
                     )
-                    is Command.SettleCommerce -> drainDeferredCommerce(command.key)
                     is Command.ResponseSaveDisplayChanged -> responseSaveDisplayChanged(command.journal, command.journeyId)
                     is Command.ResponseSaveContinuation -> {
                         if (isExecutionCurrent(command.fence, command.journal) &&
@@ -523,11 +600,10 @@ internal class JourneyService(
                     is Command.RefetchSettle -> refetchDidSettleNow(command.distinctId)
                     is Command.Wake -> wakeNow(command.generation, command.deadlineMillis, command.deadlines)
                     is Command.Deadline -> handleJourneyDeadlineNow(command.deadline)
-                    is Command.NativeRetry -> retryNativeRestoration(command.runId, command.checkpoint)
-                    is Command.ResumeRetry -> {
-                        retryJourneyResumeNow()
-                        true
-                    }
+                    is Command.PlanEvent -> prepareEventWorkNow(command.event, command.generation)
+                    is Command.Operation -> command.attempt()
+                    is Command.QueueWork -> { localWorkQueue.add(command.work); localWorkQueue.drain() }
+                    is Command.RetryWork -> { localWorkQueue.retryReady(); localWorkQueue.drain() }
                     is Command.PresentationEnded -> presentationEndedNow(command)
                 }
             }.onFailure {
@@ -537,8 +613,18 @@ internal class JourneyService(
             if (command is Command.Event) {
                 command.accepted?.complete(result.getOrNull() == true)
             }
-            if (command is Command.Deadline) command.accepted?.complete(true)
-            if (command is Command.ResumeRetry) command.accepted.complete(result.getOrNull() == true)
+            if (command is Command.Deadline) command.accepted?.complete(
+                result.getOrNull() as? JourneyWork.Result ?: JourneyWork.Result.Retry)
+            if (command is Command.Operation) {
+                val failure = result.exceptionOrNull()
+                if (failure != null) command.result.completeExceptionally(failure)
+                else command.result.complete(result.getOrNull() as JourneyWork.Result)
+            }
+            if (command is Command.PlanEvent) {
+                @Suppress("UNCHECKED_CAST")
+                val planned = result.getOrNull() as? List<JourneyWork>
+                command.result.complete(planned)
+            }
             if (command is Command.PresentationBatch) {
                 val failure = result.exceptionOrNull()
                 if (failure is CancellationException) {
@@ -628,10 +714,6 @@ internal class JourneyService(
             presenter?.shutdownOwnedBy(identity.distinctId())
             done.await()
         }
-    }
-
-    fun enqueueEvent(event: StoredEvent, admittedGeneration: Long) {
-        commands.trySend(Command.Event(event, admittedGeneration))
     }
 
     suspend fun handleEvent(event: StoredEvent, admittedGeneration: Long): Boolean {
@@ -815,44 +897,40 @@ internal class JourneyService(
     override suspend fun profileRefetchDidSettle(distinctId: String) =
         submit { done -> Command.RefetchSettle(distinctId, done) }
 
-    suspend fun handleJourneyDeadline(deadline: JourneyDeadline): Boolean {
+    suspend fun prepareEventWork(event: StoredEvent, admittedGeneration: Long): List<JourneyWork>? {
+        if (coroutineContext[WorkerContext]?.owner === this) return prepareEventWorkNow(event, admittedGeneration)
+        val result = CompletableDeferred<List<JourneyWork>?>()
+        commands.send(Command.PlanEvent(event, admittedGeneration, result))
+        return result.await()
+    }
+
+    suspend fun handleJourneyDeadline(deadline: JourneyDeadline): JourneyWork.Result {
         if (coroutineContext[WorkerContext]?.owner === this) return handleJourneyDeadlineNow(deadline)
-        val accepted = CompletableDeferred<Boolean>()
-        if (commands.trySend(Command.Deadline(deadline, accepted)).isFailure) return true
+        val accepted = CompletableDeferred<JourneyWork.Result>()
+        if (commands.trySend(Command.Deadline(deadline, accepted)).isFailure) return JourneyWork.Result.Done()
         return accepted.await()
     }
 
-    suspend fun handleJourneyResumeRetry(): Boolean {
-        if (coroutineContext[WorkerContext]?.owner === this) {
-            retryJourneyResumeNow()
-            return true
-        }
-        val accepted = CompletableDeferred<Boolean>()
-        if (commands.trySend(Command.ResumeRetry(accepted)).isFailure) return true
-        return accepted.await()
-    }
-
-    private suspend fun retryJourneyResumeNow() {
-        val state = currentState()
-        if (state == null) reconcileWithoutCopyNow() else resumeParkedRuns(state, null)
-    }
-
-    private suspend fun handleJourneyDeadlineNow(deadline: JourneyDeadline): Boolean {
-        enqueuedDeadlines.remove(deadline)
+    private suspend fun handleJourneyDeadlineNow(deadline: JourneyDeadline): JourneyWork.Result {
         val target = journal
-        if (!initialized || deadline.distinctId != identity.distinctId() || target?.distinctId != deadline.distinctId) return true
-        deadlineRetryAt[deadline] = nowMillis() + 1_000L
-        try {
-            resumeParkedRuns(currentState(), null, deadline = deadline)
-        } catch (cancelled: CancellationException) { throw cancelled }
-        catch (error: Exception) { Log.w(LOG_TAG, "Failed to handle Journey deadline", error) }
-        if (journal === target) scheduleNextWake()
-        return true
+        if (!initialized || deadline.distinctId != identity.distinctId()) return JourneyWork.Result.Done()
+        if (target?.distinctId != deadline.distinctId) return JourneyWork.Result.Retry
+        val work = deadline.work ?: operation("deadline:$deadline", deadline.distinctId, deadline.runId) {
+            resumeParkedRuns(currentState(), null, deadline = deadline, onlyRunId = deadline.runId)
+        }.also { deadline.work = it }
+        val result = work.attempt()
+        if (result is JourneyWork.Result.Done && journal === target) {
+            enqueuedDeadlines.remove(deadline)
+            scheduleNextWake()
+        }
+        return result
     }
 
     private fun queueDeadline(deadline: JourneyDeadline) {
         val enqueue = enqueueJourneyDeadline
-        if (enqueue != null) enqueue(deadline) else commands.trySend(Command.Deadline(deadline))
+        if (enqueue != null) enqueue(deadline) else queueWork(operation(
+            deadline.queueKey, deadline.distinctId, deadline.runId,
+        ) { resumeParkedRuns(currentState(), null, deadline = deadline, onlyRunId = deadline.runId) })
     }
 
     private fun holdRouting() = synchronized(routingDeferralLock) {
@@ -981,7 +1059,6 @@ internal class JourneyService(
         profileState?.artifacts?.close()
         profileState = null
         directlyRoutedRunByEventId.clear()
-        pendingEventStarts.clear()
         activePresentedRunIds.clear()
         pendingPresentationPurchasePlacements.clear()
         deferredCommerceOutcomes.clear()
@@ -1015,70 +1092,60 @@ internal class JourneyService(
      * installed when it is handled.
      */
     @Suppress("UNUSED_PARAMETER")
-    private suspend fun handleEventNow(
-        event: StoredEvent,
-        admittedGeneration: Long,
-    ): Boolean {
-        if (event.distinctId != identity.distinctId()) return true
-        if (event.name == JourneyEventNames.LEG_STARTED ||
-            event.name == JourneyEventNames.LEG_COMPLETED
-        ) return true
-        if (!initialized) return false
-        // The durable route must survive until the visible host has current authority.
-        if (foreground.isRevalidating()) return false
-        if (journal?.distinctId != event.distinctId) {
-            return startupProfileSettled && storageScope == null && !holdsEvents(event.distinctId)
-        }
-        // While the customer's copy is fetched and they have none, their
-        // events stay pending, untouched, and replay once a copy lands or the
-        // last fetch settles.
-        if (holdsEvents(event.distinctId)) return false
-        pendingEventStarts[event.id]?.let { retry ->
-            retry()
-            pendingEventStarts.remove(event.id)
-            scheduleNextWake()
-            return true
-        }
-        if (!recoverConversionOccurrences(throughEventId = event.id)) return false
-        val directlyRoutedRunId = directlyRoutedRunByEventId[event.id]
-        // Journeys already waiting run on their pinned releases, with or without a copy.
-        val state = currentState()
-        resumeParkedRuns(state, event, excludingRunId = directlyRoutedRunId)
-        if (!resumePresentationActionOutcome(event, excludingRunId = directlyRoutedRunId)) return false
-        directlyRoutedRunByEventId.remove(event.id)
-        // An event captured before this copy was installed (a first launch, or
-        // before a fresh copy replaced the old one) starts from the copy it is
-        // handled under. One customer's event never starts another's Journey.
-        if (state == null || !isCurrent(state) || state.distinctId != event.distinctId) {
-            scheduleNextWake()
-            return true
-        }
-        val arms = state.snapshot.profile.armedLegs.asSequence()
-            .filter {
-                it.entryCondition.text("type") == "event" &&
-                    it.entryCondition.text("eventName") == event.name
+    private suspend fun handleEventNow(event: StoredEvent, admittedGeneration: Long): Boolean {
+        val work = prepareEventWorkNow(event, admittedGeneration) ?: return false
+        var accepted = true
+        for (entry in work) {
+            when (val result = entry.attempt()) {
+                JourneyWork.Result.Blocked -> { queueWork(entry); accepted = false }
+                JourneyWork.Result.Retry -> { entry.hasFailed = true; entry.waiting = true; queueWork(entry); accepted = false }
+                is JourneyWork.Result.Done -> result.following.forEach(::queueWork)
+                is JourneyWork.Result.Expand -> result.children.forEach(::queueWork)
             }
-            .toList()
-        suspend fun startRemaining(index: Int, retryPark: (suspend () -> Unit)? = null) {
-            retryPark?.invoke()
-            for (next in index until arms.size) {
-                try {
-                    attemptStart(arms[next], state, event)
-                } catch (failure: ParkCommitFailure) {
-                    pendingEventStarts[event.id] = { startRemaining(next + 1, failure.retry) }
-                    throw failure
+        }
+        return accepted
+    }
+
+    @Suppress("UNUSED_PARAMETER")
+    private suspend fun prepareEventWorkNow(event: StoredEvent, admittedGeneration: Long): List<JourneyWork>? {
+        if (event.distinctId != identity.distinctId() || event.name == JourneyEventNames.LEG_STARTED ||
+            event.name == JourneyEventNames.LEG_COMPLETED) return emptyList()
+        if (!initialized || foreground.isRevalidating() || holdsEvents(event.distinctId) ||
+            (recoveryPending && !replayingRoutes)) return null
+        val target = journal
+        if (target?.distinctId != event.distinctId) {
+            return if (startupProfileSettled && storageScope == null) emptyList() else null
+        }
+        if (!recoverConversionOccurrences(throughEventId = event.id)) return null
+        val directOwner = directlyRoutedRunByEventId[event.id]
+        val state = currentState()
+        val runs = readJournalRuns(target)
+        val work = mutableListOf<JourneyWork>()
+        for (run in runs.filter { it.id != directOwner && it.completion == null }) {
+            work += operation("input:${event.id}:${run.id}", event.distinctId, run.id) {
+                resumeParkedRuns(currentState(), event, onlyRunId = run.id)
+                if (!resumePresentationActionOutcome(event, onlyRunId = run.id)) throw WorkUnavailable()
+            }
+        }
+        // Direct-route ownership survives all reads and planning failures.
+        directlyRoutedRunByEventId.remove(event.id)
+        if (state != null && isCurrent(state) && state.distinctId == event.distinctId) {
+            for ((index, arm) in state.snapshot.profile.armedLegs.withIndex()) {
+                if (arm.entryCondition.text("type") != "event" || arm.entryCondition.text("eventName") != event.name) continue
+                work += operation("start:${event.id}:$index", event.distinctId, "arm:${journeyStateArmReceipt(arm)}") { entry ->
+                    attemptStart(arm, state, event) { entry.runId = it }
                 }
             }
         }
-        startRemaining(0)
         scheduleNextWake()
-        return true
+        return work
     }
 
     /** Resume only the claimed commerce cursor that authored this stable outcome id. */
     private suspend fun resumePresentationActionOutcome(
         event: StoredEvent,
         excludingRunId: String? = null,
+        onlyRunId: String? = null,
     ): Boolean {
         val route = JourneyActionType.presentationOutcomeRoute(event.name) ?: return true
         val target = journal?.takeIf { it.distinctId == event.distinctId } ?: return true
@@ -1086,7 +1153,8 @@ internal class JourneyService(
         if (identityScope.distinctId != target.distinctId) return true
         val executionToken = executionFence.token()
         for (candidate in target.runs().filter {
-            it.id != excludingRunId && it.completion == null && (it.park == null || it.pendingCommerce != null)
+            it.id != excludingRunId && (onlyRunId == null || it.id == onlyRunId) &&
+                it.completion == null && (it.park == null || it.pendingCommerce != null)
         }) {
             if (!isExecutionCurrent(executionToken, target)) return true
             val release = releaseFor(candidate, currentState(), executionToken, target) ?: continue
@@ -1109,7 +1177,7 @@ internal class JourneyService(
             }
             if (candidate.pendingPresentationPublication != null) {
                 if (!settlePresentationPublication(candidate, release, target, executionToken, identityScope)) return false
-                return resumePresentationActionOutcome(event, excludingRunId)
+                return resumePresentationActionOutcome(event, excludingRunId, onlyRunId)
             }
             val nextStepId = (step["outlets"] as? JsonObject)?.text(route.second)
             if (nextStepId == null && candidate.authoredCloseOutcome != null) {
@@ -1190,13 +1258,12 @@ internal class JourneyService(
 
     private suspend fun foregroundNow() {
         if (!foreground.get()) return
-        enqueuedDeadlines.clear()
-        foregroundDeadlines.clear()
-        deadlineRetryAt.clear()
         foregroundReceiptResetCustomers.remove(identity.distinctId())
         resetForegroundReceiptsIfNeeded()
-        val state = currentState() ?: return reconcileWithoutCopyNow()
-        reconcileNow(state.generation)
+        val state = currentState()
+        if (state == null) reconcileWithoutCopyNow() else reconcileNow(state.generation)
+        resumeJourneyWork()
+        if (enqueueJourneyWork == null) localWorkQueue.drain()
     }
 
     private suspend fun userDidChangeNow(from: String, to: String) {
@@ -1218,7 +1285,6 @@ internal class JourneyService(
             profileState = null
         }
         directlyRoutedRunByEventId.clear()
-        pendingEventStarts.clear()
         activePresentedRunIds.clear()
         pendingPresentationPurchasePlacements.clear()
         deferredCommerceOutcomes.clear()
@@ -1269,20 +1335,55 @@ internal class JourneyService(
             return
         }
         try {
-            if (!replayPendingLocalRoutes(distinctId)) {
+            if (!replayRoutes(distinctId)) {
                 Log.w(LOG_TAG, "Pending Journey routes stay queued; waits resolve after they replay")
-                requestJourneyResumeRetry()
+                queueReconciliation(distinctId)
                 return
             }
-            resumeParkedRuns(null, null)
+            recoveryPending = false
+            enqueueParkedRuns()
             scheduleNextWake()
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (error: Exception) {
             Log.w(LOG_TAG, "Journey reconciliation without a copy will retry", error)
-            requestJourneyResumeRetry()
+            queueReconciliation(distinctId)
         } finally {
             updateRoutingHold()
         }
+    }
+
+    private suspend fun replayRoutes(owner: String): Boolean {
+        val previous = replayingRoutes
+        replayingRoutes = true
+        return try { replayPendingLocalRoutes(owner) } finally { replayingRoutes = previous }
+    }
+
+    private fun queueReconciliation(owner: String) {
+        queueWork(operation("reconcile:$owner", owner, deferred = true, repairsCustomer = true) {
+            if (holdsEvents(owner) || foreground.isRevalidating()) throw WorkUnavailable()
+            val state = currentState()
+            if (journal?.distinctId != owner && !ensureJournal(owner)) throw WorkUnavailable()
+            if (state != null && !settleLivePresentationPublications(state)) throw WorkUnavailable()
+            if (!replayRoutes(owner)) throw WorkUnavailable()
+            recoveryPending = false
+            enqueueParkedRuns()
+            if (state != null) evaluateStateArms(state)
+            scheduleNextWake()
+        })
+    }
+
+    private suspend fun enqueueParkedRuns() {
+        val target = journal ?: return
+        for (run in readJournalRuns(target).filter { it.park != null && it.completion == null }) {
+            val park = checkNotNull(run.park)
+            // Timed parks without saved input are owned exclusively by their deadline.
+            if (park.anchorAtMillis != null && park.pendingEvent == null && park.candidateEvents.isEmpty()) continue
+            val work = operation("park:${target.distinctId}:${run.id}:${run.stepId}", target.distinctId, run.id) {
+                resumeParkedRuns(currentState(), null, onlyRunId = run.id, restoreNative = true)
+            }
+            if (enqueueJourneyWork == null) localWorkQueue.add(work) else queueWork(work)
+        }
+        if (enqueueJourneyWork == null) localWorkQueue.drain()
     }
 
     /** A fetch of the customer's copy is running and they have no usable copy. */
@@ -1388,6 +1489,7 @@ internal class JourneyService(
         }.onFailure {
             Log.e(LOG_TAG, "Journey journal recovery failed", it)
             journal = null
+            queueReconciliation(distinctId)
         }
     }
 
@@ -1434,26 +1536,36 @@ internal class JourneyService(
     private suspend fun reconcileNow(generation: Long) {
         if (foreground.isRevalidating()) return
         val state = currentState()?.takeIf { it.generation == generation } ?: return
-        if (!ensureJournal(state.distinctId)) return
-        if (!settleLivePresentationPublications(state)) {
-            journal = null
-            cancelWake()
-            return
+        try {
+            if (!ensureJournal(state.distinctId)) { queueReconciliation(state.distinctId); return }
+            if (!settleLivePresentationPublications(state)) {
+                recoveryPending = true
+                queueReconciliation(state.distinctId)
+                return
+            }
+            if (!isCurrent(state)) return
+            // A pending live route may still own its receipt while this command
+            // runs. It is already queued behind us and will acknowledge itself;
+            // every unowned receipt is replayed before fresh state-arm admission.
+            recoveryPending = true
+            if (!replayRoutes(state.distinctId)) {
+                recoveryPending = true
+                queueReconciliation(state.distinctId)
+                return
+            }
+            if (!isCurrent(state)) return
+            recoveryPending = false
+            enqueueParkedRuns()
+            evaluateStateArms(state)
+            scheduleNextWake()
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (error: Exception) {
+            recoveryPending = true
+            Log.w(LOG_TAG, "Journey reconciliation will retry", error)
+            queueReconciliation(state.distinctId)
+        } finally {
+            updateRoutingHold()
         }
-        if (!isCurrent(state)) return
-        // A pending live route may still own its receipt while this command
-        // runs. It is already queued behind us and will acknowledge itself;
-        // every unowned receipt is replayed before fresh state-arm admission.
-        if (!replayPendingLocalRoutes(state.distinctId)) {
-            journal = null
-            cancelWake()
-            return
-        }
-        if (!isCurrent(state)) return
-        resumeParkedRuns(state, null)
-        evaluateStateArms(state)
-        scheduleNextWake()
-        updateRoutingHold()
     }
 
     private suspend fun settleLivePresentationPublications(state: ProfileState): Boolean {
@@ -1543,13 +1655,23 @@ internal class JourneyService(
         if (!isCurrent(state)) return
         state.snapshot.profile.armedLegs.asSequence()
             .filter { it.entryCondition.text("type") != "event" }
-            .forEach { attemptStart(it, state, null) }
+            .forEach { arm ->
+                val work = operation("state:${state.distinctId}:${journeyStateArmReceipt(arm)}", state.distinctId,
+                    "arm:${journeyStateArmReceipt(arm)}") { entry ->
+                    attemptStart(arm, state, null) { entry.runId = it }
+                }
+                if (enqueueJourneyWork == null) {
+                    localWorkQueue.add(work)
+                    localWorkQueue.drain()
+                } else queueWork(work)
+            }
     }
 
     private suspend fun attemptStart(
         arm: JourneyPlaneProfile.Arm,
         state: ProfileState,
         event: StoredEvent?,
+        admitted: (String) -> Unit = {},
     ) {
         val currentJournal = journal?.takeIf {
             it.distinctId == state.distinctId && it.distinctId !in revokingCustomers
@@ -1649,6 +1771,7 @@ internal class JourneyService(
                 }
                 throw failure
             } ?: return
+            admitted(run.id)
             if (!isExecutionCurrent(executionToken, currentJournal)) {
                 abandonRun(run, currentJournal)
                 return
@@ -1716,38 +1839,21 @@ internal class JourneyService(
     }
 
     private fun deadlineFor(run: JourneyRun, owner: String): JourneyDeadline? = ParkCheckpoint.of(run)?.takeIf {
-        // Availability parks own a retry time, not a timed control's queue entry.
+        // Presentation availability is queue work; only authored timed controls have deadlines.
         it.anchorAtMillis != null
     }?.let {
-        JourneyDeadline(owner, run.id, it.stepId, it.anchorAtMillis, it.wakeAtMillis)
-    }
-
-    private fun registerNativeRestoreRetry(runId: String, checkpoint: ParkCheckpoint) {
-        // Restoration owns this checkpoint's retry until it succeeds.
-        cancelWake()
-        if (nativeRestoreRetries[runId]?.checkpoint == checkpoint && nativeRestoreRetryJobs[runId] != null) return
-        nativeRestoreRetries[runId] = NativeRestoreRetry(checkpoint, nowMillis() + 5_000L)
-        nativeRestoreRetryJobs.remove(runId)?.cancel()
-        nativeRestoreRetryJobs[runId] = scope.launch {
-            sleepMillis(5_000L)
-            commands.trySend(Command.NativeRetry(runId, checkpoint))
+        JourneyDeadline(owner, run.id, it.stepId, it.anchorAtMillis, it.wakeAtMillis).also { deadline ->
+            deadline.queueKey = "deadline:$journalGeneration:$deadline"
         }
     }
 
-    private suspend fun retryNativeRestoration(runId: String, checkpoint: ParkCheckpoint) {
-        if (nativeRestoreRetries[runId]?.checkpoint != checkpoint) return
-        nativeRestoreRetryJobs.remove(runId)
-        // Native retry restores state; only a queued deadline can authorize a timeout.
-        resumeParkedRuns(currentState(), null, nativeRetry = runId to checkpoint)
-    }
-
-    /** With no [state] (no usable copy), parked runs continue on their pinned releases. */
     private suspend fun resumeParkedRuns(
         state: ProfileState?,
         event: StoredEvent?,
         excludingRunId: String? = null,
         deadline: JourneyDeadline? = null,
-        nativeRetry: Pair<String, ParkCheckpoint>? = null,
+        onlyRunId: String? = null,
+        restoreNative: Boolean = false,
     ) {
         val identityScope = identity.captureScope()
         if (state != null && (identityScope.distinctId != state.distinctId || !isCurrent(state))) return
@@ -1760,27 +1866,21 @@ internal class JourneyService(
         catch (cancelled: CancellationException) { throw cancelled }
         catch (error: Exception) {
             Log.w(LOG_TAG, "Failed to inspect parked Journey runs", error)
-            if (event != null || deadline != null) throw error
-            cancelWake()
-            requestJourneyResumeRetry()
-            return
+            throw error
         }
         try {
             for (parked in runs.filter {
-                it.id != excludingRunId && it.park != null && it.completion == null &&
+                it.id != excludingRunId && (onlyRunId == null || it.id == onlyRunId) &&
+                    it.park != null && it.completion == null &&
                     it.pendingPresentationPublication == null
             }) {
                 if (journal !== currentJournal ||
                     (if (state != null) !isCurrent(state) else !profileFence.isCurrent(profileToken))) return
                 val checkpointIdentity = ParkCheckpoint.of(parked)
-                if (nativeRetry != null && (parked.id != nativeRetry.first || checkpointIdentity != nativeRetry.second)) continue
                 if (deadline != null && deadlineFor(parked, currentJournal.distinctId) != deadline) continue
                 var park = parked.park ?: continue
-                val nativeRetryDue = nativeRestoreRetries[parked.id]?.let {
-                    it.checkpoint == checkpointIdentity && it.atMillis <= nowMillis()
-                } == true
                 if (event == null && park.pendingEvent == null && park.candidateEvents.isEmpty() &&
-                    (park.wakeAtMillis == null || park.wakeAtMillis!! > nowMillis()) && !nativeRetryDue) continue
+                    (park.wakeAtMillis == null || park.wakeAtMillis!! > nowMillis()) && !restoreNative) continue
                 val release = releaseFor(parked, state, executionToken, currentJournal) ?: continue
                 if (!isExecutionCurrent(executionToken, currentJournal)) return
                 val step = release.leg.getValue("steps").jsonArray.map { it.jsonObject }
@@ -1791,29 +1891,18 @@ internal class JourneyService(
                         currentJournal.appendParkedCandidate(parked.id, parked.stepId, park, candidate)
                     } ?: continue
                 }
-                // A rendered deadline is consumed before native restoration. Ordinary
-                // events keep Android's existing background candidate selection.
-                if (event == null && !foreground.get() && release.hasScreens()) {
-                    if (deadline != null) foregroundDeadlines += deadline
-                    continue
-                }
-                if (event == null && nativeRestoreRetries[parked.id]?.let {
-                    it.checkpoint == checkpointIdentity && it.atMillis > nowMillis()
-                } == true) continue
+                // Check the background gate before restoring native values.
+                if (event == null && !foreground.get() && release.hasScreens()) throw ForegroundRequired()
                 val context = try {
                     val values = preparedNativeValues(parked, release, currentJournal)
                     JsonObject(parked.context + mapOf("responses" to readNativeValues(values),
-                        "formAnswers" to values.formAnswers(release.descriptor))).also {
-                        nativeRestoreRetries.remove(parked.id)
-                        nativeRestoreRetryJobs.remove(parked.id)?.cancel()
-                    }
+                        "formAnswers" to values.formAnswers(release.descriptor)))
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (error: Exception) {
                     if (!isExecutionCurrent(executionToken, currentJournal)) return
-                    checkpointIdentity?.let { registerNativeRestoreRetry(parked.id, it) }
                     Log.w(LOG_TAG, "Parked native value restoration failed", error)
-                    if (deadline != null) throw error
-                    continue
+                    if (event != null) throw deferredPark(parked.id, parked.stepId, checkpointIdentity)
+                    throw error
                 }
                 if (!isExecutionCurrent(executionToken, currentJournal)) return
                 val checkpoint = controlCheckpoint(park)
@@ -1828,7 +1917,10 @@ internal class JourneyService(
                 park = publishJournalIfCurrent(executionToken, identityScope) {
                     currentJournal.selectParkedEvent(parked.id, parked.stepId, park, selected)
                 } ?: continue
-                if (release.hasScreens() && !foreground.get()) continue
+                if (release.hasScreens() && !foreground.get()) {
+                    if (park.pendingEvent != null) throw deferredPark(parked.id, parked.stepId, checkpointIdentity, failed = false)
+                    continue
+                }
                 val wakeAt = park.wakeAtMillis
                 if (selected == null && wakeAt != null) {
                     if (wakeAt > nowMillis()) continue
@@ -1857,10 +1949,12 @@ internal class JourneyService(
                     if (advance == null) checkpoint else null, currentJournal, originIdentityScope = identityScope)
             }
         } catch (cancelled: CancellationException) { throw cancelled }
+        catch (paused: ForegroundRequired) { throw paused }
+        catch (deferred: DeferredPark) { throw deferred }
+        catch (failure: ParkCommitFailure) { throw failure }
         catch (error: Exception) {
             Log.w(LOG_TAG, "Failed to resume parked Journey", error)
-            if (event != null || deadline != null) throw error
-            requestJourneyResumeRetry()
+            throw error
         }
         scheduleNextWake()
     }
@@ -2418,22 +2512,17 @@ internal class JourneyService(
         if (deferredCommerceOutcomes.remove(key) != null) drainDeferredCommerce(key)
     }
 
-    private suspend fun drainDeferredCommerce(key: CommerceExecutionKey) {
-        val target = journal ?: return
-        if (target.distinctId != key.owner || executionFence.token().generation != key.generation) return
-        val accepted = try {
-            val pending = target.runs().firstOrNull { it.id == key.runId && it.completion == null }?.pendingCommerceOutcome ?: return
-            resumePresentationActionOutcome(StoredEvent(checkNotNull(pending.id), pending.name,
-                pending.properties, pending.occurredAtMillis, target.distinctId))
-        } catch (error: CancellationException) { throw error
-        } catch (error: Exception) {
-            Log.w(LOG_TAG, "Deferred commerce settlement remains pending", error)
-            false
-        }
-        if (!accepted) scope.launch {
-            delay(5_000)
-            commands.trySend(Command.SettleCommerce(key))
-        }
+    private fun drainDeferredCommerce(key: CommerceExecutionKey) {
+        queueWork(operation("commerce:${key.owner}:${key.runId}:${key.generation}", key.owner, key.runId) {
+            val target = journal ?: throw WorkUnavailable()
+            if (executionFence.token().generation != key.generation) return@operation
+            val pending = target.runs().firstOrNull { it.id == key.runId && it.completion == null }
+                ?.pendingCommerceOutcome ?: return@operation
+            if (!resumePresentationActionOutcome(StoredEvent(checkNotNull(pending.id), pending.name,
+                pending.properties, pending.occurredAtMillis, target.distinctId), onlyRunId = key.runId)) {
+                throw WorkUnavailable()
+            }
+        })
     }
 
     private suspend fun continueExecutionNow(command: Command.ContinueExecution) {
@@ -2807,6 +2896,38 @@ internal class JourneyService(
         originIdentityScope: IdentityScope = identity.captureScope(),
         startingEventAtMillis: Long? = null,
     ) {
+        if (executingWork != null) {
+            executeNow(initial, release, executionToken, signal, initialCheckpoint, target,
+                initialPresentationReservation, dismissPresentationOnCompletion, eventSource,
+                originIdentityScope, startingEventAtMillis)
+            return
+        }
+        val work = operation("execute:${target.distinctId}:${initial.id}:${initial.stepId}", target.distinctId, initial.id) {
+            executeNow(initial, release, executionToken, signal, initialCheckpoint, target,
+                initialPresentationReservation, dismissPresentationOnCompletion, eventSource,
+                originIdentityScope, startingEventAtMillis)
+        }
+        when (val result = work.attempt()) {
+            JourneyWork.Result.Blocked -> queueWork(work)
+            JourneyWork.Result.Retry -> { work.hasFailed = true; work.waiting = true; queueWork(work) }
+            is JourneyWork.Result.Done -> result.following.forEach(::queueWork)
+            is JourneyWork.Result.Expand -> result.children.forEach(::queueWork)
+        }
+    }
+
+    private suspend fun executeNow(
+        initial: JourneyRun,
+        release: AuthenticatedJourneyRelease,
+        executionToken: JourneyExecutionFenceToken,
+        signal: JourneyControlExecutor.Signal,
+        initialCheckpoint: JourneyControlExecutor.Checkpoint?,
+        target: JourneyRunJournal,
+        initialPresentationReservation: JourneyPresentationReservation? = null,
+        dismissPresentationOnCompletion: Boolean = true,
+        eventSource: JourneyRuntimeEventSource? = null,
+        originIdentityScope: IdentityScope = identity.captureScope(),
+        startingEventAtMillis: Long? = null,
+    ) {
         val identityScope = originIdentityScope
         val leg = release.leg
         val executionSnapshot = initial.executionSnapshot ?: run {
@@ -2922,13 +3043,14 @@ internal class JourneyService(
                                 true
                             } == true) { "Park checkpoint commit rejected" }
                             if (!initialized || !isExecutionCurrent(executionToken, target) || !identity.isCurrentScope(identityScope)) return
-                            if (preparationFailed) registerNativeRestoreRetry(run.id,
-                                ParkCheckpoint(result.stepId, result.checkpoint.anchorAtMillis, result.checkpoint.wakeAtMillis))
                             scheduleNextWake()
+                            if (preparationFailed) throw deferredPark(run.id, result.stepId,
+                                ParkCheckpoint(result.stepId, result.checkpoint.anchorAtMillis, result.checkpoint.wakeAtMillis))
                         }
                         try {
                             commitPark()
                         } catch (cancelled: CancellationException) { throw cancelled }
+                        catch (deferred: DeferredPark) { throw deferred }
                         catch (error: Exception) {
                             Log.w(LOG_TAG, "Failed to persist Journey park point", error)
                             throw ParkCommitFailure(::commitPark, error)
@@ -3025,9 +3147,15 @@ internal class JourneyService(
                                     return
                                 }
                                 JourneyPresentationResult.Declined -> {
-                                    target.park(run.id, result.stepId, nowMillis() + 1_000L)
-                                    scheduleNextWake()
-                                    return
+                                    val at = nowMillis()
+                                    suspend fun parkAvailability() {
+                                        target.park(run.id, result.stepId, at)
+                                        throw deferredPark(run.id, result.stepId, ParkCheckpoint(result.stepId, null, at))
+                                    }
+                                    try { parkAvailability() }
+                                    catch (deferred: DeferredPark) { throw deferred }
+                                    catch (cancelled: CancellationException) { throw cancelled }
+                                    catch (error: Exception) { throw ParkCommitFailure(::parkAvailability, error) }
                                 }
                                 JourneyPresentationResult.Failed -> {
                                     finishExecution(run, "abandoned")
@@ -3433,71 +3561,38 @@ internal class JourneyService(
         catch (cancelled: CancellationException) { throw cancelled }
         catch (error: Exception) {
             Log.w(LOG_TAG, "Failed to inspect Journey park points", error)
-            if (journal === target && generation == wakeGeneration) scheduleWake(generation, nowMillis() + 1_000L, null)
+            queueReconciliation(target.distinctId)
             return
         }
         if (journal !== target || generation != wakeGeneration) return
         val deadlines = runs.mapNotNull { deadlineFor(it, target.distinctId) }
-        val availabilityWake = if (foreground.get()) runs.filter {
-            it.completion == null && it.pendingPresentationPublication == null && it.park?.anchorAtMillis == null &&
-                nativeRestoreRetries[it.id]?.checkpoint != ParkCheckpoint.of(it)
-        }.mapNotNull { it.park?.wakeAtMillis }.minOrNull() else null
-        val savedInputRunIds = runs.filter {
-            it.park?.pendingEvent != null || it.park?.candidateEvents?.isNotEmpty() == true
-        }.mapTo(mutableSetOf()) { it.id }
-        val current = deadlines.toSet()
-        enqueuedDeadlines.retainAll(current)
-        foregroundDeadlines.retainAll(current)
-        deadlineRetryAt.keys.retainAll(current)
-        var savedInputRetryNeeded = false
-        val pending = deadlines.filter { deadline ->
-            val restoring = nativeRestoreRetries[deadline.runId]?.let {
-                it.checkpoint == ParkCheckpoint(deadline.stepId, deadline.anchorAtMillis, deadline.wakeAtMillis)
-            } == true
-            if (restoring) false
-            else if (foreground.get() && deadline.runId in savedInputRunIds) {
-                savedInputRetryNeeded = true
-                false
-            } else deadline !in enqueuedDeadlines && deadline !in foregroundDeadlines
-        }
-        val dated = pending.map { deadline ->
-            deadline to maxOf(deadline.wakeAtMillis, deadlineRetryAt[deadline] ?: deadline.wakeAtMillis)
-        }
+        enqueuedDeadlines.retainAll(deadlines.toSet())
+        val pending = deadlines.filter { it !in enqueuedDeadlines }
         val now = nowMillis()
-        val due = dated.filter { it.second <= now }.map { it.first }
+        val due = pending.filter { it.wakeAtMillis <= now }
         enqueuedDeadlines.addAll(due)
-        if (savedInputRetryNeeded) requestJourneyResumeRetry()
         due.forEach(::queueDeadline)
-        val nextDeadline = dated.filter { it.second > now }.minOfOrNull { it.second }
-        val nextAvailability = availabilityWake?.let { if (it <= now) now + 1_000L else it }
-        val next = listOfNotNull(nextDeadline, nextAvailability).minOrNull() ?: return
-        scheduleWake(generation, next, if (next == nextDeadline) dated.filter { it.second == next }.map { it.first } else emptyList())
+        val next = pending.filter { it.wakeAtMillis > now }.minOfOrNull { it.wakeAtMillis } ?: return
+        scheduleWake(generation, next, pending.filter { it.wakeAtMillis == next })
     }
 
-    private fun scheduleWake(generation: Long, atMillis: Long, deadlines: List<JourneyDeadline>?) {
+    private fun scheduleWake(generation: Long, atMillis: Long, deadlines: List<JourneyDeadline>) {
         wakeJob = scope.launch {
             sleepMillis((atMillis - nowMillis()).coerceAtLeast(0L))
             commands.trySend(Command.Wake(generation, atMillis, deadlines))
         }
     }
 
-    private suspend fun wakeNow(generation: Long, deadlineMillis: Long, deadlines: List<JourneyDeadline>?) {
+    private suspend fun wakeNow(generation: Long, deadlineMillis: Long, deadlines: List<JourneyDeadline>) {
         if (generation != wakeGeneration) return
         wakeJob = null
         if (nowMillis() < deadlineMillis) {
             scheduleWake(generation, deadlineMillis, deadlines)
             return
         }
-        if (deadlines == null) { scheduleNextWake(); return }
-        // An empty selection retries availability; null only retries journal inspection.
-        if (deadlines.isEmpty()) {
-            resumeParkedRuns(currentState(), null)
-            return
-        }
         val due = deadlines.filter { it !in enqueuedDeadlines }
         enqueuedDeadlines.addAll(due)
         due.forEach(::queueDeadline)
-        // Routing may hold these entries while later parks need their own queue positions.
         if (generation == wakeGeneration) scheduleNextWake()
     }
 

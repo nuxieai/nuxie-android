@@ -86,6 +86,10 @@ internal interface EventStore {
 
     suspend fun isLocalRoutePending(eventId: String): Boolean = false
 
+    /** Recheck a recovery snapshot against the durable receipt immediately before routing. */
+    suspend fun hasPendingLocalRoute(eventId: String, distinctId: String): Boolean =
+        queryPendingLocalRoutes(distinctId).any { it.id == eventId }
+
     /**
      * Inserts a server-authored fact directly into local history. The fact is
      * born delivered, so it can never enter the outbound pending queue.
