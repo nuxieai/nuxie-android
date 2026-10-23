@@ -212,6 +212,29 @@ class EventLogTest {
         } finally { withTimeout(5_000L) { log.closeWorkers() } }
     }
 
+    @Test fun shutdownDeliversAnAcceptedCaptureToJourneysAndAcknowledgesItsRoute() = runBlocking {
+        val store = RecordingStore()
+        val log = log(store)
+        val committing = CompletableDeferred<Unit>()
+        val releaseCommit = CompletableDeferred<Unit>()
+        val delivered = java.util.concurrent.CopyOnWriteArrayList<String>()
+        log.subscribeJourneyEvents(sampleGeneration = { 1L }) { event, _ ->
+            delivered += event.name
+            emptyList()
+        }
+        store.beforeInsert = { committing.complete(Unit); releaseCommit.await() }
+        try {
+            log.capture("accepted")
+            withTimeout(5_000L) { committing.await() }
+            // Shutdown begins while the accepted capture is still being committed.
+            val closed = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { log.closeWorkers() }
+            releaseCommit.complete(Unit)
+            withTimeout(5_000L) { closed.await() }
+            assertEquals(listOf("accepted"), delivered.toList())
+            assertTrue("The route is acknowledged before shutdown completes", store.pendingLocalRoutes.isEmpty())
+        } finally { releaseCommit.complete(Unit) }
+    }
+
     @Test fun deadlineSnapshotsCommittedMailboxInputsAndAppliesThemOnceInOccurrenceOrder() = runBlocking {
         val log = log(RecordingStore())
         val blockerEntered = CompletableDeferred<Unit>()

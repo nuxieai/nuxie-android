@@ -815,6 +815,92 @@ class JourneyServiceTest {
         assertEquals("completed", captures.single { it.first == JourneyEventNames.LEG_COMPLETED }.second["outcome"])
     }
 
+    @Test fun `a renderer batch holds its earliest input in staging until its events commit`() = runBlocking {
+        val identity = identity("customer")
+        val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(renderedEntry)
+        val renderedAuthority = authority(renderedEntry)
+        catalog.commit("customer", catalog.prepare(profile(releaseEntry = renderedEntry), renderedAuthority))
+        val snapshot = requireNotNull(catalog.snapshot("customer"))
+        val presenter = RecordingJourneyPresenter()
+        val staged = CopyOnWriteArrayList<Pair<String, Long>>()
+        val stagedNow = AtomicInteger()
+        val stagedAtCommit = CopyOnWriteArrayList<Int>()
+        val service = JourneyService(identity, store, catalog, directory, scope,
+            capture = { _, _, _, _ -> true },
+            captureScreenEvent = { name, properties, eventId, owner, occurredAt, _, origin ->
+                stagedAtCommit += stagedNow.get()
+                StableEventCaptureResult(true, StoredEvent(eventId, name, JsonValueConverter.fromMap(properties),
+                    occurredAt, owner, journeyOrigin = origin))
+            },
+            presenter = presenter, nowMillis = { 100_000L },
+            stageJourneyInput = { owner, occurredAt ->
+                staged += owner to occurredAt
+                stagedNow.incrementAndGet()
+                val release: () -> Unit = { stagedNow.decrementAndGet() }
+                release
+            })
+        service.initialize()
+        service.onAppWillEnterForeground()
+        service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
+        val request = requireNotNull(presenter.request)
+        val batch = JourneyScreenEmissionBatch(request.journeyId, 0, "staged-tap",
+            JourneyScreenEmissionSource("screen_welcome", "submit"), listOf(
+                JourneyScreenEmission("system-emission", 0, 80_000L, "\$screen_hint", JsonObject(emptyMap())),
+                JourneyScreenEmission("tap", 1, 90_000L, "survey_submitted", JsonObject(emptyMap())),
+            ))
+
+        assertEquals(JourneyEmissionBatchResult.ACCEPTED, request.onEmissionBatch(batch, null))
+
+        assertEquals("Only the customer input's occurrence holds the watermark",
+            listOf("customer" to 90_000L), staged.toList())
+        assertEquals("The tap is still staged while its event commits", listOf(1), stagedAtCommit.toList())
+        assertEquals(0, stagedNow.get())
+    }
+
+    @Test fun `a state arm whose admission failed starts under the profile that arrived during its backoff`() = runBlocking {
+        val catalog = catalog()
+        val first = authenticatedSnapshot(catalog)
+        // The refreshed profile keeps the same arm and adds a customer fact.
+        val refreshedProfile = JsonObject(profile() + ("facts" to buildJsonObject {
+            putJsonObject("properties") { putJsonObject("plan") { put("present", true); put("value", "pro") } }
+            putJsonObject("memberships") {}
+            putJsonObject("assignments") {}
+        }))
+        val refreshed = JourneyProfileCatalog.Snapshot(
+            JourneyPlaneProfile.decode(refreshedProfile.toString().encodeToByteArray()), first.releasesByDigest)
+        val retryClock = java.util.concurrent.atomic.AtomicLong(0L)
+        val sleeper = PresentationRetrySleeper()
+        val failAdmission = java.util.concurrent.atomic.AtomicBoolean(true)
+        val captures = CopyOnWriteArrayList<String>()
+        val startedPlans = CopyOnWriteArrayList<JsonElement?>()
+        val service = JourneyService(identity("customer"), store, catalog, directory, scope,
+            capture = { name, _, _, _ ->
+                // The screenless Journey may finish at once, so read its snapshot as it starts.
+                if (name == JourneyEventNames.LEG_STARTED) {
+                    JourneyRunJournal(directory, "customer", JourneyStorageScope(authority)).runs()
+                        .forEach { startedPlans += it.executionSnapshot?.customer?.get("plan") }
+                }
+                captures += name
+                true
+            }, nowMillis = { 100_000L },
+            sleepMillis = sleeper::sleep, retryClockMillis = retryClock::get,
+            beforeAdmission = { check(!failAdmission.getAndSet(false)) { "Admission write failed" } })
+        service.initialize()
+        service.onAppWillEnterForeground()
+        service.profileDidCommit(first, authority, "customer", 1)
+        assertTrue(captures.isEmpty())
+        withTimeout(5_000L) { while (1_000L !in sleeper.pendingDurations) kotlinx.coroutines.delay(10) }
+
+        service.profileDidCommit(refreshed, authority, "customer", 2)
+        assertTrue(captures.isEmpty())
+        retryClock.set(1_000L)
+        sleeper.completeAll()
+
+        withTimeout(5_000L) { while (JourneyEventNames.LEG_STARTED !in captures) kotlinx.coroutines.delay(10) }
+        assertEquals(listOf<JsonElement?>(JsonPrimitive("pro")), startedPlans.toList())
+    }
+
     @Test fun `renderer batches durably publish once and route the owning run`() = runBlocking {
         val identity = identity("customer")
         val renderedEntry = fixture.getValue("renderedEntry").jsonObject

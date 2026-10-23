@@ -15,6 +15,49 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class JourneyWorkQueueTest {
+    @Test fun aDeadlineWaitingOnItsWatermarkHoldsOnlyItsOwnJourneysLaterInputs() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val clock = AtomicLong(0L)
+        val ticks = Channel<Unit>(Channel.UNLIMITED)
+        val sleeps = CopyOnWriteArrayList<CompletableDeferred<Unit>>()
+        val queue = JourneyWorkQueue(scope, { ticks.trySend(Unit) }, {
+            val done = CompletableDeferred<Unit>(); sleeps += done; done.await()
+        }, clock::get)
+        val observed = mutableListOf<String>()
+        var watermarkReached = false
+        var asks = 0
+        fun deadline(owner: String, run: String, ready: () -> Boolean) = JourneyWork(
+            "deadline:$owner", owner, run, deadline = JourneyDeadline(owner, run, "wait", 0L, 1_000L),
+            pendingInputs = { if (ready()) emptyList() else null },
+        ) { observed += "deadline:$owner"; JourneyWork.Result.Done() }
+        fun entry(key: String, owner: String, run: String?, at: Long?, kind: JourneyWork.Kind = JourneyWork.Kind.OPERATION) =
+            JourneyWork(key, owner, run, kind = kind, input = at?.let { StoredEvent(key, key, timestampMillis = it, distinctId = owner) }) {
+                observed += key; JourneyWork.Result.Done()
+            }
+        try {
+            queue.add(deadline("a", "a-journey") { asks++; watermarkReached })
+            queue.add(entry("a-event", "a", null, 2_000L, JourneyWork.Kind.EVENT))
+            queue.add(entry("a-in-time", "a", "a-journey", 1_000L))
+            queue.add(entry("a-restore", "a", "a-journey", null))
+            queue.add(entry("a-later", "a", "a-journey", 1_500L))
+            queue.add(entry("a-other-journey", "a", "a-other", 1_500L))
+            queue.add(entry("b-event", "b", null, 1_500L, JourneyWork.Kind.EVENT))
+            queue.add(deadline("b", "b-journey") { true })
+            queue.drain()
+            // Only A's own Journey's input after the deadline stays behind it.
+            assertEquals(listOf("a-event", "a-in-time", "a-restore", "a-other-journey", "b-event", "deadline:b"), observed)
+            repeat(3) { queue.drain() }
+            assertEquals("A waiting deadline is asked again only by the retry timer", 1, asks)
+            assertEquals(1, sleeps.size)
+            watermarkReached = true
+            clock.set(1_000L); sleeps.last().complete(Unit)
+            withTimeout(1_000L) { ticks.receive() }; queue.retryReady(); queue.drain()
+            assertEquals(2, asks)
+            assertEquals(listOf("a-event", "a-in-time", "a-restore", "a-other-journey", "b-event", "deadline:b",
+                "deadline:a", "a-later"), observed)
+        } finally { queue.close(); scope.cancel() }
+    }
+
     @Test fun failedReconciliationDoesNotObstructAdmissionChecksOrCompletedRouteCleanup() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         val clock = AtomicLong(0L)

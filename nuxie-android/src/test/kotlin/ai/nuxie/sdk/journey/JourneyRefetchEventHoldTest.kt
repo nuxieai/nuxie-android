@@ -425,13 +425,8 @@ class JourneyRefetchEventHoldTest {
             launch.eventLog.awaitBarrier()
             assertEquals(if (afterTimeout) 1 else 0, launch.outcomes("customer", "timed_out"))
             launch.clock.set(1_001_100L)
-            val origin = JourneyEventOrigin(run.journeyId,
-                run.reference.getValue("experienceId").jsonPrimitive.content,
-                run.reference.getValue("versionId").jsonPrimitive.content,
-                run.reference.getValue("legId").jsonPrimitive.content,
-                run.generation, null, "tap", screenId = "screen", actionId = "go", invocationId = "tap")
             assertTrue(launch.eventLog.captureScreenEvent("go", emptyMap(), "renderer-tap", "customer",
-                1_000_000L + occurredAt, null, origin).settled)
+                1_000_000L + occurredAt, null, tapOrigin(run)).settled)
             launch.clock.set(1_001_200L)
             if (hold != null) launch.eventLog.releaseCommittedRouting(hold)
             launch.eventLog.awaitBarrier()
@@ -441,6 +436,131 @@ class JourneyRefetchEventHoldTest {
             assertEquals(if (satisfies) 0 else 1, launch.outcomes("customer", "timed_out"))
             assertTrue(launch.store.queryPendingLocalRoutes("customer").isEmpty())
         } finally { if (hold != null) launch.eventLog.releaseCommittedRouting(hold) }
+    }
+
+    private fun tapOrigin(run: JourneyRun) = JourneyEventOrigin(run.journeyId,
+        run.reference.getValue("experienceId").jsonPrimitive.content,
+        run.reference.getValue("versionId").jsonPrimitive.content,
+        run.reference.getValue("legId").jsonPrimitive.content,
+        run.generation, null, "tap", screenId = "screen", actionId = "go", invocationId = "tap")
+
+    @Test fun `a renderer tap still in staging when its deadline reaches the front satisfies the wait`() = runBlocking {
+        stagedTapDeadline(commitsWithinBound = true)
+    }
+
+    @Test fun `a tap staged longer than the staging bound is late and the timeout stands`() = runBlocking {
+        stagedTapDeadline(commitsWithinBound = false)
+    }
+
+    /**
+     * Routing is held, the tap happens at 900 ms and waits in staging, the deadline
+     * (1000 ms) is queued at 1000 ms, and routing resumes at 1050 ms while the tap is
+     * still staged. The tap commits at 1100 ms, or only after the staging bound.
+     */
+    private suspend fun stagedTapDeadline(commitsWithinBound: Boolean) {
+        val sleeper = WakeSleeper()
+        val retrySleeper = WakeSleeper()
+        val retryClock = AtomicLong(0L)
+        val enqueued = CompletableDeferred<Unit>()
+        val observed = CopyOnWriteArrayList<String>()
+        lateinit var launch: Launch
+        launch = Launch("customer", withScreens = true, sleep = sleeper::sleep,
+            retrySleep = retrySleeper::sleep, retryClockMillis = retryClock::get,
+            enqueueDeadline = { deadline ->
+                launch.eventLog.enqueueJourneyDeadline(deadline)
+                enqueued.complete(Unit)
+            }, beforeJourney = { event -> if (event.name == "go") observed += "tap" })
+        launch.start()
+        launch.commit("customer", launch.copy("customer", 1, "start_waiting", waitSteps(maxTimeMillis = 1_000L)))
+        launch.track("start_waiting")
+        val run = launch.journal().runs().single()
+        launch.eventLog.setJourneyDeadlineHandler { deadline ->
+            observed += "deadline"
+            launch.journeys.handleJourneyDeadline(deadline)
+        }
+        val hold = launch.eventLog.deferCommittedRouting()
+        try {
+            launch.clock.set(1_000_900L)
+            val unstage = launch.eventLog.stageJourneyInput("customer", 1_000_900L)
+            withTimeout(5_000L) { while (1_000L !in sleeper.pendingDurations) delay(10) }
+            launch.clock.set(1_001_000L)
+            sleeper.completeAllAndJoin()
+            withTimeout(5_000L) { enqueued.await() }
+            launch.clock.set(1_001_050L)
+            launch.eventLog.releaseCommittedRouting(hold)
+            launch.eventLog.awaitBarrier()
+            assertTrue("The deadline waits for the staged tap", observed.isEmpty())
+            assertEquals(0, launch.outcomes("customer", "timed_out"))
+            withTimeout(5_000L) { while (retrySleeper.pendingDurations.isEmpty()) delay(10) }
+            if (commitsWithinBound) {
+                launch.clock.set(1_001_100L)
+                assertTrue(launch.eventLog.captureScreenEvent("go", emptyMap(), "renderer-tap", "customer",
+                    1_000_900L, null, tapOrigin(run)).settled)
+                unstage()
+                launch.eventLog.awaitBarrier()
+            }
+            // The one retry timer asks the deadline again; a tap still staged has run out its bound.
+            retryClock.set(1_000L)
+            retrySleeper.completeAllAndJoin()
+            launch.eventLog.awaitBarrier()
+            if (!commitsWithinBound) {
+                assertEquals(1, launch.outcomes("customer", "timed_out"))
+                launch.clock.set(1_002_100L)
+                assertTrue(launch.eventLog.captureScreenEvent("go", emptyMap(), "renderer-tap", "customer",
+                    1_000_900L, null, tapOrigin(run)).settled)
+                unstage()
+                launch.eventLog.awaitBarrier()
+            }
+            assertEquals(if (commitsWithinBound) listOf("tap", "deadline") else listOf("deadline", "tap"), observed.toList())
+            assertEquals(if (commitsWithinBound) 1 else 0, launch.outcomes("customer", "took_go"))
+            assertEquals(if (commitsWithinBound) 0 else 1, launch.outcomes("customer", "timed_out"))
+            assertTrue(launch.store.queryPendingLocalRoutes("customer").isEmpty())
+        } finally { launch.eventLog.releaseCommittedRouting(hold) }
+    }
+
+    @Test fun `a deadline waits for recovery to read an in-window follow-up`() = runBlocking {
+        val retrySleeper = WakeSleeper()
+        val retryClock = AtomicLong(0L)
+        val failFollowUpRead = java.util.concurrent.atomic.AtomicBoolean(false)
+        val observed = CopyOnWriteArrayList<String>()
+        lateinit var launch: Launch
+        launch = Launch("customer", retrySleep = retrySleeper::sleep, retryClockMillis = retryClock::get, replay = { owner ->
+            if (failFollowUpRead.getAndSet(false)) {
+                // Recovery replays the trigger, which makes an overdue wait; reading the follow-up then fails.
+                launch.journeys.handleEvent(StoredEvent("recovered-trigger", "start_waiting",
+                    timestampMillis = launch.clock.get() - 1_000L, distinctId = owner), launch.journeys.eventAdmissionGeneration())
+                false
+            } else launch.eventLog.replayPendingLocalRoutes(owner)
+        }, beforeJourney = { event -> if (event.name == "go") observed += "follow-up" })
+        val snapshot = launch.copy("customer", 1, "start_waiting", waitSteps(maxTimeMillis = 500L))
+        launch.start()
+        launch.eventLog.setJourneyDeadlineHandler { deadline ->
+            observed += "deadline"
+            launch.journeys.handleJourneyDeadline(deadline)
+        }
+        // A follow-up left pending by the previous process, 100 ms into the trigger's window.
+        launch.store.insertPendingIfAbsentAndStageRoute(StoredEvent("recovered-go", "go",
+            timestampMillis = launch.clock.get() - 900L, distinctId = "customer"))
+        failFollowUpRead.set(true)
+        launch.commit("customer", snapshot)
+        launch.eventLog.awaitBarrier()
+        assertEquals(1, launch.starts("customer"))
+        assertTrue("The deadline waits until the follow-up can be read", observed.isEmpty())
+        assertEquals(0, launch.outcomes("customer", "timed_out"))
+        // The one retry timer runs reconciliation, which reads and replays the follow-up.
+        withTimeout(5_000L) { while (retrySleeper.pendingDurations.isEmpty()) delay(10) }
+        retryClock.set(1_000L)
+        retrySleeper.completeAllAndJoin()
+        launch.eventLog.awaitBarrier()
+        assertEquals(listOf("follow-up"), observed.toList())
+        assertEquals(1, launch.outcomes("customer", "took_go"))
+        withTimeout(5_000L) { while (retrySleeper.pendingDurations.isEmpty()) delay(10) }
+        retryClock.set(2_000L)
+        retrySleeper.completeAllAndJoin()
+        launch.eventLog.awaitBarrier()
+        assertEquals(listOf("follow-up", "deadline"), observed.toList())
+        assertEquals(0, launch.outcomes("customer", "timed_out"))
+        assertTrue(launch.store.queryPendingLocalRoutes("customer").isEmpty())
     }
 
     @Test fun `deadline wakes enqueue ahead of later captures while the Journey worker is busy`() = runBlocking {
@@ -1549,6 +1669,7 @@ class JourneyRefetchEventHoldTest {
             resumeJourneyWork = eventLog::resumeJourneyWork,
             deferCommittedRouting = eventLog::deferCommittedRouting,
             releaseCommittedRouting = eventLog::releaseCommittedRouting,
+            stageJourneyInput = eventLog::stageJourneyInput,
             fixedStorageScope = if (firstLaunch) null else JourneyStorageScope(authority),
             dispatcher = dispatcher,
         )
@@ -1558,6 +1679,7 @@ class JourneyRefetchEventHoldTest {
             launches += this
             beforeJourney?.let { hook -> eventLog.subscribeCommitted { event -> hook(event) } }
             eventLog.setJourneyDeadlineHandler(journeys::handleJourneyDeadline)
+            eventLog.setJourneyInputsSettled(journeys::journeyInputsSettled)
             eventLog.subscribeJourneyEvents(
                 sampleGeneration = journeys::eventAdmissionGeneration,
                 afterAttempt = { event, accepted -> afterJourney?.invoke(event, accepted) },

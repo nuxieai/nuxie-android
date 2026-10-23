@@ -18,7 +18,11 @@ internal class JourneyWork(
     val kind: Kind = Kind.OPERATION,
     var input: StoredEvent? = null,
     val deadline: JourneyDeadline? = null,
-    val pendingInputs: () -> List<JourneyWork> = { emptyList() },
+    /**
+     * For a deadline: the committed inputs at or before it to deliver first, or null
+     * while its customer's input watermark has not reached it.
+     */
+    val pendingInputs: () -> List<JourneyWork>? = { emptyList() },
     val attempt: suspend () -> Result,
 ) {
     enum class Kind { EVENT, OPERATION }
@@ -36,6 +40,7 @@ internal class JourneyWork(
     internal var completed: suspend () -> Unit = {}
     internal var failed: suspend () -> Unit = {}
     internal var inputsChecked = false
+    internal var awaitingInputs = false
 }
 
 /**
@@ -51,7 +56,8 @@ internal class JourneyWorkQueue(
 ) {
     private val entries = mutableListOf<JourneyWork>()
     private var retryJob: Job? = null
-    private var closed = false
+    @Volatile private var closed = false
+    @Volatile private var retrying = true
     private var draining = false
     var progress: Long = 0L
         private set
@@ -78,6 +84,9 @@ internal class JourneyWorkQueue(
         try {
             var index = 0
             val blocked = mutableListOf<JourneyWork>()
+            // Deadlines waiting for their customer's input watermark. Each holds back
+            // only its own Journey's inputs that happened after it.
+            val awaiting = mutableListOf<JourneyDeadline>()
             while (index < entries.size && !held()) {
                 val work = entries[index]
                 val obstructed = blocked.any { earlier ->
@@ -86,18 +95,32 @@ internal class JourneyWorkQueue(
                         // work (such as reconciliation) holds only its own key.
                         ((earlier.kind == JourneyWork.Kind.EVENT && earlier.runId == null && !work.repairsCustomer) ||
                             (work.runId != null && earlier.runId == work.runId))
+                } || awaiting.any { deadline ->
+                    deadline.distinctId == work.distinctId && work.runId == deadline.runId &&
+                        (work.input?.timestampMillis ?: Long.MIN_VALUE) > deadline.wakeAtMillis
                 }
                 if (work.waiting || obstructed) {
-                    blocked += work
+                    val waitingDeadline = work.deadline?.takeIf { work.awaitingInputs }
+                    if (waitingDeadline != null) awaiting += waitingDeadline else blocked += work
                     index++
                     continue
                 }
                 val deadline = work.deadline
                 if (deadline != null && !work.inputsChecked) {
-                    // Freeze eligibility once, before the deadline's first attempt.
+                    val committed = work.pendingInputs()
+                    if (committed == null) {
+                        // The watermark has not reached the deadline: ask again on the one retry timer.
+                        work.awaitingInputs = true
+                        work.waiting = true
+                        work.retryAtMillis = retryClockMillis() + 1_000L
+                        awaiting += deadline
+                        index++
+                        continue
+                    }
+                    // The answer is final: eligibility is frozen before the deadline's first attempt.
                     // Event plans and their children still use their ordinary apply path.
                     work.inputsChecked = true
-                    val committed = work.pendingInputs()
+                    work.awaitingInputs = false
                     val inputs = (entries.drop(index + 1) + committed).filter { candidate ->
                         candidate.input?.let { input ->
                             input.distinctId == deadline.distinctId && input.timestampMillis <= deadline.wakeAtMillis
@@ -174,7 +197,7 @@ internal class JourneyWorkQueue(
     }
 
     private fun armRetry() {
-        if (closed || retryJob != null || entries.none { it.waiting }) return
+        if (closed || !retrying || retryJob != null || entries.none { it.waiting }) return
         val next = entries.mapNotNull { it.retryAtMillis }.minOrNull() ?: return
         retryJob = scope.launch {
             sleep((next - retryClockMillis()).coerceIn(1L, 1_000L))
@@ -182,9 +205,15 @@ internal class JourneyWorkQueue(
         }
     }
 
-    fun close() {
-        closed = true
+    /** Shutdown: no further retries, while accepted entries can still be added and drained. */
+    fun stopRetries() {
+        retrying = false
         retryJob?.cancel()
         retryJob = null
+    }
+
+    fun close() {
+        closed = true
+        stopRetries()
     }
 }

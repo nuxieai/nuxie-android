@@ -222,6 +222,8 @@ internal class JourneyService(
     private val resumeJourneyWork: () -> Unit = {},
     private val deferCommittedRouting: () -> Long = { 0L },
     private val releaseCommittedRouting: (Long) -> Unit = {},
+    /** Holds the customer's input watermark for a renderer input until it commits; returns the release. */
+    private val stageJourneyInput: (String, Long) -> (() -> Unit) = { _, _ -> {} },
     private val readJournalRuns: suspend (JourneyRunJournal) -> List<JourneyRun> = { it.runs() },
     private val journalBeforePersist: () -> Unit = {},
     private val readNativeValues: suspend (ai.nuxie.sdk.presentation.ExperienceRunValues) -> JsonObject = { it.journeyValues() },
@@ -425,9 +427,12 @@ internal class JourneyService(
     private var profileState: ProfileState? = null
     private class ParkCommitFailure(val retry: suspend () -> Unit, cause: Exception) : Exception(cause)
     private var journalGeneration = 0L
-    private var recoveryPending = false
+    // Read by the event log's routing worker when a deadline asks for its input watermark.
+    @Volatile private var recoveryPending = false
+    /** The customer whose pending committed inputs could not be read by the last replay. */
+    @Volatile private var unreadInputsOwner: String? = null
     private var replayingRoutes = false
-    private var journal: JourneyRunJournal? = null
+    @Volatile private var journal: JourneyRunJournal? = null
         set(value) {
             synchronized(deadlineSchedulingLock) {
                 cancelWake()
@@ -755,10 +760,18 @@ internal class JourneyService(
             eventSource = eventSource,
             accepted = accepted,
         )
+        // Until this batch commits its events, its earliest input holds back the customer's
+        // input watermark, so a deadline waits for a tap that happened in time.
+        val unstage: () -> Unit = batch.emissions.filterNot { it.name.startsWith('$') }.minOfOrNull { it.occurredAtMillis }
+            ?.let { stageJourneyInput(identity.distinctId(), it) } ?: {}
         if (coroutineContext[WorkerContext]?.owner === this) {
-            return handlePresentationBatchNow(command)
+            return try { handlePresentationBatchNow(command) } finally { unstage() }
         }
-        if (commands.trySend(command).isFailure) return JourneyEmissionBatchResult.REJECTED
+        accepted.invokeOnCompletion { unstage() }
+        if (commands.trySend(command).isFailure) {
+            unstage()
+            return JourneyEmissionBatchResult.REJECTED
+        }
         return accepted.await()
     }
 
@@ -913,6 +926,13 @@ internal class JourneyService(
         commands.send(Command.PlanEvent(event, admittedGeneration, result))
         return result.await()
     }
+
+    /**
+     * The input watermark's hold: false while this customer's recovery is pending or a
+     * read of their committed inputs failed, so their deadlines wait for the read.
+     */
+    fun journeyInputsSettled(distinctId: String): Boolean =
+        journal?.distinctId == distinctId && !recoveryPending && unreadInputsOwner != distinctId
 
     suspend fun handleJourneyDeadline(deadline: JourneyDeadline): JourneyWork.Result {
         if (coroutineContext[WorkerContext]?.owner === this) return handleJourneyDeadlineNow(deadline)
@@ -1365,7 +1385,15 @@ internal class JourneyService(
     private suspend fun replayRoutes(owner: String): Boolean {
         val previous = replayingRoutes
         replayingRoutes = true
-        return try { replayPendingLocalRoutes(owner) } finally { replayingRoutes = previous }
+        var replayed = false
+        return try {
+            replayPendingLocalRoutes(owner).also { replayed = it }
+        } finally {
+            replayingRoutes = previous
+            // A failed read holds this customer's deadlines until a replay succeeds.
+            if (!replayed) unreadInputsOwner = owner
+            else if (unreadInputsOwner == owner) unreadInputsOwner = null
+        }
     }
 
     private fun queueReconciliation(owner: String) {
@@ -1666,8 +1694,11 @@ internal class JourneyService(
         state.snapshot.profile.armedLegs.asSequence()
             .filter { it.entryCondition.text("type") != "event" }
             .forEach { arm ->
-                val work = operation("state:${state.distinctId}:${journeyStateArmReceipt(arm)}", state.distinctId,
-                    "arm:${journeyStateArmReceipt(arm)}") { entry ->
+                // The profile generation is part of the key, so a refreshed profile's entry for
+                // the same arm is never discarded behind a retrying one; the stale entry's fences
+                // end it without effect on its next attempt.
+                val work = operation("state:${state.distinctId}:${state.generation}:${journeyStateArmReceipt(arm)}",
+                    state.distinctId, "arm:${journeyStateArmReceipt(arm)}") { entry ->
                     attemptStart(arm, state, null) { entry.runId = it }
                 }
                 if (enqueueJourneyWork == null) {

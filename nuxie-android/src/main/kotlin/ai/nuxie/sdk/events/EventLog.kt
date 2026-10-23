@@ -195,6 +195,7 @@ internal class EventLog(
     private var routingGeneration = 0L
     private val routingDeferred = java.util.concurrent.atomic.AtomicBoolean(false)
     @Volatile private var journeyDeadlineHandler: (suspend (JourneyDeadline) -> JourneyWork.Result)? = null
+    @Volatile private var journeyInputsSettled: (String) -> Boolean = { true }
     private val routeQueue = JourneyWorkQueue(scope, {
         routeCommands.trySend(RouteCommand.RetryTimer)
     }, retrySleep, retryClockMillis)
@@ -202,6 +203,10 @@ internal class EventLog(
     // inputs or retries them; a deadline freezes this index exactly once.
     private val committedInputsLock = Any()
     private val committedInputs = linkedMapOf<String, RouteCommand.Event>()
+    // Inputs captured but not yet committed, such as a renderer emission waiting in
+    // staging. Guarded by committedInputsLock; identity equality keeps each stage apart.
+    private class StagedInput(val distinctId: String, val occurredAtMillis: Long, val stagedAtMillis: Long)
+    private val stagedInputs = mutableSetOf<StagedInput>()
     private val pendingCommittedNotifications = mutableListOf<RouteCommand.Event>()
     private var acknowledgementRetryJob: Job? = null
     private val closing = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -302,7 +307,7 @@ internal class EventLog(
                 }
                 RouteCommand.Retry -> drainRoutes()
                 RouteCommand.RetryTimer -> {
-                    routeQueue.retryReady()
+                    if (!closing.get()) routeQueue.retryReady()
                     drainRoutes()
                 }
                 is RouteCommand.Barrier -> command.done.complete(Unit)
@@ -326,6 +331,22 @@ internal class EventLog(
 
     fun setJourneyDeadlineHandler(handler: suspend (JourneyDeadline) -> JourneyWork.Result) {
         journeyDeadlineHandler = handler
+    }
+
+    /** False while a customer's recovery is pending or a read of their committed inputs failed. */
+    fun setJourneyInputsSettled(settled: (String) -> Boolean) {
+        journeyInputsSettled = settled
+    }
+
+    /**
+     * Records an input captured but not yet committed. Until the returned release runs,
+     * or [STAGED_INPUT_BOUND_MILLIS] passes on the monotonic clock, it holds back its
+     * customer's input watermark, so a deadline waits for an input that happened in time.
+     */
+    fun stageJourneyInput(distinctId: String, occurredAtMillis: Long): () -> Unit {
+        val staged = StagedInput(distinctId, occurredAtMillis, retryClockMillis())
+        synchronized(committedInputsLock) { stagedInputs += staged }
+        return { synchronized(committedInputsLock) { stagedInputs -= staged } }
     }
 
     /** A hold stops routes, while capture, storage and recovery replay remain available. */
@@ -362,13 +383,40 @@ internal class EventLog(
         }
     }
 
-    private fun takeCommittedInputs(deadline: JourneyDeadline): List<JourneyWork> = synchronized(committedInputsLock) {
-        committedInputs.values.filter { head ->
-            !head.submitted && head.event.distinctId == deadline.distinctId &&
-                head.event.timestampMillis <= deadline.wakeAtMillis
-        }.map { head ->
-            head.submitted = true
-            eventWork(head)
+    /**
+     * The customer's input watermark W, worked out afresh each time a deadline asks:
+     * every input this device has captured for them that happened at or before W is
+     * committed and readable. W is now, or just before the earliest input of theirs
+     * still in staging; the wait window is inclusive, so an input staged exactly at a
+     * deadline holds it. Null while their recovery is pending or a read failed.
+     */
+    private fun inputWatermark(distinctId: String): Long? {
+        if (!journeyInputsSettled(distinctId)) return null
+        val earliestStaged = synchronized(committedInputsLock) {
+            val monotonicNow = retryClockMillis()
+            // An input staged longer than the bound no longer holds W back; it is late.
+            stagedInputs.removeAll { monotonicNow - it.stagedAtMillis >= STAGED_INPUT_BOUND_MILLIS }
+            stagedInputs.filter { it.distinctId == distinctId }.minOfOrNull { it.occurredAtMillis }
+        }
+        val now = nowMillis()
+        return if (earliestStaged == null) now else minOf(now, earliestStaged - 1)
+    }
+
+    /** Null until the customer's watermark reaches the deadline; then its committed inputs, once. */
+    private fun takeCommittedInputs(deadline: JourneyDeadline): List<JourneyWork>? {
+        // A departed customer's deadline is dropped by its own attempt, so it never waits.
+        if (deadline.distinctId == identity.distinctId()) {
+            val watermark = inputWatermark(deadline.distinctId) ?: return null
+            if (watermark < deadline.wakeAtMillis) return null
+        }
+        return synchronized(committedInputsLock) {
+            committedInputs.values.filter { head ->
+                !head.submitted && head.event.distinctId == deadline.distinctId &&
+                    head.event.timestampMillis <= deadline.wakeAtMillis
+            }.map { head ->
+                head.submitted = true
+                eventWork(head)
+            }
         }
     }
 
@@ -563,14 +611,17 @@ internal class EventLog(
     /** Stop the pipelines without closing the store owned by the composition root. */
     suspend fun closeWorkers() {
         forwardingActive.set(false)
+        // New controls and retries stop. Commands already accepted still reach Journey
+        // admission and acknowledge their routes before the queue closes.
         closing.set(true)
-        routeQueue.close()
+        routeQueue.stopRetries()
         acknowledgementRetryJob?.cancel()
         awaitBarrier()
         commands.close()
         worker.join()
         routeCommands.close()
         routeWorker.join()
+        routeQueue.close()
         forwardingCommands.close()
         forwardingWorker.join()
     }
@@ -1174,6 +1225,16 @@ internal class EventLog(
 
     private companion object {
         const val MAX_BARRIER_PASSES = 100
+        /**
+         * How long a staged input may hold back its customer's watermark. The Android
+         * renderer has no timed flush: JourneyRuntimeEmissionCoordinator hands each
+         * committed renderer transaction to Journeys on the frame that produced it
+         * (ExperienceSurfaceHost's Choreographer callback), so staging lasts only as long
+         * as the Journey worker and the durable commit. The bound is one tick of the
+         * queue's retry timer: a waiting deadline asked again by that timer finds every
+         * input staged before its first ask either committed or late.
+         */
+        const val STAGED_INPUT_BOUND_MILLIS = 1_000L
         const val LOG_TAG = "Nuxie"
         const val DISTINCT_ID_PROPERTY = "\$distinct_id"
         const val SESSION_ID_PROPERTY = "\$session_id"
