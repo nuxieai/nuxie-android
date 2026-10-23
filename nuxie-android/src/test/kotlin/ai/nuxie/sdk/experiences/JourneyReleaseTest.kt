@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.experiences
 
 import ai.nuxie.sdk.fixtures.FixtureRunner
+import ai.nuxie.sdk.fixtures.pageDescriptorFixture
 import android.util.Base64
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
@@ -62,8 +63,8 @@ class JourneyReleaseTest {
             .resolve("billing/google-play-offer-fallback.json").readText()).jsonObject
         val entry = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/rendered-text-input/release-entry.json").readText()).jsonObject
-        val source = JourneyReleaseEnvelope.parseObject(Base64.decode(entry.getValue("envelope").jsonObject
-            .getValue("descriptorBytesBase64").jsonPrimitive.content, Base64.NO_WRAP))
+        val source = pageDescriptorFixture(JourneyReleaseEnvelope.parseObject(Base64.decode(entry.getValue("envelope").jsonObject
+            .getValue("descriptorBytesBase64").jsonPrimitive.content, Base64.NO_WRAP)))
         val placement = buildJsonObject {
             put("id", "primary"); put("productId", "pro")
             selection?.let { put("googlePlay", it) }
@@ -76,8 +77,8 @@ class JourneyReleaseTest {
 
     @Test fun `all copied video Journeys decode through release authentication`() {
         val envelope = fixture.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
-        val source = JourneyReleaseEnvelope.parseObject(Base64.decode(
-            envelope.getValue("descriptorBytesBase64").jsonPrimitive.content, Base64.NO_WRAP))
+        val source = pageDescriptorFixture(JourneyReleaseEnvelope.parseObject(Base64.decode(
+            envelope.getValue("descriptorBytesBase64").jsonPrimitive.content, Base64.NO_WRAP)))
         val oldRender = source.getValue("render").jsonObject
         val screen = JsonObject(oldRender.getValue("screens").jsonArray.single().jsonObject +
             ("id" to JsonPrimitive("screen")))
@@ -151,7 +152,7 @@ class JourneyReleaseTest {
         val folder = FixtureRunner.fixturesRoot().resolve("runtime/forms-saves")
         val bytes = folder.resolve("release.json").readBytes()
         val entry = Json.parseToJsonElement(folder.resolve("profile-entry.json").readText()).jsonObject
-        val source = Json.parseToJsonElement(bytes.decodeToString()).jsonObject
+        val source = pageDescriptorFixture(Json.parseToJsonElement(bytes.decodeToString()).jsonObject)
         val locator = entry.getValue("locator").jsonObject
         val release = JourneyReleaseVerifier.authenticate(
             entry.getValue("envelope").toString().encodeToByteArray(), keys,
@@ -174,7 +175,7 @@ class JourneyReleaseTest {
         val folder = FixtureRunner.fixturesRoot().resolve("runtime/run-values")
         val bytes = folder.resolve("release.json").readBytes()
         val entry = Json.parseToJsonElement(folder.resolve("profile-entry.json").readText()).jsonObject
-        val source = Json.parseToJsonElement(bytes.decodeToString()).jsonObject
+        val source = pageDescriptorFixture(Json.parseToJsonElement(bytes.decodeToString()).jsonObject)
         val locator = entry.getValue("locator").jsonObject
         val release = JourneyReleaseVerifier.authenticate(
             entry.getValue("envelope").toString().encodeToByteArray(), keys,
@@ -196,8 +197,8 @@ class JourneyReleaseTest {
 
     @Test fun `version three requires native value policy sections`() {
         val envelope = fixture.getValue("entry").jsonObject.getValue("envelope").jsonObject
-        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
-            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val source = pageDescriptorFixture(Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject)
         val root = JsonObject(source + mapOf(
             "state" to Json.parseToJsonElement("""{"days":{"type":"number"},"goals":{"type":"list","items":{"title":{"type":"string"}}}}"""),
             "responses" to JsonObject(emptyMap()), "ruleGroups" to JsonArray(emptyList()),
@@ -222,8 +223,8 @@ class JourneyReleaseTest {
         val corpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/native-input-admission.json").readText()).jsonObject
         val envelope = fixture.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
-        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
-            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val source = pageDescriptorFixture(Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject)
         val render = source.getValue("render").jsonObject
         val removed = corpus.getValue("removedFields").jsonArray.map { it.jsonPrimitive.content }.toSet()
         val inputs = render.getValue("textInputs").jsonArray.map {
@@ -255,8 +256,8 @@ class JourneyReleaseTest {
 
     @Test fun `version three signatures reject the retired domain`() {
         val envelope = fixture.getValue("entry").jsonObject.getValue("envelope").jsonObject
-        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
-            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val source = pageDescriptorFixture(Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject)
         val root = JsonObject(source + ("schemaVersion" to JsonPrimitive("nuxie.journey-release.v3")))
         val bytes = root.toString().encodeToByteArray()
         val pair = java.security.KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
@@ -288,8 +289,8 @@ class JourneyReleaseTest {
 
     @Test fun `release presentation keeps only orientation and background`() {
         val envelope = fixture.getValue("entry").jsonObject.getValue("envelope").jsonObject
-        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64").jsonPrimitive.content,
-            Base64.NO_WRAP).decodeToString()).jsonObject
+        val source = pageDescriptorFixture(Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64").jsonPrimitive.content,
+            Base64.NO_WRAP).decodeToString()).jsonObject)
         val presentation = JsonObject(mapOf("orientation" to JsonPrimitive("portrait"), "backgroundColor" to JsonPrimitive("#102030FF")))
         JourneyReleaseSchema.validate(JsonObject(source + ("presentation" to presentation)))
         for (key in listOf("style", "sheet", "drawer")) {
@@ -303,8 +304,8 @@ class JourneyReleaseTest {
 
     @Test fun signedV3NestedObjectPolicyAuthenticatesExactMetadata() {
         val envelope = fixture.getValue("entry").jsonObject.getValue("envelope").jsonObject
-        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
-            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val source = pageDescriptorFixture(Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject)
         val leg = source.getValue("leg").jsonObject
         val state = Json.parseToJsonElement(java.io.File("../fixtures/runtime/nested-values/state.json").readText()).jsonObject
         val root = JsonObject(source + ("state" to state))
@@ -336,8 +337,8 @@ class JourneyReleaseTest {
 
     @Test fun signedFormQualifiedConditionAuthenticates() {
         val envelope = fixture.getValue("entry").jsonObject.getValue("envelope").jsonObject
-        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
-            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val source = pageDescriptorFixture(Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject)
         val leg = JsonObject(source.getValue("leg").jsonObject + mapOf(
             "entryStepId" to JsonPrimitive("read-form"),
             "routes" to JsonArray(emptyList()),
@@ -406,7 +407,7 @@ class JourneyReleaseTest {
     @Test fun `open links allow host dismissal and screenless legs while screen actions do not`() {
         for (entry in listOf("entry", "renderedEntry")) {
             val envelope = fixture.getValue(entry).jsonObject.getValue("envelope").jsonObject
-            val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64").jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+            val source = pageDescriptorFixture(Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64").jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject)
             val leg = JsonObject(source.getValue("leg").jsonObject + mapOf(
                 "entryStepId" to JsonPrimitive("link"),
                 "steps" to Json.parseToJsonElement("""[{"kind":"action","id":"link","action":{"type":"open_link","url":{"type":"String","value":"https://example.test"},"target":"in_app"},"outlets":{"next":"done"}},{"kind":"complete","id":"done","outcome":"continue"}]"""),
@@ -426,8 +427,8 @@ class JourneyReleaseTest {
 
     @Test fun `retired release wire version is rejected`() {
         val envelope = fixture.getValue("entry").jsonObject.getValue("envelope").jsonObject
-        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
-            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val source = pageDescriptorFixture(Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject)
         val retired = JsonObject(source + ("schemaVersion" to JsonPrimitive("nuxie.journey-release.v1")))
         assertThrows(JourneyReleaseAuthenticationException::class.java) {
             JourneySchemaValidator.validate(retired)
@@ -438,8 +439,8 @@ class JourneyReleaseTest {
         val corpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/scene-admission.json").readText()).jsonObject
         val envelope = fixture.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
-        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
-            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val source = pageDescriptorFixture(Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject)
         for (value in corpus.getValue("cases").jsonArray) {
             val item = value.jsonObject
             val render = source.getValue("render").jsonObject
@@ -526,10 +527,14 @@ class JourneyReleaseTest {
             val envelope = entry.getValue("envelope").jsonObject
             val encoded = envelope.toString().encodeToByteArray()
             val bytes = JourneyReleaseEnvelope.authenticate(encoded, trusted).descriptorBytes
-            val source = Json.parseToJsonElement(bytes.decodeToString()).jsonObject
+            val source = pageDescriptorFixture(Json.parseToJsonElement(bytes.decodeToString()).jsonObject)
             val identity = requireNotNull(JourneyReleaseIdentity.fromJson(source.getValue("identity").jsonObject))
             val legId = source.getValue("leg").jsonObject.getValue("id").jsonPrimitive.content
-            assertArrayEquals(name, bytes, JourneyReleaseVerifier.authenticate(encoded, trusted, identity, legId,
+            if (name == "rendered-custom-transition") {
+                assertThrows(JourneyReleaseAuthenticationException::class.java) {
+                    JourneyReleaseVerifier.authenticate(encoded, trusted, identity, legId, runtime(source), JourneyReleaseReplayPolicy.Active(0))
+                }
+            } else assertArrayEquals(name, bytes, JourneyReleaseVerifier.authenticate(encoded, trusted, identity, legId,
                 runtime(source), JourneyReleaseReplayPolicy.Active(0)).descriptorBytes)
             assertEquals(provenance.getValue("descriptorSha256"), envelope.getValue("descriptorSha256"))
             val fonts = source.getValue("render").jsonObject.getValue("assets").jsonArray
@@ -546,8 +551,8 @@ class JourneyReleaseTest {
             .resolve("journeys/planes/system-font-declarations.json").readText()).jsonObject
         val capabilities = corpus.getValue("consumerCapabilities").jsonArray
         val envelope = fixture.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
-        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
-            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val source = pageDescriptorFixture(Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject)
         val luau = supported.supportedLuauRevisions.entries.single()
         val requirements = buildJsonObject {
             put("minimumSdkVersion", supported.currentSdkVersion)
@@ -604,8 +609,8 @@ class JourneyReleaseTest {
         val corpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/system-font-declarations.json").readText()).jsonObject
         val envelope = fixture.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
-        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
-            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val source = pageDescriptorFixture(Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject)
         for (entry in corpus.getValue("cases").jsonArray) {
             val case = entry.jsonObject
             val root = JsonObject(source + mapOf(
@@ -627,8 +632,8 @@ class JourneyReleaseTest {
         val corpus = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/video-admission.json").readText()).jsonObject
         val envelope = fixture.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
-        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
-            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val source = pageDescriptorFixture(Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject)
         for (item in corpus.getValue("cases").jsonArray) {
             val case = item.jsonObject
             val renderer = case["renderer"]?.jsonPrimitive?.content ?: "nux"
@@ -675,7 +680,7 @@ class JourneyReleaseTest {
             val envelope = entry.getValue("envelope").jsonObject.toString().encodeToByteArray()
             // Prove every malformed case has an authentic signature before testing schema admission.
             val bytes = JourneyReleaseEnvelope.authenticate(envelope, trusted).descriptorBytes
-            val source = Json.parseToJsonElement(bytes.decodeToString()).jsonObject
+            val source = pageDescriptorFixture(Json.parseToJsonElement(bytes.decodeToString()).jsonObject)
             val identity = requireNotNull(JourneyReleaseIdentity.fromJson(source.getValue("identity").jsonObject))
             val legId = source.getValue("leg").jsonObject.getValue("id").jsonPrimitive.content
             fun authenticate() = JourneyReleaseVerifier.authenticate(envelope, trusted, identity, legId,
@@ -696,7 +701,7 @@ class JourneyReleaseTest {
             val entry = fixture.getValue(case.getValue("entry").jsonPrimitive.content).jsonObject
             val envelope = entry.getValue("envelope").jsonObject
             val bytes = Base64.decode(envelope.getValue("descriptorBytesBase64").jsonPrimitive.content, Base64.NO_WRAP)
-            val source = Json.parseToJsonElement(bytes.decodeToString()).jsonObject
+            val source = pageDescriptorFixture(Json.parseToJsonElement(bytes.decodeToString()).jsonObject)
             val leg = JsonObject(source.getValue("leg").jsonObject + case.getValue("leg").jsonObject)
             val root = JsonObject(source + ("leg" to leg) + case.getValue("descriptor").jsonObject)
             val name = case.getValue("name").jsonPrimitive.content
@@ -714,8 +719,8 @@ class JourneyReleaseTest {
         val navigation = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/text-input-navigation.json").readText()).jsonObject
         val envelope = navigation.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
-        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
-            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val source = pageDescriptorFixture(Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject)
         for (item in typography.getValue("lineHeightAdmission").jsonArray) {
             val case = item.jsonObject
             val render = source.getValue("render").jsonObject
@@ -738,8 +743,8 @@ class JourneyReleaseTest {
         val navigation = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/text-input-navigation.json").readText()).jsonObject
         val envelope = navigation.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
-        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
-            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val source = pageDescriptorFixture(Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject)
         for (mode in listOf("text", "binding", "invalid")) {
             for (secure in listOf(false, true)) {
                 for (field in listOf(false, true)) {
@@ -765,8 +770,8 @@ class JourneyReleaseTest {
         val navigation = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/text-input-navigation.json").readText()).jsonObject
         val envelope = navigation.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
-        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
-            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val source = pageDescriptorFixture(Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject)
         val render = source.getValue("render").jsonObject
         fun validate(fields: Map<String, kotlinx.serialization.json.JsonElement>) {
             val inputs = render.getValue("textInputs").jsonArray.toMutableList()
@@ -798,9 +803,17 @@ class JourneyReleaseTest {
     @Test fun `admits signed local programs with and without a render closure`() {
         for (key in listOf("entry", "renderedEntry")) {
             val entry = fixture.getValue(key).jsonObject
-            val envelope = entry.getValue("envelope").jsonObject
+            val oldEnvelope = entry.getValue("envelope").jsonObject
+            val original = JourneyReleaseEnvelope.authenticate(oldEnvelope.toString().encodeToByteArray(), keys)
+            val migrated = pageDescriptorFixture(Json.parseToJsonElement(original.descriptorBytes.decodeToString()).jsonObject)
+            if (key == "renderedEntry") assertThrows(JourneyReleaseAuthenticationException::class.java) {
+                JourneyReleaseVerifier.authenticate(oldEnvelope.toString().encodeToByteArray(), keys,
+                    requireNotNull(JourneyReleaseIdentity.fromJson(migrated.getValue("identity").jsonObject)),
+                    "a".repeat(64), runtime(migrated), JourneyReleaseReplayPolicy.Active(0))
+            }
+            val (envelope, keys) = ai.nuxie.sdk.fixtures.signPageDescriptorFixture(oldEnvelope, migrated)
             val bytes = Base64.decode(envelope.getValue("descriptorBytesBase64").jsonPrimitive.content, Base64.NO_WRAP)
-            val source = Json.parseToJsonElement(bytes.decodeToString()).jsonObject
+            val source = pageDescriptorFixture(Json.parseToJsonElement(bytes.decodeToString()).jsonObject)
             val identity = requireNotNull(
                 JourneyReleaseIdentity.fromJson(
                     entry.getValue("locator").jsonObject,
@@ -822,8 +835,8 @@ class JourneyReleaseTest {
 
     @Test fun `release admission rejects unsafe artifact paths and mismatched script exports`() {
         val envelope = fixture.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
-        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
-            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val source = pageDescriptorFixture(Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject)
         val render = source.getValue("render").jsonObject
         val riv = JsonObject(render.getValue("nux").jsonObject + ("key" to JsonPrimitive("../outside.riv")))
         assertThrows(JourneyReleaseAuthenticationException::class.java) {
@@ -837,8 +850,8 @@ class JourneyReleaseTest {
 
     @Test fun `authenticated identity leg and replay policies cannot be substituted`() {
         val envelope = fixture.getValue("entry").jsonObject.getValue("envelope").jsonObject
-        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
-            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val source = pageDescriptorFixture(Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject)
         val identity = requireNotNull(JourneyReleaseIdentity.fromJson(source.getValue("identity").jsonObject))
         val bytes = envelope.toString().encodeToByteArray()
         assertThrows(JourneyReleaseAuthenticationException::class.java) {
@@ -857,8 +870,8 @@ class JourneyReleaseTest {
 
     @Test fun `shared script bytes count once and field limits use the canonical byte units`() {
         val envelope = fixture.getValue("renderedEntry").jsonObject.getValue("envelope").jsonObject
-        val source = Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
-            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject
+        val source = pageDescriptorFixture(Json.parseToJsonElement(Base64.decode(envelope.getValue("descriptorBytesBase64")
+            .jsonPrimitive.content, Base64.NO_WRAP).decodeToString()).jsonObject)
         val leg = source.getValue("leg").jsonObject
         val render = source.getValue("render").jsonObject
         val legScreen = leg.getValue("screens").jsonArray.single().jsonObject

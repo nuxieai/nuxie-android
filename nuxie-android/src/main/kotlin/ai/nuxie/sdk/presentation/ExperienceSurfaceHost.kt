@@ -1891,6 +1891,12 @@ internal class ExperienceSurfaceHost(
             if (row.outcome.hasPublishableEffects()) unpublishedSteps.addLast(PublishedStep(step.correlationId,
                 row.outcome, row.snapshot, saves, id))
         }
+        if (step.unattributedHostCommands.isNotEmpty()) {
+            // Commands have no instance accessor in the ABI. Deliver once through the page owner,
+            // retaining their published payload rather than guessing a row from its model graph.
+            unpublishedSteps.addLast(PublishedStep(step.correlationId,
+                step.native.copy(events = emptyList(), viewModelChanges = emptyList()), null, emptyList()))
+        }
         if (step.unattributedEvents.isNotEmpty() || step.unattributedHostCommands.isNotEmpty()) {
             Log.w(LOG_TAG, "Experience layer effects have no unique Screen owner")
         }

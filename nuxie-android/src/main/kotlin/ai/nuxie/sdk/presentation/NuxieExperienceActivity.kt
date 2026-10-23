@@ -108,7 +108,7 @@ internal class NuxieExperienceActivity : Activity() {
     }
 
     /** Registry ownership belongs to this screen, even when the Activity hosts another one. */
-    private inner class Screen(val id: String, val prepared: PreparedPresentation, @Volatile var provisional: Boolean = false) :
+    private inner class Screen(val id: String, var prepared: PreparedPresentation, @Volatile var provisional: Boolean = false) :
         PresentationScreenHandle, ExperienceSurfaceHost.Listener {
         override val rendererEffects = RendererEffectLifetime()
         override val nativeAttemptGeneration = PresentationRegistry.nativeProgress(id)?.generation
@@ -217,6 +217,16 @@ internal class NuxieExperienceActivity : Activity() {
             val layer = layers.lastOrNull()?.takeIf { it.screen === this@Screen } ?: return@withContext false
             closeLayer(layer, authored = true)
         }
+        override suspend fun dismissPagesFromJourney(count: Int): Boolean = withContext(Dispatchers.Main.immediate) {
+            val layer = layers.lastOrNull()?.takeIf { it.screen === this@Screen } ?: return@withContext false
+            closeLayer(layer, authored = true, pageCount = count)
+        }
+        override suspend fun cutCoveredPage(screenId: String, history: List<String>): PreparedPresentation? =
+            withContext(Dispatchers.Main.immediate) {
+                val layer = layers.firstOrNull { it.screen === this@Screen } ?: return@withContext null
+                check(layer !== layers.last()) { "Hidden cut requires a covered page" }
+                checkNotNull(mounted).cutCoveredPage(screenId, history, this@Screen).also { prepared = it }
+            }
         override suspend fun prepareNavigation(id: String, content: PreparedPresentation): PreparedScreenNavigation =
             prepareScreenNavigation(this, id, content)
 
@@ -886,7 +896,7 @@ internal class NuxieExperienceActivity : Activity() {
             returning.root.visibility = View.VISIBLE
             returning.screen.mounted?.takeIf { it.isLayer }?.enterPage()
             returning.screen.mounted?.setVisible(visible)
-            if (layer.pushed && pageCount == 1) {
+            if (layer.pushed) {
                 val lower = returning
                 if (authored && source.mounted?.reduceMotion != true) {
                     val slide = ExperienceScreenViewTransition(layer.root, lower.root, ExperienceScreenTransitionPlan.Kind.POP)
