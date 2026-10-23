@@ -319,7 +319,7 @@ internal class ExperienceInteractivePage private constructor(
         require(index >= 0) { "Screen is absent from the page" }
         check(row(screenId).completions.isEmpty()) { "Screen still awaits completion" }
         artboard.removeDefaultListItem(contract.listPath, index)
-        // No advance is needed after removal with the UNIV-5186 runtime fix.
+        // Removal reconciles on the next ordinary step; do not add a settlement advance.
         mounted.removeAt(index)
         collapsed.remove(screenId)
         captureOnLane(NuxiePlayerStepOutcome(false, emptyList(), emptyList(), emptyList(), emptyList()), correlationId)

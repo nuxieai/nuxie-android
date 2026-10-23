@@ -120,7 +120,7 @@ class JourneyServiceTest {
 
     private val fixture = Json.parseToJsonElement(
         FixtureRunner.fixturesRoot().resolve("journeys/planes/release.json").readText(),
-    ).jsonObject
+    ).jsonObject.let { ai.nuxie.sdk.fixtures.pageReleaseCorpusFixture(it) }
     private val entry get() = fixture.getValue("entry").jsonObject
     private val authority get() = ProfileDeliveryAuthority(
         entry.getValue("locator").jsonObject.getValue("appId").jsonPrimitive.content,

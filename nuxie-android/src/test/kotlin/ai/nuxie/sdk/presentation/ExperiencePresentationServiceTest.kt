@@ -471,7 +471,7 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
-    fun `authored transition survives native presentation preparation`() = runTest {
+    fun `primitive fade becomes a cut during native page preparation`() = runTest {
         val contract = Json.parseToJsonElement(
             FixtureRunner.fixturesRoot().resolve("journeys/planes/text-input-navigation.json").readText(),
         ).jsonObject
@@ -484,7 +484,7 @@ class ExperiencePresentationServiceTest {
                 transition = contract.getValue("transition").jsonObject, onOutcome = {})
         }
         runCurrent()
-        assertEquals(contract.getValue("transition"), PresentationRegistry.resolve(launched.single())?.transition)
+        assertEquals(Json.parseToJsonElement("""{"type":"none"}"""), PresentationRegistry.resolve(launched.single())?.transition)
         PresentationRegistry.reportFirstFrame(launched.single())
         presentation.await()
         service.dismissFromHost("customer-1")
@@ -1560,7 +1560,7 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
-    fun `same Journey navigation replaces the screen without a false terminal outcome`() = runTest {
+    fun `self navigation keeps its page draft and does not acquire a second destination`() = runTest {
         val release = renderedJourneyRelease()
         val emitted = mutableListOf<String>()
         val launched = mutableListOf<String>()
@@ -1611,26 +1611,17 @@ class ExperiencePresentationServiceTest {
         }
         runCurrent()
 
-        assertEquals(2, launched.size)
-        assertFalse(originalDraft.isCurrent())
-        assertFalse(originalDraft.write("input_email", draft.copy(text = "late")))
-        val restoredDraft = requireNotNull(PresentationRegistry.resolve(launched.last()))
-            .textInputState.bind()
-        assertEquals(draft, restoredDraft.read("input_email"))
-        assertTrue(firstLease.closed.get())
-        assertTrue(firstOutcomes.isEmpty())
-        assertEquals(
-            listOf(Triple("screen_welcome", "screen_welcome", "navigate")),
-            lifecycle,
-        )
-        assertEquals(0, emitted.count { it == SystemEventNames.EXPERIENCE_DISMISSED })
-
-        PresentationRegistry.reportFirstFrame(launched.last())
+        assertEquals(1, launched.size)
+        assertTrue(originalDraft.isCurrent())
+        assertEquals(draft, originalDraft.read("input_email"))
+        assertFalse(firstLease.closed.get())
+        assertTrue(lifecycle.isEmpty())
+        assertTrue(firstOutcomes.isEmpty()); assertTrue(secondOutcomes.isEmpty())
         second.await()
         service.dismissFromHost("customer-1")
-
-        assertEquals(listOf(JourneySurfaceOutcome.DISMISSED), secondOutcomes)
-        assertTrue(secondLease.closed.get())
+        assertEquals(listOf(JourneySurfaceOutcome.DISMISSED), firstOutcomes)
+        assertTrue(secondOutcomes.isEmpty())
+        assertFalse(secondLease.closed.get())
         assertEquals(1, emitted.count { it == SystemEventNames.EXPERIENCE_SHOWN })
         assertEquals(1, emitted.count { it == SystemEventNames.EXPERIENCE_DISMISSED })
 
@@ -1814,7 +1805,7 @@ class ExperiencePresentationServiceTest {
         val contract = Json.parseToJsonElement(
             FixtureRunner.fixturesRoot().resolve("journeys/planes/navigation-acquisition-android.json").readText(),
         ).jsonObject.getValue("completedDismissal").jsonObject
-        val release = renderedJourneyRelease()
+        val release = renderedJourneyRelease("text-input-navigation.json")
         val launched = mutableListOf<String>()
         val firstLease = Lease()
         var secondAcquired = false
@@ -1840,7 +1831,7 @@ class ExperiencePresentationServiceTest {
         val error = expectPresentationFailure {
             service.presentJourney(testPresentationFences(),
                 release = release,
-                screenId = "screen_welcome",
+                screenId = "screen_details",
                 journeyId = "journey-1",
                 ownerDistinctId = "customer-1",
                 reservation = null,
@@ -2377,9 +2368,8 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
-    fun `shared layer vectors retain covered owners and isolate duplicate screen state`() = runTest {
-        val vectors = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
-            .resolve("journeys/planes/presentation-layers.json").readText()).jsonObject.getValue("cases").jsonArray
+    fun `page vectors retain covered owners and isolate duplicate screen state`() = runTest {
+        val vectors = Json.parseToJsonElement(checkNotNull(javaClass.getResource("/page-host/presentation-pages.json")).readText()).jsonObject.getValue("cases").jsonArray
         val release = renderedJourneyRelease("text-input-navigation.json")
         fun screen(id: String) = if (id == "screen") "screen_welcome" else "screen_details"
         for (value in vectors) {
@@ -2522,7 +2512,7 @@ class ExperiencePresentationServiceTest {
                             "publish:${lower.screenId}"), edges)
                     }
                     "back" -> {
-                        val atRoot = service.layerScreenIds().last().size == 1
+                        val atRoot = service.layerScreenIds().size == 1 && service.layerScreenIds().last().size == 1
                         val retainedId = nativeLayers.last()
                         val result = service.dispatchJourneyAction(JourneyPresentationOwner("journey-1", "customer-1"),
                             JsonObject(mapOf("type" to JsonPrimitive("back"), "steps" to (step["count"] ?: JsonPrimitive(1)))), "back")
@@ -2530,18 +2520,20 @@ class ExperiencePresentationServiceTest {
                             assertEquals(JourneyPresentationActionResult.Handled, result)
                             assertEquals(retainedId, nativeLayers.last())
                         }
+                        val beforePages = nativeLayers.size
                         when (result) {
                             is JourneyPresentationActionResult.Navigate -> navigate(result.screenId, step["transition"] as? JsonObject)
                             JourneyPresentationActionResult.Handled -> assertEquals(1, service.layerScreenIds().last().size)
-                            else -> fail("Back must navigate within its layer or stay at its root")
+                            else -> fail("Back must navigate within its page or pop a page")
                         }
+                        repeat(beforePages - nativeLayers.size) { draftsByLayer.removeAt(draftsByLayer.lastIndex) }
                     }
                     else -> {
                         val type = if (operation == "replace") "none" else operation
                         val transition = mutableMapOf<String, kotlinx.serialization.json.JsonElement>("type" to JsonPrimitive(type))
                         if (type == "custom") transition["transitionId"] = JsonPrimitive("not-declared")
                         navigate(screen(step.getValue("screen").jsonPrimitive.content), JsonObject(transition))
-                        if (operation == "modal") draftsByLayer += mutableMapOf()
+                        if (operation in setOf("modal", "push")) draftsByLayer += mutableMapOf()
                     }
                 }
                 val retained = checkNotNull(PresentationRegistry.resolve(nativeLayers.last()))
@@ -2722,7 +2714,8 @@ class ExperiencePresentationServiceTest {
         PresentationRegistry.reportFirstFrame(currentId!!)
         first.await()
         val push = Json.parseToJsonElement("""{"type":"fade","transitionId":"pair"}""").jsonObject
-        val forward = async { show("screen_details", push) }
+        val route = Json.parseToJsonElement("""{"type":"fade","transitionIds":{"screen_welcome":"pair"}}""").jsonObject
+        val forward = async { show("screen_details", route) }
         runCurrent()
         val self = async { show("screen_details") }
         val back = async { service.dispatchJourneyAction(JourneyPresentationOwner("journey-1", "customer-1"),
@@ -2749,11 +2742,11 @@ class ExperiencePresentationServiceTest {
         assertEquals("screen_welcome" to "screen_welcome", revealSources.last())
         assertTrue(prepared.last().isBack)
         show("screen_details", push)
-        val legacy = Json.parseToJsonElement("""{"type":"none"}""").jsonObject
+        val legacy = Json.parseToJsonElement("""{"type":"fade"}""").jsonObject
         assertEquals(JourneyPresentationActionResult.Navigate("screen_welcome"), service.dispatchJourneyAction(
             JourneyPresentationOwner("journey-1", "customer-1"), JsonObject(mapOf("type" to JsonPrimitive("back"), "transition" to legacy)), "legacy-back"))
         show("screen_welcome")
-        assertEquals(legacy, prepared.last().transition)
+        assertEquals(push, prepared.last().transition)
         service.dismissFromHost("customer-1")
     }
 
@@ -2772,6 +2765,7 @@ class ExperiencePresentationServiceTest {
         var acquisitions = 0
         var windowPagesToClose = 1
         val shownScreens = mutableListOf<String>()
+        val pageOrder = mutableListOf<String>()
         fun host(id: String): PresentationScreenHandle = object : PresentationScreenHandle {
             var reason: CloseReason? = null
             override fun requestCloseFromService(reason: CloseReason): Boolean { this.reason = reason; return true }
@@ -2779,7 +2773,13 @@ class ExperiencePresentationServiceTest {
             override fun finishAfterServiceClose() {
                 if (reason != CloseReason.JourneyNavigation) PresentationRegistry.detach(id, this)
             }
+            override suspend fun cutCoveredPage(screenId: String, history: List<String>): PreparedPresentation {
+                assertTrue(id != pages.last())
+                pageOrder += "hidden-cut:$screenId"
+                return checkNotNull(PresentationRegistry.resolve(id)).copy(screenId = screenId, transition = null, pageHistory = history)
+            }
             override suspend fun dismissLayerFromJourney(): Boolean {
+                pageOrder += "pop"
                 val content = checkNotNull(PresentationRegistry.resolve(id))
                 return checkNotNull(content.closeLayer).invoke(object : PreparedLayerReveal {
                     override val pagesToClose = windowPagesToClose
@@ -2854,6 +2854,18 @@ class ExperiencePresentationServiceTest {
         assertSame(lowerHost, PresentationRegistry.currentScreen(lower))
         assertSame(lowerContent, PresentationRegistry.resolve(lower))
         assertEquals(listOf(listOf("screen_welcome", "screen_details")), service.layerScreenIds())
+        show("screen_welcome", Json.parseToJsonElement("""{"type":"push"}""").jsonObject)
+        pageOrder.clear(); shownScreens.clear()
+        val beforeHiddenCut = acquisitions
+        assertEquals(JourneyPresentationActionResult.Navigate("screen_welcome"), service.dispatchJourneyAction(owner,
+            Json.parseToJsonElement("""{"type":"back","steps":2}""").jsonObject, "hidden-cut-back"))
+        show("screen_welcome")
+        assertEquals(listOf("hidden-cut:screen_welcome", "pop"), pageOrder)
+        assertEquals(beforeHiddenCut, acquisitions)
+        assertEquals(listOf(lower), pages)
+        assertEquals(listOf(listOf("screen_welcome")), service.layerScreenIds())
+        assertEquals(listOf("screen_welcome"), shownScreens)
+        show("screen_details")
         show("screen_welcome")
         assertEquals(listOf("screen_welcome", "screen_details", "screen_welcome"), prepared.last().pageHistory)
         val retainedRoot = pages.single()
@@ -2964,14 +2976,11 @@ class ExperiencePresentationServiceTest {
                 Base64.NO_WRAP,
             ),
         )
-        return JourneyReleaseVerifier.authenticate(
-            envelopeBytes = envelope.toString().encodeToByteArray(),
-            trustedKeys = trustedKeys,
-            expectedIdentity = identity,
-            expectedLegId = "a".repeat(64),
-            supportedRuntime = runtime,
-            replayPolicy = JourneyReleaseReplayPolicy.Active(0),
-        )
+        // These tests exercise presentation, not signed admission. Stage C replaces their old scene fixtures.
+        val authenticated = ai.nuxie.sdk.experiences.JourneyReleaseEnvelope.authenticate(
+            envelope.toString().encodeToByteArray(), trustedKeys)
+        return AuthenticatedJourneyRelease(authenticated, identity,
+            ai.nuxie.sdk.fixtures.pageDescriptorFixture(descriptor), null)
     }
 
     private fun testPresentationFences(): JourneyPresentationFences {

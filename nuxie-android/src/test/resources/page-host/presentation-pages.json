@@ -1,0 +1,445 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "name": "push opens a page and Back pops within the sheet; modal over modal reveals the prior page",
+      "root": "screen",
+      "steps": [
+        {
+          "operation": "modal",
+          "screen": "details",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ]
+          ]
+        },
+        {
+          "operation": "push",
+          "screen": "screen",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ],
+            [
+              "screen"
+            ]
+          ]
+        },
+        {
+          "operation": "back",
+          "count": 1,
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ]
+          ]
+        },
+        {
+          "operation": "modal",
+          "screen": "screen",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ],
+            [
+              "screen"
+            ]
+          ]
+        },
+        {
+          "operation": "close",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ]
+          ]
+        },
+        {
+          "operation": "close",
+          "layers": [
+            [
+              "screen"
+            ]
+          ]
+        },
+        {
+          "operation": "back",
+          "count": 20,
+          "layers": [
+            [
+              "screen"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a modal copy leaves the lower screen instance intact",
+      "root": "screen",
+      "steps": [
+        {
+          "operation": "modal",
+          "screen": "screen",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "screen"
+            ]
+          ]
+        },
+        {
+          "operation": "close",
+          "layers": [
+            [
+              "screen"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a replacement stays in the top page",
+      "root": "screen",
+      "steps": [
+        {
+          "operation": "modal",
+          "screen": "details",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ]
+          ]
+        },
+        {
+          "operation": "replace",
+          "screen": "screen",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details",
+              "screen"
+            ]
+          ]
+        },
+        {
+          "operation": "close",
+          "layers": [
+            [
+              "screen"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "fade back stays inside the upper page",
+      "root": "screen",
+      "steps": [
+        {
+          "operation": "modal",
+          "screen": "details",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ]
+          ]
+        },
+        {
+          "operation": "push",
+          "screen": "screen",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ],
+            [
+              "screen"
+            ]
+          ]
+        },
+        {
+          "operation": "back",
+          "count": 1,
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ]
+          ]
+        },
+        {
+          "operation": "close",
+          "layers": [
+            [
+              "screen"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "cut back stays inside the upper page",
+      "root": "screen",
+      "steps": [
+        {
+          "operation": "modal",
+          "screen": "details",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ]
+          ]
+        },
+        {
+          "operation": "push",
+          "screen": "screen",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ],
+            [
+              "screen"
+            ]
+          ]
+        },
+        {
+          "operation": "back",
+          "count": 1,
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ]
+          ]
+        },
+        {
+          "operation": "close",
+          "layers": [
+            [
+              "screen"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "replace visits a retained Screen in its page",
+      "root": "screen",
+      "steps": [
+        {
+          "operation": "modal",
+          "screen": "details",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ]
+          ]
+        },
+        {
+          "operation": "push",
+          "screen": "screen",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ],
+            [
+              "screen"
+            ]
+          ]
+        },
+        {
+          "operation": "replace",
+          "screen": "details",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ],
+            [
+              "screen",
+              "details"
+            ]
+          ]
+        },
+        {
+          "operation": "close",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "fade visits a retained Screen in its page",
+      "root": "screen",
+      "steps": [
+        {
+          "operation": "modal",
+          "screen": "details",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ]
+          ]
+        },
+        {
+          "operation": "push",
+          "screen": "screen",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ],
+            [
+              "screen"
+            ]
+          ]
+        },
+        {
+          "operation": "fade",
+          "screen": "details",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ],
+            [
+              "screen",
+              "details"
+            ]
+          ]
+        },
+        {
+          "operation": "close",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "cut visits a retained Screen in its page",
+      "root": "screen",
+      "steps": [
+        {
+          "operation": "modal",
+          "screen": "details",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ]
+          ]
+        },
+        {
+          "operation": "push",
+          "screen": "screen",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ],
+            [
+              "screen"
+            ]
+          ]
+        },
+        {
+          "operation": "replace",
+          "screen": "details",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ],
+            [
+              "screen",
+              "details"
+            ]
+          ]
+        },
+        {
+          "operation": "close",
+          "layers": [
+            [
+              "screen"
+            ],
+            [
+              "details"
+            ]
+          ]
+        }
+      ]
+    }
+  ],
+  "source": "Derived from shared presentation-layers.json for ledger P4/P7/R7/B4. Shared signed fixtures remain unchanged until stage C."
+}
