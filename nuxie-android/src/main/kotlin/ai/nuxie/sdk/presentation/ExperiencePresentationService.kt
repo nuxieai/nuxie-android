@@ -845,7 +845,10 @@ internal class ExperiencePresentationService(
         suspend fun present() = presentJourneyNow(
             fences, release, screenId, journeyId, ownerDistinctId, reservation, canPresent, acquire,
             nextBatchSequence, nextEmissionSequence, onScreenChanged, onScreenDismissed, onLinkOpened,
-            onEmissionBatch, onPresentationRevealed, onOutcome, transition, runValues, withPresentationCallbacks, onBackNavigation,
+            onEmissionBatch, onPresentationRevealed, onOutcome,
+            if (ExperiencePageHostContract.isEnabled(release.descriptor))
+                ExperiencePageHostContract.resolveIntent(transition, synchronized(stateLock) { current?.journey?.screenId }) else transition,
+            runValues, withPresentationCallbacks, onBackNavigation,
         )
         if (!ExperiencePageHostContract.isEnabled(release.descriptor)) return present()
         return layerNavigation.withLock {
@@ -1740,8 +1743,14 @@ internal class ExperiencePresentationService(
                 target,
                 lowerPage?.journey?.layerHistory ?: if (ExperiencePageHostContract.isEnabled(PresentationRegistry.resolve(active.id)?.descriptor)) history.popping(steps)
                 else history.navigate(target, push = false),
-                (action["transition"] as? JsonObject) ?: PresentationRegistry.resolve(active.id)?.descriptor
-                    ?.takeIf(ExperiencePageHostContract::isEnabled)?.let { history.backTransition(steps, target, it) },
+                PresentationRegistry.resolve(active.id)?.descriptor?.takeIf(ExperiencePageHostContract::isEnabled)
+                    ?.let { descriptor ->
+                        if (action["transition"] != null) ai.nuxie.sdk.logging.NuxieLog.w("ExperiencePageStep",
+                            "Ignoring a Back transition in a page; reversing recorded history")
+                        history.backTransition(steps, target, descriptor)
+                    } ?: (action["transition"] as? JsonObject)?.takeUnless {
+                        ExperiencePageHostContract.isEnabled(PresentationRegistry.resolve(active.id)?.descriptor)
+                    },
                 pageId = lowerPage?.id,
             )
         }
