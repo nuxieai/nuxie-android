@@ -393,6 +393,7 @@ internal class JourneyService(
     private var storageScope: JourneyStorageScope? = fixedStorageScope
     private val acceptsAuthorityScope = fixedStorageScope == null
     private var initialized = false
+    private var startupProfileSettled = false
     /** Fetches of each customer's copy that have not settled. */
     private val profileRefetchesInFlight = mutableMapOf<String, Int>()
     private data class ParkCheckpoint(val stepId: String, val anchorAtMillis: Long?, val wakeAtMillis: Long) {
@@ -414,9 +415,13 @@ internal class JourneyService(
     // coordinator observes the first Activity entering the foreground.
     private val foreground = JourneyForegroundAdmission()
     private var profileState: ProfileState? = null
+    private class ParkCommitFailure(val retry: suspend () -> Unit, cause: Exception) : Exception(cause)
+    // Only a refused event delivery retains this continuation; EventLog owns its retry timer.
+    private val pendingEventStarts = mutableMapOf<String, suspend () -> Unit>()
     private var journal: JourneyRunJournal? = null
         set(value) {
             field = value
+            pendingEventStarts.clear()
             enqueuedDeadlines.clear()
             foregroundDeadlines.clear()
             deadlineRetryAt.clear()
@@ -854,7 +859,9 @@ internal class JourneyService(
     }
 
     private fun updateRoutingHold() {
-        if (!initialized || journal?.distinctId != identity.distinctId() ||
+        val needsJournal = journal?.distinctId != identity.distinctId() &&
+            !(startupProfileSettled && storageScope == null)
+        if (!initialized || needsJournal ||
             foreground.isRevalidating() || holdsEvents(identity.distinctId())) holdRouting()
         else synchronized(routingDeferralLock) {
             routingDeferral?.let { generation ->
@@ -974,6 +981,7 @@ internal class JourneyService(
         profileState?.artifacts?.close()
         profileState = null
         directlyRoutedRunByEventId.clear()
+        pendingEventStarts.clear()
         activePresentedRunIds.clear()
         pendingPresentationPurchasePlacements.clear()
         deferredCommerceOutcomes.clear()
@@ -1018,11 +1026,19 @@ internal class JourneyService(
         if (!initialized) return false
         // The durable route must survive until the visible host has current authority.
         if (foreground.isRevalidating()) return false
-        if (journal?.distinctId != event.distinctId) return false
+        if (journal?.distinctId != event.distinctId) {
+            return startupProfileSettled && storageScope == null && !holdsEvents(event.distinctId)
+        }
         // While the customer's copy is fetched and they have none, their
         // events stay pending, untouched, and replay once a copy lands or the
         // last fetch settles.
         if (holdsEvents(event.distinctId)) return false
+        pendingEventStarts[event.id]?.let { retry ->
+            retry()
+            pendingEventStarts.remove(event.id)
+            scheduleNextWake()
+            return true
+        }
         if (!recoverConversionOccurrences(throughEventId = event.id)) return false
         val directlyRoutedRunId = directlyRoutedRunByEventId[event.id]
         // Journeys already waiting run on their pinned releases, with or without a copy.
@@ -1037,12 +1053,24 @@ internal class JourneyService(
             scheduleNextWake()
             return true
         }
-        state.snapshot.profile.armedLegs.asSequence()
+        val arms = state.snapshot.profile.armedLegs.asSequence()
             .filter {
                 it.entryCondition.text("type") == "event" &&
                     it.entryCondition.text("eventName") == event.name
             }
-            .forEach { arm -> attemptStart(arm, state, event) }
+            .toList()
+        suspend fun startRemaining(index: Int, retryPark: (suspend () -> Unit)? = null) {
+            retryPark?.invoke()
+            for (next in index until arms.size) {
+                try {
+                    attemptStart(arms[next], state, event)
+                } catch (failure: ParkCommitFailure) {
+                    pendingEventStarts[event.id] = { startRemaining(next + 1, failure.retry) }
+                    throw failure
+                }
+            }
+        }
+        startRemaining(0)
         scheduleNextWake()
         return true
     }
@@ -1190,6 +1218,7 @@ internal class JourneyService(
             profileState = null
         }
         directlyRoutedRunByEventId.clear()
+        pendingEventStarts.clear()
         activePresentedRunIds.clear()
         pendingPresentationPurchasePlacements.clear()
         deferredCommerceOutcomes.clear()
@@ -1218,6 +1247,13 @@ internal class JourneyService(
         // they would have, in the order they were captured.
         if (identity.distinctId() != distinctId || currentState() != null) return
         reconcileWithoutCopyNow()
+        finishStartupRoutingNow()
+    }
+
+    private fun finishStartupRoutingNow() {
+        // Unlike authenticated recovery, a failed first fetch has no journal to open.
+        startupProfileSettled = true
+        updateRoutingHold()
     }
 
     /**
@@ -1226,9 +1262,11 @@ internal class JourneyService(
      */
     private suspend fun reconcileWithoutCopyNow() {
         val distinctId = identity.distinctId()
-        if (!initialized || foreground.isRevalidating() || currentState() != null ||
-            journal?.distinctId != distinctId || holdsEvents(distinctId)
-        ) return
+        if (!initialized || foreground.isRevalidating() || currentState() != null || holdsEvents(distinctId)) return
+        if (journal?.distinctId != distinctId) {
+            updateRoutingHold()
+            return
+        }
         try {
             if (!replayPendingLocalRoutes(distinctId)) {
                 Log.w(LOG_TAG, "Pending Journey routes stay queued; waits resolve after they replay")
@@ -2872,7 +2910,7 @@ internal class JourneyService(
                             Log.w(LOG_TAG, "Initial park native preparation failed; retaining checkpoint", error)
                             run.nativeSnapshot
                         }
-                        try {
+                        suspend fun commitPark() {
                             check(publishJournalIfCurrent(executionToken, identityScope) {
                                 if (journal !== target) return@publishJournalIfCurrent false
                                 target.transition(run.id, result.stepId, run.context, result.checkpoint,
@@ -2882,9 +2920,15 @@ internal class JourneyService(
                             if (!initialized || !isExecutionCurrent(executionToken, target) || !identity.isCurrentScope(identityScope)) return
                             if (preparationFailed) registerNativeRestoreRetry(run.id,
                                 ParkCheckpoint(result.stepId, result.checkpoint.anchorAtMillis, result.checkpoint.wakeAtMillis))
+                            scheduleNextWake()
+                        }
+                        try {
+                            commitPark()
                         } catch (cancelled: CancellationException) { throw cancelled }
-                        catch (error: Exception) { Log.w(LOG_TAG, "Failed to persist Journey park point", error) }
-                        scheduleNextWake()
+                        catch (error: Exception) {
+                            Log.w(LOG_TAG, "Failed to persist Journey park point", error)
+                            throw ParkCommitFailure(::commitPark, error)
+                        }
                         return
                     }
                     is JourneyControlExecutor.Result.Complete -> {

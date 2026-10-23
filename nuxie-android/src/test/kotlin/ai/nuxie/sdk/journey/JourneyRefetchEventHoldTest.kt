@@ -96,6 +96,74 @@ class JourneyRefetchEventHoldTest {
         directory.deleteRecursively()
     }
 
+    @Test fun `a failed first checkpoint save keeps the triggering route pending until retry`() = runBlocking {
+        for (step in listOf(waitSteps().first().jsonObject, delayStep())) {
+            directory.deleteRecursively()
+            context.getSharedPreferences("nuxie_journey_release_high_water", 0).edit().clear().commit()
+            val sleeper = WakeSleeper()
+            val failPark = java.util.concurrent.atomic.AtomicBoolean(true)
+            val parkWriteArmed = java.util.concurrent.atomic.AtomicBoolean(false)
+            val releaseRejection = CompletableDeferred<Unit>()
+            val deliveries = CopyOnWriteArrayList<Boolean>()
+            val launch = Launch("customer", sleep = sleeper::sleep, prepare = { parkWriteArmed.set(true) },
+                beforePersist = {
+                    if (parkWriteArmed.get() && failPark.getAndSet(false)) error("First checkpoint save failed")
+                }, afterJourney = { event, accepted ->
+                    if (event.id == "first-park") {
+                        deliveries += accepted
+                        if (!accepted) releaseRejection.await()
+                    }
+                })
+            try {
+                val snapshot = launch.copy("customer", 1, "start_waiting", JsonArray(listOf(step) + waitSteps().drop(1)))
+                launch.start(); launch.commit("customer", snapshot)
+                assertTrue(launch.eventLog.captureIdempotently("start_waiting", emptyMap(), "first-park", "customer"))
+                // Keep rejection observable even if this assertion task is descheduled past one second.
+                withTimeout(10_000L) { while (deliveries.isEmpty()) delay(10) }
+                assertEquals(listOf(false), deliveries.toList())
+                val admitted = launch.journal().runs().single()
+                assertTrue(admitted.park == null)
+                assertTrue(launch.store.queryPendingLocalRoutes("customer").any { it.id == "first-park" })
+                releaseRejection.complete(Unit)
+                withTimeout(10_000L) { while (deliveries.lastOrNull() != true) delay(10) }
+                launch.eventLog.awaitBarrier()
+                val parked = launch.journal().runs().single()
+                assertEquals(admitted.id, parked.id)
+                assertEquals(1_000_000L, parked.park?.anchorAtMillis)
+                assertEquals(1_060_000L, parked.park?.wakeAtMillis)
+                assertEquals(1, launch.starts("customer"))
+                assertTrue(launch.store.queryPendingLocalRoutes("customer").isEmpty())
+                withTimeout(5_000L) { while (60_000L !in sleeper.pendingDurations) delay(10) }
+                launch.clock.addAndGet(60_000L)
+                sleeper.complete(60_000L)
+                val outcome = if (step.getValue("id").jsonPrimitive.content == "delay") "took_go" else "timed_out"
+                withTimeout(5_000L) { while (launch.outcomes("customer", outcome) == 0) delay(10) }
+                launch.eventLog.awaitBarrier()
+                assertEquals(1, launch.outcomes("customer", outcome))
+            } finally { releaseRejection.complete(Unit); launch.close() }
+        }
+    }
+
+    @Test fun `failed first profile fetch releases committed subscribers without a refresh`() = runBlocking {
+        val committed = CopyOnWriteArrayList<String>()
+        val deliveries = CopyOnWriteArrayList<Boolean>()
+        val launch = Launch("customer", firstLaunch = true, beforeJourney = { event -> committed += event.name },
+            afterJourney = { _, accepted -> deliveries += accepted })
+        launch.start()
+        launch.journeys.profileRefetchWillBegin("customer")
+        launch.track("held_before_failure")
+        assertTrue(committed.isEmpty())
+        launch.journeys.profileRefetchDidSettle("customer")
+        launch.eventLog.awaitBarrier()
+        // This is the same committed subscription used by delivery.kick() in NuxieCore.
+        launch.track("after_failure_1")
+        launch.track("after_failure_2")
+        assertEquals(listOf("held_before_failure", "after_failure_1", "after_failure_2"), committed.toList())
+        assertEquals(listOf(true, true, true), deliveries.toList())
+        assertTrue(launch.store.queryPendingLocalRoutes("customer").isEmpty())
+        assertEquals(0, launch.starts("customer"))
+    }
+
     @Test fun `failed no copy settle replay retries without leaving routing held`() = runBlocking {
         val failing = java.util.concurrent.atomic.AtomicBoolean(false)
         val attempts = java.util.concurrent.atomic.AtomicInteger()

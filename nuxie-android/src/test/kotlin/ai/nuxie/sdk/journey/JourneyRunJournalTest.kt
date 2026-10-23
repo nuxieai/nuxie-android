@@ -94,6 +94,32 @@ class JourneyRunJournalTest {
         assertNull(consumed.presentationSource)
     }
 
+    @Test fun `timed resume persists event only context before crash recovery`() {
+        for (advances in listOf(false, true)) {
+            val journal = JourneyRunJournal(File(directory, advances.toString()), "customer")
+            val run = requireNotNull(journal.admit(arm(), JourneyFrequency.EveryMatch, "wait", 100_000L))
+            journal.markStartedQueued(run)
+            journal.transition(run.id, "wait", run.context, JourneyControlExecutor.Checkpoint(100_000L, 200_000L))
+            val event = Json.parseToJsonElement("""{"declared":"event-output"}""").jsonObject
+            val evaluated = Json.parseToJsonElement("""{"event":{"declared":"event-output"},
+                "responses":{"undeclared_native":"must-not-leak"},
+                "formAnswers":{"form":{"private":"must-not-leak"}}}""").jsonObject
+            assertNotNull(journal.resumeParked(run.id, "wait", requireNotNull(journal.runs().single().park),
+                advancingTo = if (advances) "next" to evaluated else null))
+            val reopened = JourneyRunJournal(File(directory, advances.toString()), "customer")
+            val resumed = reopened.runs().single()
+            assertEquals(if (advances) event else run.context.getValue("event"), resumed.context.getValue("event"))
+            assertEquals(JsonObject(emptyMap()), resumed.context.getValue("responses"))
+            assertFalse(resumed.context.containsKey("formAnswers"))
+            assertNull(resumed.park)
+            reopened.recover(200_001L)
+            val abandoned = reopened.runs().single()
+            assertEquals("abandoned", abandoned.completion?.outcome)
+            assertEquals(JsonObject(emptyMap()), abandoned.outputs.getValue("responses"))
+            assertFalse(abandoned.outputs.toString().contains("undeclared_native"))
+        }
+    }
+
     @Test fun `derived form answers are never persisted as journey context`() {
         val journal = JourneyRunJournal(directory, "customer")
         val run = requireNotNull(journal.admit(arm(), JourneyFrequency.OneTime, "wait", 100))
