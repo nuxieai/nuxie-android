@@ -216,6 +216,7 @@ internal class JourneyService(
     private val beforeParkedResume: suspend () -> Unit = {},
     private val replayPendingLocalRoutes: suspend (String) -> Boolean = { true },
     private val enqueueJourneyDeadline: ((JourneyDeadline) -> Unit)? = null,
+    private val requestJourneyResumeRetry: () -> Unit = {},
     private val deferCommittedRouting: () -> Long = { 0L },
     private val releaseCommittedRouting: (Long) -> Unit = {},
     private val readJournalRuns: suspend (JourneyRunJournal) -> List<JourneyRun> = { it.runs() },
@@ -363,6 +364,9 @@ internal class JourneyService(
             override val done: CompletableDeferred<Unit>? = null
         }
         data class NativeRetry(val runId: String, val checkpoint: ParkCheckpoint) : Command {
+            override val done: CompletableDeferred<Unit>? = null
+        }
+        data class ResumeRetry(val accepted: CompletableDeferred<Boolean>) : Command {
             override val done: CompletableDeferred<Unit>? = null
         }
         data class PresentationEnded(
@@ -515,6 +519,10 @@ internal class JourneyService(
                     is Command.Wake -> wakeNow(command.generation, command.deadlineMillis, command.deadlines)
                     is Command.Deadline -> handleJourneyDeadlineNow(command.deadline)
                     is Command.NativeRetry -> retryNativeRestoration(command.runId, command.checkpoint)
+                    is Command.ResumeRetry -> {
+                        resumeParkedRuns(currentState(), null)
+                        true
+                    }
                     is Command.PresentationEnded -> presentationEndedNow(command)
                 }
             }.onFailure {
@@ -524,6 +532,7 @@ internal class JourneyService(
                 command.accepted?.complete(result.getOrNull() == true)
             }
             if (command is Command.Deadline) command.accepted?.complete(true)
+            if (command is Command.ResumeRetry) command.accepted.complete(result.getOrNull() == true)
             if (command is Command.PresentationBatch) {
                 val failure = result.exceptionOrNull()
                 if (failure is CancellationException) {
@@ -804,6 +813,16 @@ internal class JourneyService(
         if (coroutineContext[WorkerContext]?.owner === this) return handleJourneyDeadlineNow(deadline)
         val accepted = CompletableDeferred<Boolean>()
         if (commands.trySend(Command.Deadline(deadline, accepted)).isFailure) return true
+        return accepted.await()
+    }
+
+    suspend fun handleJourneyResumeRetry(): Boolean {
+        if (coroutineContext[WorkerContext]?.owner === this) {
+            resumeParkedRuns(currentState(), null)
+            return true
+        }
+        val accepted = CompletableDeferred<Boolean>()
+        if (commands.trySend(Command.ResumeRetry(accepted)).isFailure) return true
         return accepted.await()
     }
 
@@ -1648,6 +1667,9 @@ internal class JourneyService(
     }
 
     private fun registerNativeRestoreRetry(runId: String, checkpoint: ParkCheckpoint) {
+        // Restoration owns this checkpoint's retry until it succeeds.
+        cancelWake()
+        if (nativeRestoreRetries[runId]?.checkpoint == checkpoint && nativeRestoreRetryJobs[runId] != null) return
         nativeRestoreRetries[runId] = NativeRestoreRetry(checkpoint, nowMillis() + 5_000L)
         nativeRestoreRetryJobs.remove(runId)?.cancel()
         nativeRestoreRetryJobs[runId] = scope.launch {
@@ -1657,8 +1679,8 @@ internal class JourneyService(
     }
 
     private suspend fun retryNativeRestoration(runId: String, checkpoint: ParkCheckpoint) {
+        if (nativeRestoreRetries[runId]?.checkpoint != checkpoint) return
         nativeRestoreRetryJobs.remove(runId)
-        if (!foreground.get() || nativeRestoreRetries[runId]?.checkpoint != checkpoint) return
         // Native retry restores state; only a queued deadline can authorize a timeout.
         resumeParkedRuns(currentState(), null, nativeRetry = runId to checkpoint)
     }
@@ -1683,7 +1705,8 @@ internal class JourneyService(
         catch (error: Exception) {
             Log.w(LOG_TAG, "Failed to inspect parked Journey runs", error)
             if (event != null || deadline != null) throw error
-            scheduleNextWake()
+            cancelWake()
+            requestJourneyResumeRetry()
             return
         }
         try {
@@ -1698,7 +1721,7 @@ internal class JourneyService(
                 if (deadline != null && deadlineFor(parked, currentJournal.distinctId) != deadline) continue
                 var park = parked.park ?: continue
                 val nativeRetryDue = nativeRestoreRetries[parked.id]?.let {
-                    it.checkpoint == checkpointIdentity && it.atMillis <= nowMillis() && foreground.get()
+                    it.checkpoint == checkpointIdentity && it.atMillis <= nowMillis()
                 } == true
                 if (event == null && park.pendingEvent == null && park.candidateEvents.isEmpty() &&
                     (park.wakeAtMillis == null || park.wakeAtMillis!! > nowMillis()) && !nativeRetryDue) continue
@@ -1777,6 +1800,7 @@ internal class JourneyService(
         catch (error: Exception) {
             Log.w(LOG_TAG, "Failed to resume parked Journey", error)
             if (event != null || deadline != null) throw error
+            requestJourneyResumeRetry()
         }
         scheduleNextWake()
     }
@@ -3339,7 +3363,7 @@ internal class JourneyService(
         cancelWake()
         val target = journal?.takeIf { initialized && it.distinctId == identity.distinctId() } ?: return
         val generation = wakeGeneration
-        val deadlines = try { readJournalRuns(target).mapNotNull { deadlineFor(it, target.distinctId) } }
+        val runs = try { readJournalRuns(target) }
         catch (cancelled: CancellationException) { throw cancelled }
         catch (error: Exception) {
             Log.w(LOG_TAG, "Failed to inspect Journey park points", error)
@@ -3347,20 +3371,32 @@ internal class JourneyService(
             return
         }
         if (journal !== target || generation != wakeGeneration) return
+        val deadlines = runs.mapNotNull { deadlineFor(it, target.distinctId) }
+        val savedInputRunIds = runs.filter {
+            it.park?.pendingEvent != null || it.park?.candidateEvents?.isNotEmpty() == true
+        }.mapTo(mutableSetOf()) { it.id }
         val current = deadlines.toSet()
         enqueuedDeadlines.retainAll(current)
         foregroundDeadlines.retainAll(current)
         deadlineRetryAt.keys.retainAll(current)
-        val dated = deadlines.filter { it !in enqueuedDeadlines && it !in foregroundDeadlines }.map { deadline ->
-            val retry = nativeRestoreRetries[deadline.runId]?.takeIf {
+        var savedInputRetryNeeded = false
+        val pending = deadlines.filter { deadline ->
+            val restoring = nativeRestoreRetries[deadline.runId]?.let {
                 it.checkpoint == ParkCheckpoint(deadline.stepId, deadline.anchorAtMillis, deadline.wakeAtMillis)
-            }?.atMillis
-            deadline to maxOf(deadline.wakeAtMillis, deadlineRetryAt[deadline] ?: deadline.wakeAtMillis,
-                retry ?: deadline.wakeAtMillis)
+            } == true
+            if (restoring) false
+            else if (foreground.get() && deadline.runId in savedInputRunIds) {
+                savedInputRetryNeeded = true
+                false
+            } else deadline !in enqueuedDeadlines && deadline !in foregroundDeadlines
+        }
+        val dated = pending.map { deadline ->
+            deadline to maxOf(deadline.wakeAtMillis, deadlineRetryAt[deadline] ?: deadline.wakeAtMillis)
         }
         val now = nowMillis()
         val due = dated.filter { it.second <= now }.map { it.first }
         enqueuedDeadlines.addAll(due)
+        if (savedInputRetryNeeded) requestJourneyResumeRetry()
         due.forEach(::queueDeadline)
         val next = dated.filter { it.second > now }.minOfOrNull { it.second } ?: return
         scheduleWake(generation, next, dated.filter { it.second == next }.map { it.first })
@@ -3384,6 +3420,8 @@ internal class JourneyService(
         val due = deadlines.filter { it !in enqueuedDeadlines }
         enqueuedDeadlines.addAll(due)
         due.forEach(::queueDeadline)
+        // Routing may hold these entries while later parks need their own queue positions.
+        if (generation == wakeGeneration) scheduleNextWake()
     }
 
     private fun cancelWake() {

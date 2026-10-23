@@ -96,6 +96,194 @@ class JourneyRefetchEventHoldTest {
         directory.deleteRecursively()
     }
 
+    @Test fun `saved matching event retries failed foreground resume before its deadline`() = runBlocking {
+        val sleeper = WakeSleeper()
+        val failedWrite = java.util.concurrent.atomic.AtomicBoolean(false)
+        val failNextWrite = java.util.concurrent.atomic.AtomicBoolean(false)
+        val failuresLeft = java.util.concurrent.atomic.AtomicInteger(3)
+        val releaseRetry = CompletableDeferred<Unit>()
+        val deadlines = CopyOnWriteArrayList<JourneyDeadline>()
+        val launch = Launch("customer", withScreens = true, sleep = sleeper::sleep,
+            readValues = { values ->
+                if (failedWrite.get()) releaseRetry.await()
+                values.journeyValues()
+            }, beforeResume = {
+                if (failuresLeft.get() > 0) failNextWrite.set(true)
+            }, beforePersist = {
+                if (failNextWrite.getAndSet(false)) {
+                    failuresLeft.decrementAndGet()
+                    failedWrite.set(true)
+                    error("Saved match resume write failed")
+                }
+            })
+        try {
+            val snapshot = launch.copy("customer", 1, "start_waiting")
+            launch.start(); launch.commit("customer", snapshot); launch.track("start_waiting")
+            launch.journeys.onAppDidEnterBackground()
+            launch.clock.addAndGet(100L)
+            launch.track("go")
+            val saved = launch.journal().runs().single()
+            assertEquals("go", saved.park?.pendingEvent?.name)
+            assertTrue(launch.store.queryPendingLocalRoutes("customer").isEmpty())
+            launch.eventLog.setJourneyDeadlineHandler { deadline ->
+                deadlines += deadline
+                launch.journeys.handleJourneyDeadline(deadline)
+            }
+            launch.journeys.onAppWillEnterForeground()
+            assertTrue(failedWrite.get())
+            assertEquals(saved.park, launch.journal().runs().single().park)
+            assertEquals(0, launch.outcomes("customer", "took_go"))
+            assertTrue("The shared route timer owns retry, with no Journey wake", sleeper.pendingDurations.isEmpty())
+            releaseRetry.complete(Unit)
+            // No clock advance, capture, lifecycle callback or fake sleep rescues the saved match.
+            withTimeout(10_000L) { while (launch.outcomes("customer", "took_go") == 0) delay(10) }
+            launch.eventLog.awaitBarrier()
+            assertEquals(0, failuresLeft.get())
+            assertEquals(1, launch.outcomes("customer", "took_go"))
+            assertEquals(0, launch.outcomes("customer", "timed_out"))
+            assertEquals(1_000_100L, launch.clock.get())
+            assertTrue(requireNotNull(saved.park?.wakeAtMillis) > launch.clock.get())
+            assertTrue(deadlines.isEmpty())
+            launch.clock.addAndGet(60_000L)
+            sleeper.completeAll()
+            launch.eventLog.awaitBarrier()
+            assertTrue(deadlines.isEmpty())
+            assertEquals(1, launch.outcomes("customer", "took_go"))
+        } finally { releaseRetry.complete(Unit) }
+    }
+
+    @Test fun `held routing queues every deadline before events accepted after it`() = runBlocking {
+        val sleeper = WakeSleeper()
+        val secondWakeScheduled = CompletableDeferred<Unit>()
+        val observed = CopyOnWriteArrayList<String>()
+        lateinit var launch: Launch
+        launch = Launch("customer", sleep = sleeper::sleep, readRuns = { journal ->
+            journal.runs().also {
+                if (launch.clock.get() == 1_020_000L) secondWakeScheduled.complete(Unit)
+            }
+        }, beforeJourney = { event -> if (event.name == "later") observed += "event25" })
+        val snapshot = launch.copy("customer", 1, "start_waiting", waitSteps(maxTimeMillis = 20_000L))
+        val journal = launch.journal()
+        for (seconds in listOf(10L, 20L)) {
+            val anchor = 1_000_000L + (seconds - 20L) * 1_000L
+            val run = requireNotNull(journal.admit(snapshot.profile.armedLegs.single(), JourneyFrequency.EveryMatch,
+                "wait", anchor, release = snapshot.profile.releases.single(),
+                executionSnapshot = JourneyRun.ExecutionSnapshot(snapshot.profile.delivery,
+                    snapshot.profile.facts.getValue("assignments").jsonObject)))
+            journal.markStartedQueued(run)
+            journal.transition(run.id, "wait", run.context,
+                JourneyControlExecutor.Checkpoint(anchor, 1_000_000L + seconds * 1_000L))
+        }
+        launch.start()
+        launch.eventLog.setJourneyDeadlineHandler { deadline ->
+            observed += if (deadline.wakeAtMillis == 1_010_000L) "deadline10" else "deadline20"
+            launch.journeys.handleJourneyDeadline(deadline)
+        }
+        val hold = launch.eventLog.deferCommittedRouting()
+        try {
+            withTimeout(5_000L) { while (10_000L !in sleeper.pendingDurations) delay(10) }
+            launch.clock.addAndGet(10_000L)
+            sleeper.complete(10_000L)
+            withTimeout(5_000L) { while (10_000L !in sleeper.pendingDurations) delay(10) }
+            assertTrue("The second timer is armed while the first deadline is held", observed.isEmpty())
+            launch.clock.addAndGet(10_000L)
+            sleeper.complete(10_000L)
+            withTimeout(5_000L) { secondWakeScheduled.await() }
+            launch.clock.addAndGet(5_000L)
+            launch.track("later")
+            assertTrue(observed.isEmpty())
+            launch.clock.addAndGet(5_000L)
+            launch.eventLog.releaseCommittedRouting(hold)
+            launch.eventLog.awaitBarrier()
+            assertEquals(listOf("deadline10", "deadline20", "event25"), observed.toList())
+            assertEquals(2, launch.outcomes("customer", "timed_out"))
+        } finally { launch.eventLog.releaseCommittedRouting(hold) }
+    }
+
+    @Test fun `native restoration retries in background only for screenless waits`() = runBlocking {
+        for (hasScreens in listOf(false, true)) {
+            directory.deleteRecursively()
+            context.getSharedPreferences("nuxie_journey_release_high_water", 0).edit().clear().commit()
+            val sleeper = WakeSleeper()
+            val failing = java.util.concurrent.atomic.AtomicBoolean(true)
+            val preparations = java.util.concurrent.atomic.AtomicInteger()
+            val retryArmed = java.util.concurrent.atomic.AtomicBoolean(false)
+            val retryReads = java.util.concurrent.atomic.AtomicInteger()
+            val retryPass = CompletableDeferred<Unit>()
+            val launch = Launch("customer", withScreens = hasScreens, sleep = sleeper::sleep,
+                prepare = { preparations.incrementAndGet(); check(!failing.get()) { "Native restoration failed" } },
+                readRuns = { journal -> journal.runs().also {
+                    if (retryArmed.get() && retryReads.incrementAndGet() == 2) retryPass.complete(Unit)
+                } })
+            val snapshot = launch.copy("customer", 1, "start_waiting", waitSteps(maxTimeMillis = 10_000L))
+            launch.start(); launch.commit("customer", snapshot); launch.track("start_waiting")
+            val park = launch.journal().runs().single().park
+            assertEquals(1_010_000L, park?.wakeAtMillis)
+            withTimeout(5_000L) { while (5_000L !in sleeper.pendingDurations) delay(10) }
+            assertEquals(listOf(5_000L), sleeper.pendingDurations)
+            launch.journeys.onAppDidEnterBackground()
+            val before = preparations.get()
+            failing.set(false)
+            launch.clock.addAndGet(5_000L)
+            retryArmed.set(true)
+            sleeper.complete(5_000L)
+            withTimeout(5_000L) { retryPass.await() }
+            assertEquals(0, launch.outcomes("customer", "timed_out"))
+            assertEquals(park, launch.journal().runs().single().park)
+            if (hasScreens) {
+                assertEquals(before, preparations.get())
+                assertTrue(sleeper.pendingDurations.isEmpty())
+            } else {
+                assertTrue(preparations.get() > before)
+                withTimeout(5_000L) { while (5_000L !in sleeper.pendingDurations) delay(10) }
+                assertEquals(listOf(5_000L), sleeper.pendingDurations)
+            }
+            launch.clock.addAndGet(5_000L)
+            sleeper.complete(5_000L)
+            if (hasScreens) {
+                launch.eventLog.awaitBarrier()
+                assertEquals(0, launch.outcomes("customer", "timed_out"))
+                launch.journeys.onAppWillEnterForeground()
+            }
+            withTimeout(5_000L) { while (launch.outcomes("customer", "timed_out") == 0) delay(10) }
+            launch.eventLog.awaitBarrier()
+            assertEquals(1, launch.outcomes("customer", "timed_out"))
+            assertTrue(preparations.get() > before)
+            launch.close()
+        }
+    }
+
+    @Test fun `matching event survives failed restoration and retries before the deadline`() = runBlocking {
+        val sleeper = WakeSleeper()
+        val failing = java.util.concurrent.atomic.AtomicBoolean(false)
+        val launch = Launch("customer", sleep = sleeper::sleep, readValues = { values ->
+            check(!failing.get()) { "Native restoration failed" }
+            values.journeyValues()
+        })
+        val snapshot = launch.copy("customer", 1, "start_waiting")
+        launch.start(); launch.commit("customer", snapshot); launch.track("start_waiting")
+        val original = launch.journal().runs().single()
+        launch.clock.addAndGet(100L)
+        failing.set(true)
+        launch.track("go")
+        val retained = launch.journal().runs().single()
+        assertEquals(original.park?.wakeAtMillis, retained.park?.wakeAtMillis)
+        assertEquals(listOf("go"), retained.park?.candidateEvents?.map { it.name })
+        assertEquals(0, launch.outcomes("customer", "took_go"))
+        withTimeout(5_000L) { while (5_000L !in sleeper.pendingDurations) delay(10) }
+        assertEquals(listOf(5_000L), sleeper.pendingDurations)
+        assertTrue(launch.store.queryPendingLocalRoutes("customer").isEmpty())
+        failing.set(false)
+        launch.clock.addAndGet(5_000L)
+        sleeper.complete(5_000L)
+        withTimeout(5_000L) { while (launch.outcomes("customer", "took_go") == 0) delay(10) }
+        launch.eventLog.awaitBarrier()
+        assertEquals(1, launch.outcomes("customer", "took_go"))
+        assertEquals(0, launch.outcomes("customer", "timed_out"))
+        assertTrue(requireNotNull(original.park?.wakeAtMillis) > launch.clock.get())
+        assertTrue(sleeper.pendingDurations.isEmpty())
+    }
+
     @Test fun `failed journal inspection retries a head without any park or deadline`() = runBlocking {
         val failing = java.util.concurrent.atomic.AtomicBoolean(false)
         val head = CopyOnWriteArrayList<Boolean>()
@@ -164,6 +352,10 @@ class JourneyRefetchEventHoldTest {
             assertEquals(listOf(true), controls.toList())
             assertEquals(parked.park, launch.journal().runs().single().park)
             if (failure == "write") assertTrue(failedWrite.get())
+            if (failure == "native") {
+                withTimeout(5_000L) { while (5_000L !in sleeper.pendingDurations) delay(10) }
+                assertEquals(listOf(5_000L), sleeper.pendingDurations)
+            }
             // A later event passes the consumed control even while the park is unavailable.
             launch.eventLog.capture(JourneyEventNames.LEG_STARTED)
             launch.eventLog.awaitBarrier()
@@ -392,8 +584,11 @@ class JourneyRefetchEventHoldTest {
             // an admitted run with no recovery cursor.
             assertEquals(parked.park, launch.journal().recover(launch.clock.get()).single().park)
 
-            val attemptsBeforeRetry = preparations
             withTimeout(5_000L) { while (5_000L !in sleeper.pendingDurations) delay(10) }
+            assertEquals(listOf(5_000L), sleeper.pendingDurations)
+            launch.track("unrelated")
+            assertEquals("The checkpoint keeps its original restoration timer", listOf(5_000L), sleeper.pendingDurations)
+            val attemptsBeforeRetry = preparations
             failPreparation = false
             launch.clock.addAndGet(5_000L)
             sleeper.complete(5_000L)
@@ -874,6 +1069,8 @@ class JourneyRefetchEventHoldTest {
             StoredEvent("late-event", "screen_viewed", timestampMillis = capturedAt, distinctId = "customer"),
             launch.journeys.eventAdmissionGeneration(),
         ))
+        // The timeout now arrives through the queued deadline entry.
+        launch.eventLog.awaitBarrier()
         assertEquals(1, launch.outcomes("customer", "timed_out"))
         assertEquals(0, launch.outcomes("customer", "took_go"))
     }
@@ -959,6 +1156,7 @@ class JourneyRefetchEventHoldTest {
         readRuns: suspend (JourneyRunJournal) -> List<JourneyRun> = { it.runs() },
         readValues: suspend (ai.nuxie.sdk.presentation.ExperienceRunValues) -> JsonObject = { it.journeyValues() },
         beforePersist: () -> Unit = {},
+        beforeResume: suspend () -> Unit = {},
         replay: (suspend (String) -> Boolean)? = null,
         enqueueDeadline: ((JourneyDeadline) -> Unit)? = null,
         prepare: suspend () -> Unit = {},
@@ -1002,10 +1200,12 @@ class JourneyRefetchEventHoldTest {
             replayPendingLocalRoutes = replay ?: eventLog::replayPendingLocalRoutes,
             readNativeValues = readValues,
             journalBeforePersist = beforePersist,
+            beforeParkedResume = beforeResume,
             readJournalRuns = readRuns,
             prepareNativeValues = { _, _, _ -> prepare() },
             sleepMillis = sleep,
             enqueueJourneyDeadline = enqueueDeadline ?: eventLog::enqueueJourneyDeadline,
+            requestJourneyResumeRetry = eventLog::requestJourneyResumeRetry,
             deferCommittedRouting = eventLog::deferCommittedRouting,
             releaseCommittedRouting = eventLog::releaseCommittedRouting,
             fixedStorageScope = if (firstLaunch) null else JourneyStorageScope(authority),
@@ -1017,6 +1217,7 @@ class JourneyRefetchEventHoldTest {
             launches += this
             beforeJourney?.let { hook -> eventLog.subscribeCommitted { event -> hook(event) } }
             eventLog.setJourneyDeadlineHandler(journeys::handleJourneyDeadline)
+            eventLog.setJourneyResumeRetryHandler(journeys::handleJourneyResumeRetry)
             eventLog.subscribeCommittedWithAdmission(sampleGeneration = journeys::eventAdmissionGeneration) { event, generation ->
                 journeys.handleEvent(event, generation).also { afterJourney?.invoke(event, it) }
             }
@@ -1089,6 +1290,10 @@ class JourneyRefetchEventHoldTest {
             val request = Request(duration, CompletableDeferred(), kotlinx.coroutines.currentCoroutineContext()[Job])
             requests += request
             try { request.done.await() } finally { requests.remove(request) }
+        }
+
+        fun completeAll() {
+            requests.filter { it.job?.isActive == true }.forEach { it.done.complete(Unit) }
         }
 
         fun complete(duration: Long) {

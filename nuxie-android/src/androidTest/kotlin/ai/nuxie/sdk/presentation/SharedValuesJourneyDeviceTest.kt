@@ -847,6 +847,7 @@ class SharedValuesJourneyDeviceTest {
         val releaseCapture = CompletableDeferred<Unit>()
         var restorations = 0
         var restoredDays: JsonElement? = null
+        val retrySleeper = NativeRetrySleeper()
         val effects = effectIdentity?.let { effectOwner ->
             JourneyEffectDispatcher(effectOwner, capture = { name, properties, eventId, distinctId, admission, _ ->
                 val committed = store.insertPendingIfAbsent(ai.nuxie.sdk.events.StoredEvent(eventId, name,
@@ -870,6 +871,7 @@ class SharedValuesJourneyDeviceTest {
                 if (revokeCapture) { captureEntered.complete(Unit); releaseCapture.await() }
                 ai.nuxie.sdk.events.StableEventCaptureResult(settled, event.takeIf { settled })
             }, presenter = presenter, nowMillis = { clock },
+            sleepMillis = { duration -> if (failFirstRestore) retrySleeper.sleep(duration) else delay(duration) },
             prepareNativeValues = { values, release, _ ->
                 if (restore) {
                     restorations++
@@ -991,11 +993,14 @@ class SharedValuesJourneyDeviceTest {
             withTimeout(15_000) { current.onAppWillEnterForeground() }
             withTimeout(15_000) { current.profileDidCommit(checkNotNull(catalog.snapshot(owner)), fixture.authority, owner, 1) }
             if (failFirstRestore) {
+                withTimeout(10_000) { while (5_000L !in retrySleeper.pendingDurations) delay(10) }
                 val retained = journal.runs().single()
                 assertNotNull(retained.park)
                 assertEquals(JsonPrimitive(30f), retained.nativeSnapshot?.journeyValues?.get("trip_days"))
                 assertTrue(completed.isEmpty())
+                assertEquals("Restoration exclusively owns this checkpoint's retry", listOf(5_000L), retrySleeper.pendingDurations)
                 clock += 5000
+                retrySleeper.completeAll()
             }
             val event = completed.poll(10, TimeUnit.SECONDS)
             if (nested) {
@@ -1014,6 +1019,23 @@ class SharedValuesJourneyDeviceTest {
             scope.cancel()
             store.close()
             directory.deleteRecursively()
+        }
+    }
+
+    private class NativeRetrySleeper {
+        private data class Request(val duration: Long, val done: CompletableDeferred<Unit>, val job: Job?)
+        private val requests = java.util.concurrent.CopyOnWriteArrayList<Request>()
+        val pendingDurations: List<Long>
+            get() = requests.filter { it.job?.isActive == true && !it.done.isCompleted }.map { it.duration }
+
+        suspend fun sleep(duration: Long) {
+            val request = Request(duration, CompletableDeferred(), currentCoroutineContext()[Job])
+            requests += request
+            try { request.done.await() } finally { requests.remove(request) }
+        }
+
+        fun completeAll() {
+            requests.filter { it.job?.isActive == true }.forEach { it.done.complete(Unit) }
         }
     }
 

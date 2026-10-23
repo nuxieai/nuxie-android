@@ -754,18 +754,20 @@ class JourneyServiceTest {
         catalog.commit("customer", catalog.prepare(profile(releaseEntry = renderedEntry), ownerAuthority))
         val baseline = requireNotNull(catalog.snapshot("customer"))
         val original = baseline.releasesByDigest.values.single()
-        // Android evaluates the route's signal on its initial pass. Keep the
-        // wait false there, then make native state ready before subscriber replay.
+        // The routed signal satisfies the first wait; the parked wait needs a distinct event.
         val steps = Json.parseToJsonElement("""[
             {"kind":"action","id":"present","action":{"type":"navigate","screenId":"screen_welcome"},"outlets":{}},
-            {"kind":"action","id":"wait","action":{"type":"wait_until","trigger":{"kind":"event","eventName":"continue"},
-             "condition":{"type":"Truthy","value":{"type":"Response.Field","key":"ready"}},"maxTimeMs":10000},
+            {"kind":"action","id":"consume_continue","action":{"type":"wait_until","trigger":{"kind":"event","eventName":"continue"},
+             "condition":{"type":"Truthy","value":{"type":"Boolean","value":true}},"maxTimeMs":10000},
+             "outlets":{"satisfied":"wait","timeout":"timed_out"}},
+            {"kind":"action","id":"wait","action":{"type":"wait_until","trigger":{"kind":"event","eventName":"finish"},
+             "condition":{"type":"Truthy","value":{"type":"Boolean","value":true}},"maxTimeMs":10000},
              "outlets":{"satisfied":"done","timeout":"timed_out"}},
             {"kind":"complete","id":"done","outcome":"completed"},
             {"kind":"complete","id":"timed_out","outcome":"timed_out"}
         ]""").jsonArray
         val leg = JsonObject(original.leg + mapOf("entryStepId" to JsonPrimitive("present"), "steps" to steps,
-            "routes" to Json.parseToJsonElement("""[{"host":{"kind":"screen","screenId":"screen_welcome"},"eventName":"continue","entryStepId":"wait"}]""")))
+            "routes" to Json.parseToJsonElement("""[{"host":{"kind":"screen","screenId":"screen_welcome"},"eventName":"continue","entryStepId":"consume_continue"}]""")))
         val envelope = JourneyReleaseEnvelope.authenticate(renderedEntry.getValue("envelope").toString().encodeToByteArray(),
             mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(fixture.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP)))
         val release = AuthenticatedJourneyRelease(envelope, original.identity,
@@ -774,7 +776,7 @@ class JourneyServiceTest {
         val presenter = RecordingJourneyPresenter()
         val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
         val failReads = java.util.concurrent.atomic.AtomicBoolean(false)
-        val ready = java.util.concurrent.atomic.AtomicBoolean(false)
+        val nativeReads = AtomicInteger()
         var published: StoredEvent? = null
         val service = JourneyService(identity, store, catalog, directory, scope,
             capture = { name, properties, _, _ -> captures += name to properties; true },
@@ -784,7 +786,7 @@ class JourneyServiceTest {
                 StableEventCaptureResult(true, event, localRoutePending = true)
             }, presenter = presenter, nowMillis = { 100_000L },
             readJournalRuns = { journal -> check(!failReads.get()) { "journal read failed" }; journal.runs() },
-            readNativeValues = { JsonObject(mapOf("ready" to JsonPrimitive(ready.get()))) })
+            readNativeValues = { values -> nativeReads.incrementAndGet(); values.journeyValues() })
         service.initialize(); service.onAppWillEnterForeground()
         service.profileDidCommit(snapshot, ownerAuthority, "customer", 1)
         val request = requireNotNull(presenter.request)
@@ -795,15 +797,18 @@ class JourneyServiceTest {
         val journal = JourneyRunJournal(directory, "customer", JourneyStorageScope(ownerAuthority))
         withTimeout(5_000L) { while (journal.runs().single().park == null) kotlinx.coroutines.delay(10) }
         val park = journal.runs().single().park
+        assertEquals("wait", journal.runs().single().stepId)
+        assertTrue(nativeReads.get() > 0)
         val event = requireNotNull(published)
-        ready.set(true)
         failReads.set(true)
         assertFalse(service.handleEvent(event, service.eventAdmissionGeneration()))
         failReads.set(false)
+        val readsBeforeReplay = nativeReads.get()
         assertTrue(service.handleEvent(event, service.eventAdmissionGeneration()))
         assertEquals(park, journal.runs().single().park)
         assertNull(journal.runs().single().completion)
-        assertTrue(service.handleEvent(StoredEvent("independent-continue", event.name, event.properties, event.timestampMillis, event.distinctId), service.eventAdmissionGeneration()))
+        assertEquals(readsBeforeReplay, nativeReads.get())
+        assertTrue(service.handleEvent(StoredEvent("independent-finish", "finish", event.properties, event.timestampMillis, event.distinctId), service.eventAdmissionGeneration()))
         assertEquals("completed", captures.single { it.first == JourneyEventNames.LEG_COMPLETED }.second["outcome"])
     }
 
@@ -2312,10 +2317,12 @@ class JourneyServiceTest {
             nowMillis = { 100_000L },
             replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
             enqueueJourneyDeadline = eventLog::enqueueJourneyDeadline,
+            requestJourneyResumeRetry = eventLog::requestJourneyResumeRetry,
             deferCommittedRouting = eventLog::deferCommittedRouting,
             releaseCommittedRouting = eventLog::releaseCommittedRouting,
         )
         eventLog.setJourneyDeadlineHandler(service::handleJourneyDeadline)
+        eventLog.setJourneyResumeRetryHandler(service::handleJourneyResumeRetry)
         eventLog.subscribeCommittedWithAdmission(
             sampleGeneration = service::eventAdmissionGeneration,
         ) { event, admittedGeneration -> service.handleEvent(event, admittedGeneration) }

@@ -468,6 +468,7 @@ internal class NuxieCore(
         nowMillis = nowMillis,
         replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
         enqueueJourneyDeadline = eventLog::enqueueJourneyDeadline,
+        requestJourneyResumeRetry = eventLog::requestJourneyResumeRetry,
         deferCommittedRouting = eventLog::deferCommittedRouting,
         releaseCommittedRouting = eventLog::releaseCommittedRouting,
         artifactManager = releaseArtifactAcquirer,
@@ -542,6 +543,7 @@ internal class NuxieCore(
         featureUsage.startRecovery()
         val activityForwarder = ActivityForwarder(deliver = forwardActivity)
         eventLog.setJourneyDeadlineHandler(journeys::handleJourneyDeadline)
+        eventLog.setJourneyResumeRetryHandler(journeys::handleJourneyResumeRetry)
         eventLog.subscribeCommittedWithAdmission(
             sampleGeneration = journeys::eventAdmissionGeneration,
         ) { event, admittedGeneration ->

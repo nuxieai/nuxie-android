@@ -158,6 +158,9 @@ internal class EventLog(
         data class RecoveryPrefix(val events: List<Event>) : RouteCommand
         data class Deadline(val deadline: JourneyDeadline) : RouteCommand
         data object Retry : RouteCommand
+        data object RetryTimer : RouteCommand
+        data object RequestJourneyResumeRetry : RouteCommand
+        data object RetryJourneyResume : RouteCommand
         data class Barrier(val done: CompletableDeferred<Unit>) : RouteCommand
     }
 
@@ -180,6 +183,11 @@ internal class EventLog(
     private var routingGeneration = 0L
     private val routingDeferred = java.util.concurrent.atomic.AtomicBoolean(false)
     @Volatile private var journeyDeadlineHandler: (suspend (JourneyDeadline) -> Boolean)? = null
+    @Volatile private var journeyResumeRetryHandler: (suspend () -> Boolean)? = null
+    private var journeyResumeRetryPending = false
+    private var journeyResumeRetryQueued = false
+    private var journeyResumeRetryDeferred = false
+    private var routeDeliveryFailed = false
     private val pendingRoutes = ArrayDeque<RouteCommand>()
     private var routeRetryJob: Job? = null
     private var acknowledgementRetryJob: Job? = null
@@ -254,17 +262,30 @@ internal class EventLog(
                 is RouteCommand.Event, is RouteCommand.Deadline -> {
                     pendingRoutes.addLast(command)
                     // Only the retry timer or a routing release retries a failed head.
-                    if (routeRetryJob == null) drainRoutes()
+                    if (!routeDeliveryFailed) drainRoutes()
                 }
                 is RouteCommand.RecoveryPrefix -> {
                     command.events.asReversed().forEach(pendingRoutes::addFirst)
-                    if (routeRetryJob == null) drainRoutes()
+                    if (!routeDeliveryFailed) drainRoutes()
                 }
                 RouteCommand.Retry -> {
-                    routeRetryJob?.cancel()
-                    routeRetryJob = null
                     drainRoutes()
+                    if (journeyResumeRetryDeferred) retryJourneyResume()
+                    scheduleRouteRetry()
                 }
+                RouteCommand.RetryTimer -> {
+                    routeRetryJob = null
+                    if (routeDeliveryFailed) drainRoutes()
+                    if (journeyResumeRetryPending && !journeyResumeRetryQueued) {
+                        journeyResumeRetryQueued = true
+                        routeCommands.trySend(RouteCommand.RetryJourneyResume)
+                    }
+                }
+                RouteCommand.RequestJourneyResumeRetry -> {
+                    journeyResumeRetryPending = true
+                    scheduleRouteRetry()
+                }
+                RouteCommand.RetryJourneyResume -> retryJourneyResume()
                 is RouteCommand.Barrier -> command.done.complete(Unit)
             }
         }
@@ -277,6 +298,30 @@ internal class EventLog(
 
     fun setJourneyDeadlineHandler(handler: suspend (JourneyDeadline) -> Boolean) {
         journeyDeadlineHandler = handler
+    }
+
+    fun setJourneyResumeRetryHandler(handler: suspend () -> Boolean) {
+        journeyResumeRetryHandler = handler
+    }
+
+    fun requestJourneyResumeRetry() {
+        if (journeyResumeRetryHandler != null && !closing.get()) {
+            routeCommands.trySend(RouteCommand.RequestJourneyResumeRetry)
+        }
+    }
+
+    private suspend fun retryJourneyResume() {
+        if (routingDeferred.get()) {
+            journeyResumeRetryDeferred = true
+            return
+        }
+        journeyResumeRetryDeferred = false
+        journeyResumeRetryPending = false
+        val resumed = runCatching { journeyResumeRetryHandler?.invoke() ?: true }
+            .onFailure { Log.w(LOG_TAG, "Saved Journey input resume failed", it) }.getOrDefault(false)
+        journeyResumeRetryQueued = false
+        if (!resumed) journeyResumeRetryPending = true
+        scheduleRouteRetry()
     }
 
     /** A hold stops routes, while capture, storage and recovery replay remain available. */
@@ -295,10 +340,12 @@ internal class EventLog(
     }
 
     private suspend fun drainRoutes() {
+        if (!routingDeferred.get()) routeDeliveryFailed = false
         while (!routingDeferred.get()) {
             when (val head = pendingRoutes.firstOrNull() ?: return) {
                 is RouteCommand.Event -> {
                     if (!deliverRouteHead(head)) {
+                        routeDeliveryFailed = true
                         scheduleRouteRetry()
                         return
                     }
@@ -344,9 +391,10 @@ internal class EventLog(
 
     private fun scheduleRouteRetry() {
         if (routeRetryJob != null || closing.get()) return
+        if (!routeDeliveryFailed && !(journeyResumeRetryPending && !journeyResumeRetryQueued)) return
         routeRetryJob = scope.launch {
             delay(1_000L)
-            routeCommands.trySend(RouteCommand.Retry)
+            routeCommands.trySend(RouteCommand.RetryTimer)
         }
     }
 
@@ -493,6 +541,7 @@ internal class EventLog(
     suspend fun closeWorkers() {
         forwardingActive.set(false)
         closing.set(true)
+        journeyResumeRetryHandler = null
         routeRetryJob?.cancel()
         acknowledgementRetryJob?.cancel()
         awaitBarrier()

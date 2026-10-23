@@ -186,6 +186,22 @@ class EventLogTest {
         eventLog.subscribeForwarding(isEnabled = forwardingEnabled) {}
     }
 
+    @Test fun savedJourneyResumeRetriesWithoutADeadlineAndLetsEventsThrough() = runBlocking {
+        val log = log(RecordingStore())
+        val attempts = java.util.concurrent.atomic.AtomicInteger()
+        val delivered = CompletableDeferred<Unit>()
+        log.subscribeCommitted { event -> if (event.name == "later") delivered.complete(Unit) }
+        log.setJourneyResumeRetryHandler { attempts.incrementAndGet() >= 3 }
+        try {
+            repeat(3) { log.requestJourneyResumeRetry() }
+            log.capture("later")
+            withTimeout(5_000L) { delivered.await() }
+            withTimeout(5_000L) { while (attempts.get() < 3) delay(10) }
+            log.awaitBarrier()
+            assertEquals(3, attempts.get())
+        } finally { log.closeWorkers() }
+    }
+
     @Test fun deadlineSharesCaptureOrderAndRoutingHoldWithoutBecomingAnEvent() = runBlocking {
         val store = RecordingStore()
         val log = log(store, forwardingEnabled = { true })
