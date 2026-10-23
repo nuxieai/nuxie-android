@@ -19,7 +19,7 @@ internal class ExperienceMountedScreen(
     private val onFailure: (Throwable) -> Unit,
     videoDecoderPool: ai.nuxie.sdk.runtime.ExperienceVideoDecoderPool? = null,
 ) {
-    val isLayer: Boolean = ai.nuxie.sdk.experiences.ExperienceLayerHostContract.isEnabled(prepared.descriptor)
+    val isLayer: Boolean = ai.nuxie.sdk.experiences.ExperiencePageHostContract.isEnabled(prepared.descriptor)
     private class Row(val prepared: PreparedPresentation, val listener: ExperienceSurfaceHost.Listener)
     private val rows = java.util.concurrent.ConcurrentHashMap<String, Row>()
     private var activeListener = listener
@@ -27,7 +27,9 @@ internal class ExperienceMountedScreen(
     // Validate synchronous inputs before allocating a native lane or observers.
     private val sceneBytes = prepared.sceneFile.readBytes()
     private val inputs = ExperienceTextInput.forScreen(prepared.descriptor, prepared.screenId)
-    private val inputSize = if (inputs.isEmpty()) null else requireNotNull(prepared.artboardSize) {
+    private val pageInputs = if (isLayer) ExperienceTextInput.forPage(prepared.descriptor) else inputs
+    private val pageTextInputState = if (isLayer) ExperienceTextInputState() else prepared.textInputState
+    private val inputSize = if (pageInputs.isEmpty()) null else requireNotNull(prepared.artboardSize) {
         "Editable Experience has no authored artboard extent"
     }
     private val fonts = ((prepared.descriptor?.get("render") as? JsonObject)?.get("assets") as? JsonArray)
@@ -110,7 +112,7 @@ internal class ExperienceMountedScreen(
 
     fun mount(entering: Boolean = true): View {
         lifecycle.updateFontScale(activity.resources.configuration.fontScale)
-        if (isLayer) surface.updateRuntimeValues(lifecycle.snapshot().filterKeys { it == "fontScale" })
+        if (isLayer) surface.updateRuntimeValues(lifecycle.snapshot().filterKeys { it == "env/fontScale" })
         surface.updateRuntimeValues(prepared.commerceValues.get())
         if (!isLayer) surface.updateRuntimeValues(if (entering && lifecycle.phase == ExperienceScreenLifecycle.Phase.HIDDEN)
             lifecycle.move(ExperienceScreenLifecycle.Phase.ENTERING, exitReason = ExperienceScreenLifecycle.ExitReason.NONE) else lifecycle.snapshot())
@@ -128,6 +130,7 @@ internal class ExperienceMountedScreen(
             textInputs = inputs,
             retainedViewModel = if (isLayer) null else prepared.retainedViewModel,
             layerScreen = if (isLayer) prepared else null,
+            enteringPage = entering,
         )
         return ExperienceInputContainer(activity, surface::dispatchExperienceKeyEvent, surface::semanticKeyboardEntry).apply {
             if (awaitingSemanticPublication) {
@@ -139,8 +142,8 @@ internal class ExperienceMountedScreen(
                 addView(it, FrameLayout.LayoutParams(-1, -1))
             }
             inputSize?.let { size ->
-                val overlay = ExperienceTextInputOverlay(activity, size, inputs, fonts,
-                    prepared.textInputState,
+                val overlay = ExperienceTextInputOverlay(activity, size, pageInputs, fonts,
+                    pageTextInputState,
                     surface::writeNativeText, surface::notifyNativeText, surface::nativeTextEvent, surface::beginNativeEditing)
                 textOverlay = overlay
                 addView(overlay, FrameLayout.LayoutParams(-1, -1))
@@ -176,15 +179,14 @@ internal class ExperienceMountedScreen(
     /** Queued on the same lane as safe-area updates and frame-qualified native input capture. */
     fun refreshFontScale(value: Float) {
         val values = lifecycle.updateFontScale(value)
-        surface.updateRuntimeValues(if (isLayer) values.filterKeys { it == "fontScale" } else values)
+        surface.updateRuntimeValues(if (isLayer) values.filterKeys { it == "env/fontScale" } else values)
     }
 
     val reduceMotion: Boolean get() = reduceMotionEnabled
 
     fun setInputEnabled(enabled: Boolean) {
         surface.setInputEnabled(enabled)
-        textOverlay?.setInputEnabled(enabled)
-        if (isLayer) textOverlay?.visibility = if (enabled) View.VISIBLE else View.INVISIBLE
+        textOverlay?.setInputEnabled(enabled, preserveFocus = isLayer)
     }
 
     suspend fun updateRowRuntimeValues(screenId: String, values: Map<String, ai.nuxie.sdk.runtime.NuxieViewModelScalarValue>) {
@@ -211,7 +213,7 @@ internal class ExperienceMountedScreen(
                 surface.layerOperation { it.registerCompletionOnLane(id, name) }
             } else null
             try {
-                val write: (ExperienceInteractiveLayer) -> Unit = {
+                val write: (ExperienceInteractivePage) -> Unit = {
                     it.setPhasesOnLane(listOf(id to ExperienceScreenLifecycle.Phase.EXITING), exitReason = reason)
                 }
                 val budget = exit.watchdogMs ?: 250
@@ -234,6 +236,11 @@ internal class ExperienceMountedScreen(
         surface.applyTransitionValues(if (outgoing)
             lifecycle.move(ExperienceScreenLifecycle.Phase.EXITING, id, exitReason = ExperienceScreenLifecycle.ExitReason.NAVIGATION)
         else lifecycle.beginPreparedTransition(id))
+    }
+
+    fun enterPage() {
+        if (isLayer) surface.queueLayerPhases(listOf(checkNotNull(prepared.screenId) to ExperienceScreenLifecycle.Phase.ENTERING))
+        else enter()
     }
 
     fun enter() {
@@ -270,49 +277,51 @@ internal class ExperienceMountedScreen(
     suspend fun navigateLayer(target: PreparedPresentation, isBack: Boolean) {
         val sourceId = checkNotNull(prepared.screenId)
         val targetId = checkNotNull(target.screenId)
-        val intent = target.transition?.let(ai.nuxie.sdk.experiences.ExperienceLayerHostContract::intent)
-        val style = intent?.style ?: ai.nuxie.sdk.experiences.ExperienceLayerHostContract.Style.NONE
+        val intent = target.transition?.let(ai.nuxie.sdk.experiences.ExperiencePageHostContract::intent)
+        val style = intent?.style ?: ai.nuxie.sdk.experiences.ExperiencePageHostContract.Style.NONE
         val plan = ExperienceScreenTransitionPlan.resolveLayer(target.transition, checkNotNull(target.descriptor), sourceId, targetId)
         val waiters = mutableListOf<Pair<String, kotlinx.coroutines.Deferred<Unit>>>()
-        var insertion: Int? = null
         var phasePresented = true
         var loggedPresentationTimeout = false
+        val mutations = mutableListOf<(ExperienceInteractivePage) -> Unit>()
         try {
-            ExperienceLayerStep.perform(sourceId, targetId, style, isBack, plan, layerExit(prepared), reduceMotionEnabled,
-                object : ExperienceLayerStep.Operations {
+            ExperiencePageStep.perform(sourceId, targetId, style, isBack, plan, layerExit(prepared), reduceMotionEnabled,
+                object : ExperiencePageStep.Operations {
                     override fun input(enabled: Boolean) { setInputEnabled(enabled) }
                     override suspend fun prepare() = Unit
                     override suspend fun register(screenId: String, event: String): kotlinx.coroutines.Deferred<Unit> =
                         surface.layerOperation { it.registerCompletionOnLane(screenId, event) }.also { waiters += screenId to it }
-                    override suspend fun insert(index: Int) { insertion = index }
-                    override suspend fun phases(values: List<Pair<String, ExperienceScreenLifecycle.Phase>>, transition: String) {
-                        val insert = insertion.also { insertion = null }
-                        val work: (ExperienceInteractiveLayer) -> Unit = { layer ->
-                            if (insert != null) layer.insertOnLane(targetId, insert)
-                            layer.setPhasesOnLane(values, transition)
-                        }
-                        val finalPhases = values.all { it.second == ExperienceScreenLifecycle.Phase.HIDDEN ||
-                            it.second == ExperienceScreenLifecycle.Phase.ACTIVE }
-                        val budget = if (values.any { it.second == ExperienceScreenLifecycle.Phase.EXITING })
-                            plan?.watchdogMs ?: layerExit(prepared).watchdogMs ?: 250 else plan?.watchdogMs ?: 250
-                        phasePresented = when {
-                            reduceMotionEnabled -> { surface.layerOperation(work); true }
-                            // Final phases need a settled mutation, not another drawable barrier.
-                            finalPhases -> { surface.applyLayerTransition(0, work); true }
-                            else -> surface.applyLayerTransition(budget, work)
-                        }
+                    override suspend fun batch(present: Boolean, watchdogMs: Long, writes: suspend () -> Unit) {
+                        check(mutations.isEmpty())
+                        writes()
+                        val batch = mutations.toList()
+                        mutations.clear()
+                        val work: (ExperienceInteractivePage) -> Unit = { page -> batch.forEach { it(page) } }
+                        phasePresented = if (present) surface.applyLayerTransition(watchdogMs, work)
+                            else { surface.layerOperation(work); true }
                         if (!phasePresented && !loggedPresentationTimeout) {
                             loggedPresentationTimeout = true
-                            logPresentationTimeout(budget)
+                            logPresentationTimeout(watchdogMs)
+                        }
+                    }
+                    override suspend fun takeIncoming() { mutations += { it.takeIncomingOnLane(targetId, sourceId, isBack) } }
+                    override suspend fun phases(values: List<Pair<String, ExperienceScreenLifecycle.Phase>>, transition: String) {
+                        mutations += { it.setPhasesOnLane(values, transition) }
+                    }
+                    override suspend fun begin(transition: String?) { mutations += { it.beginOnLane(targetId, transition) } }
+                    override suspend fun end(transition: String?) { mutations += { it.endOnLane(targetId, transition) } }
+                    override suspend fun retire() {
+                        mutations += { page ->
+                            // A cut still awaits the incoming half after its swap.
+                            waiters.filter { it.first != targetId }.forEach { (id, waiter) ->
+                                page.removeCompletionOnLane(id, waiter)
+                            }
+                            page.retireOnLane(target.pageHistory.toSet().ifEmpty { setOf(targetId) }, targetId)
                         }
                     }
                     override suspend fun present() = Unit
                     override suspend fun wait(completions: List<kotlinx.coroutines.Deferred<Unit>>, milliseconds: Long) {
-                        if (phasePresented) super<ExperienceLayerStep.Operations>.wait(completions, milliseconds)
-                    }
-                    override suspend fun remove() {
-                        surface.removeLayerRow(sourceId, insertion?.let { targetId to it }, waiters)
-                        insertion = null
+                        if (phasePresented) super<ExperiencePageStep.Operations>.wait(completions, milliseconds)
                     }
                     override suspend fun hidden() = Unit
                     override suspend fun active() {
@@ -330,13 +339,13 @@ internal class ExperienceMountedScreen(
     }
 
     private fun logPresentationTimeout(milliseconds: Long) {
-        NuxieLog.w("ExperienceLayerStep",
+        NuxieLog.w("ExperiencePageStep",
             "Experience phase presentation watchdog expired", null, NuxieLog.sensitive("watchdogMs", milliseconds))
     }
 
     suspend fun restoreRow(source: PreparedPresentation, targetId: String) {
         val sourceId = checkNotNull(source.screenId)
-        surface.restoreLayerRow(sourceId, targetId)
+        surface.restoreLayerRow(sourceId, targetId, keepTarget = targetId in source.pageHistory)
         prepared = source
         activeListener = checkNotNull(rows[sourceId]).listener
         surface.selectLayerRow(sourceId)
@@ -345,18 +354,20 @@ internal class ExperienceMountedScreen(
 
     private fun bindTextOverlay() {
         val root = content as? FrameLayout ?: return
+        if (isLayer && textOverlay != null) return
         textOverlay?.let { it.close(); root.removeView(it) }
         textOverlay = null
-        val inputs = ExperienceTextInput.forScreen(prepared.descriptor, prepared.screenId)
+        val inputs = if (isLayer) ExperienceTextInput.forPage(prepared.descriptor)
+            else ExperienceTextInput.forScreen(prepared.descriptor, prepared.screenId)
         if (inputs.isEmpty()) return
         val size = checkNotNull(prepared.artboardSize) { "Editable Experience has no authored artboard extent" }
-        textOverlay = ExperienceTextInputOverlay(activity, size, inputs, fonts, prepared.textInputState,
+        textOverlay = ExperienceTextInputOverlay(activity, size, inputs, fonts, pageTextInputState,
             surface::writeNativeText, surface::notifyNativeText, surface::nativeTextEvent, surface::beginNativeEditing).also {
             root.addView(it, FrameLayout.LayoutParams(-1, -1))
         }
     }
 
-    private fun layerExit(content: PreparedPresentation): ExperienceLayerStep.Exit {
+    private fun layerExit(content: PreparedPresentation): ExperiencePageStep.Exit {
         val render = content.descriptor?.get("render") as? JsonObject
         val screen = (render?.get("screens") as? JsonArray)?.filterIsInstance<JsonObject>()?.firstOrNull {
             (it["id"] as? JsonPrimitive)?.content == content.screenId
@@ -364,7 +375,7 @@ internal class ExperienceMountedScreen(
         val exit = screen?.get("exit") as? JsonObject
         val event = (exit?.get("completeEventName") as? JsonPrimitive)?.content
         val duration = (exit?.get("durationMs") as? JsonPrimitive)?.content?.toLongOrNull()
-        return ExperienceLayerStep.Exit(event, duration?.coerceIn(0, Long.MAX_VALUE - 250)?.plus(250))
+        return ExperiencePageStep.Exit(event, duration?.coerceIn(0, Long.MAX_VALUE - 250)?.plus(250))
     }
 
     /** Completion follows native handle release, so the owner can release its artifact lease. */

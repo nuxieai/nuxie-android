@@ -44,7 +44,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import ai.nuxie.sdk.experiences.ExperienceLayerHostContract
+import ai.nuxie.sdk.experiences.ExperiencePageHostContract
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.doubleOrNull
@@ -104,6 +104,8 @@ internal data class PreparedPresentation(
     val closeLayer: (suspend (PreparedLayerReveal) -> Boolean)? = null,
     val fitsContentHeight: Boolean = shell.fitsContent,
     val layerContentHeight: AtomicReference<Float?> = AtomicReference(null),
+    val isPushPage: Boolean = false,
+    val pageHistory: List<String> = emptyList(),
     val isBack: Boolean = false,
     val requestBack: (() -> Boolean)? = null,
 )
@@ -684,7 +686,7 @@ internal class ExperiencePresentationService(
         var layerEmissions: ExperienceLayerEmissionCursor,
         val screenDismissed: AtomicBoolean = AtomicBoolean(false),
         var navigationDismissal: NavigationDismissal? = null,
-        var layerHistory: ExperienceLayerHistory = ExperienceLayerHistory(listOf(screenId)),
+        var layerHistory: ExperiencePageHistory = ExperiencePageHistory(listOf(screenId)),
         var requestBack: (() -> Boolean)? = null,
         var nativeRevisits: MutableMap<String, suspend () -> ExperienceRef> = mutableMapOf(),
         val onScreenChanged: suspend (String) -> Boolean,
@@ -771,8 +773,9 @@ internal class ExperiencePresentationService(
     private data class PendingBackNavigation(
         val owner: JourneyPresentationOwner,
         val target: String,
-        val history: ExperienceLayerHistory,
+        val history: ExperiencePageHistory,
         val transition: JsonObject? = null,
+        val pageId: String? = null,
     )
 
     private data class PresentationRequest(
@@ -844,11 +847,12 @@ internal class ExperiencePresentationService(
             nextBatchSequence, nextEmissionSequence, onScreenChanged, onScreenDismissed, onLinkOpened,
             onEmissionBatch, onPresentationRevealed, onOutcome, transition, runValues, withPresentationCallbacks, onBackNavigation,
         )
-        if (!ExperienceLayerHostContract.isEnabled(release.descriptor)) return present()
+        if (!ExperiencePageHostContract.isEnabled(release.descriptor)) return present()
         return layerNavigation.withLock {
             val active = synchronized(stateLock) { current?.takeIf { it.isOwnedBy(journeyId, ownerDistinctId) } }
             if (active?.journey?.screenId == screenId && active.acquired.identity == release.identity &&
                 active.outcomeReason.get() == null && transition?.string("type") != "modal" &&
+                synchronized(stateLock) { pendingBackNavigation?.pageId == null } &&
                 fences.isCurrent() && canPresent() && currentDistinctId() == ownerDistinctId) {
                 reservation?.close()
                 active.ref
@@ -891,6 +895,21 @@ internal class ExperiencePresentationService(
         val reserved = reservation as? JourneyReservation
         val request = reserved?.request ?: captureRequest(ownerDistinctId)
         if (request.ownerDistinctId != ownerDistinctId) throw declinedPresentation()
+        val lowerPageId = synchronized(stateLock) {
+            pendingBackNavigation?.takeIf { it.owner == JourneyPresentationOwner(journeyId, ownerDistinctId) &&
+                it.target == screenId }?.pageId
+        }
+        if (lowerPageId != null) {
+            reservation?.close()
+            val top = synchronized(stateLock) { current }
+            check(top?.isOwnedBy(journeyId, ownerDistinctId) == true && fences.isCurrent() && canPresent()) {
+                "Back page is no longer current"
+            }
+            check(PresentationRegistry.currentScreen(checkNotNull(top).id)?.dismissLayerFromJourney() == true) {
+                "Native page pop was rejected"
+            }
+            return synchronized(stateLock) { checkNotNull(current?.takeIf { it.id == lowerPageId }).ref }
+        }
         val selectedScreen = AuthenticatedPresentationScreen.resolve(release, screenId, transition)
         lateinit var journey: JourneyOutcome
         journey = JourneyOutcome(
@@ -919,7 +938,7 @@ internal class ExperiencePresentationService(
                 onOpenLink = { link -> openAndRecord(journey, link, onLinkOpened); Unit },
             ),
         )
-        if (ExperienceLayerHostContract.isEnabled(release.descriptor)) {
+        if (ExperiencePageHostContract.isEnabled(release.descriptor)) {
             // Each retained Screen keeps the callbacks whose source id was captured by the Journey.
             journey.nativeRevisits[screenId] = {
                 presentJourneyNow(fences, release, screenId, journeyId, ownerDistinctId, null,
@@ -1082,7 +1101,9 @@ internal class ExperiencePresentationService(
                 }
 
                 val id = acquiringId ?: UUID.randomUUID().toString()
-                val opensLayer = existing != null && transition?.string("type") == "modal" &&
+                val isPushPage = existing != null && transition?.string("type") == "push" &&
+                    ExperiencePageHostContract.isEnabled(existing?.let { PresentationRegistry.resolve(it.id)?.descriptor })
+                val opensLayer = existing != null && (transition?.string("type") == "modal" || isPushPage) &&
                     synchronized(stateLock) {
                         pendingBackNavigation?.takeIf {
                             it.owner == JourneyPresentationOwner(checkNotNull(journeyId), checkNotNull(request.ownerDistinctId)) &&
@@ -1105,7 +1126,7 @@ internal class ExperiencePresentationService(
                     val lifecycle = lifecycles[journey.screenId]?.let { if (isolated) it.copyForPreparation() else it } ?: ExperienceScreenLifecycle()
                     val retained = if (!opensLayer && existing?.acquired?.identity == source.identity)
                         existing.journey.viewModelsByScreen[journey.screenId]?.get() else null
-                    val shell = if (opensLayer) PresentationShell.fromTransition(transition)
+                    val shell = if (opensLayer && !isPushPage) PresentationShell.fromTransition(transition)
                         else existing?.let { PresentationRegistry.resolve(it.id)?.shell } ?: source.screen.shell
                     val back = synchronized(stateLock) { pendingBackNavigation?.takeIf { it.target == journey.screenId } }
                     return PreparedPresentation(source.acquired.sceneFile, source.screen.artboardName, source.screen.clearColor,
@@ -1121,6 +1142,11 @@ internal class ExperiencePresentationService(
                         fitsContentHeight = (existing == null || opensLayer) && shell.fitsContent,
                         layerContentHeight = if (opensLayer) AtomicReference(null) else
                             existing?.let { PresentationRegistry.resolve(it.id)?.layerContentHeight } ?: AtomicReference(null),
+                        isPushPage = isPushPage || (!opensLayer && existing?.let {
+                            PresentationRegistry.resolve(it.id)?.isPushPage
+                        } == true),
+                        pageHistory = if (opensLayer || existing == null) listOf(journey.screenId)
+                            else back?.history?.screens ?: existing.journey.layerHistory.visit(journey.screenId, transition).screens,
                         isBack = back != null, requestBack = journey.requestBack)
                 }
                 data class Destination(val source: PreparedSource, val content: PreparedPresentation, val navigation: PreparedScreenNavigation?)
@@ -1240,7 +1266,7 @@ internal class ExperiencePresentationService(
                     val outgoing = it.journey
                     val incoming = journey
                     incoming.layerEmissions = outgoing.layerEmissions
-                    if (!opensLayer && ExperienceLayerHostContract.isEnabled(source.descriptor)) {
+                    if (!opensLayer && ExperiencePageHostContract.isEnabled(source.descriptor)) {
                         val revisit = incoming.nativeRevisits[incoming.screenId]
                         incoming.nativeRevisits = outgoing.nativeRevisits
                         revisit?.let { incoming.nativeRevisits[incoming.screenId] = it }
@@ -1254,8 +1280,8 @@ internal class ExperiencePresentationService(
                             pending.owner == owner && pending.target == incoming.screenId
                         }
                     }
-                    incoming.layerHistory = if (opensLayer) ExperienceLayerHistory(listOf(incoming.screenId))
-                        else back?.history ?: if (ExperienceLayerHostContract.isEnabled(source.descriptor))
+                    incoming.layerHistory = if (opensLayer) ExperiencePageHistory(listOf(incoming.screenId))
+                        else back?.history ?: if (ExperiencePageHostContract.isEnabled(source.descriptor))
                             outgoing.layerHistory.visit(incoming.screenId, transition)
                         else outgoing.layerHistory.navigate(incoming.screenId, transition?.string("type") == "push")
                     // A covered screen remains active and mounted. Opening a
@@ -1434,12 +1460,15 @@ internal class ExperiencePresentationService(
         }
         pending?.job?.cancel()
         pending?.finished?.await()
-        val (outgoing, incoming) = synchronized(stateLock) {
+        val count = reveal.pagesToClose
+        val (outgoing, incoming, coveredToRetire) = synchronized(stateLock) {
             val outgoing = current ?: return false
-            val incoming = coveredLayers.lastOrNull() ?: return false
+            if (count < 1 || count > coveredLayers.size) return false
+            val incomingIndex = coveredLayers.size - count
+            val incoming = coveredLayers[incomingIndex]
             if (outgoing.id != id || transitionInProgress || !outgoing.journey.fences.isCurrent()) return false
             transitionInProgress = true
-            outgoing to incoming
+            Triple(outgoing, incoming, coveredLayers.drop(incomingIndex + 1))
         }
         return try {
             // A navigation checkpoint already in durable flight still owns its
@@ -1456,9 +1485,9 @@ internal class ExperiencePresentationService(
             }
             if (dismissal != JourneyScreenDismissalResult.HANDLED) return false
             synchronized(stateLock) {
-                if (current !== outgoing || coveredLayers.lastOrNull() !== incoming ||
+                if (current !== outgoing || coveredLayers.getOrNull(coveredLayers.size - count) !== incoming ||
                     outgoing.outcomeReason.get() != null || !incoming.journey.fences.isCurrent()) return false
-                coveredLayers.removeAt(coveredLayers.lastIndex)
+                coveredLayers.subList(coveredLayers.size - count, coveredLayers.size).clear()
                 current = incoming
                 incoming.journey.screenDismissed.set(false)
                 incoming.journey.navigationDismissal = null
@@ -1466,6 +1495,10 @@ internal class ExperiencePresentationService(
             }
             PresentationRegistry.dismiss(outgoing.id, CloseReason.JourneyNavigation)
             attemptOutcome(outgoing, CloseReason.JourneyNavigation)
+            coveredToRetire.forEach { retired ->
+                PresentationRegistry.dismiss(retired.id, CloseReason.JourneyNavigation)
+                attemptOutcome(retired, CloseReason.JourneyNavigation)
+            }
             reveal.prepare()
             fun ownsIncoming() = synchronized(stateLock) {
                 current === incoming && incoming.outcomeReason.get() == null && incoming.journey.fences.isCurrent()
@@ -1549,7 +1582,7 @@ internal class ExperiencePresentationService(
         effectId: String,
     ): JourneyPresentationActionResult {
         if (JourneyActionType.from(action) == JourneyActionType.BACK &&
-            synchronized(stateLock) { current?.let { PresentationRegistry.resolve(it.id)?.descriptor }?.let(ExperienceLayerHostContract::isEnabled) == true }) {
+            synchronized(stateLock) { current?.let { PresentationRegistry.resolve(it.id)?.descriptor }?.let(ExperiencePageHostContract::isEnabled) == true }) {
             return layerNavigation.withLock {
                 val active = synchronized(stateLock) { current?.takeIf { it.isOwnedBy(owner.journeyId, owner.distinctId) } }
                     ?: return@withLock JourneyPresentationActionResult.NoPresentation
@@ -1689,22 +1722,27 @@ internal class ExperiencePresentationService(
             else -> null
         } ?: return JourneyPresentationActionResult.Failed
         val history = active.journey.layerHistory
-        val target = history.backTarget(steps)
+        val lowerPage = synchronized(stateLock) {
+            coveredLayers.lastOrNull()?.takeIf { steps > history.screens.lastIndex &&
+                ExperiencePageHostContract.isEnabled(PresentationRegistry.resolve(active.id)?.descriptor) }
+        }
+        val target = lowerPage?.journey?.screenId ?: history.backTarget(steps)
         synchronized(stateLock) {
             if (current !== active || !active.isOwnedBy(owner.journeyId, owner.distinctId)) {
                 return JourneyPresentationActionResult.NoPresentation
             }
-            if (target == active.journey.screenId) {
+            if (lowerPage == null && target == active.journey.screenId) {
                 pendingBackNavigation = null
                 return JourneyPresentationActionResult.Handled
             }
             pendingBackNavigation = PendingBackNavigation(
                 owner,
                 target,
-                if (ExperienceLayerHostContract.isEnabled(PresentationRegistry.resolve(active.id)?.descriptor)) history.visit(target, null)
+                lowerPage?.journey?.layerHistory ?: if (ExperiencePageHostContract.isEnabled(PresentationRegistry.resolve(active.id)?.descriptor)) history.popping(steps)
                 else history.navigate(target, push = false),
-                PresentationRegistry.resolve(active.id)?.descriptor?.takeIf(ExperienceLayerHostContract::isEnabled)
-                    ?.let { history.backTransition(steps, target, it) },
+                (action["transition"] as? JsonObject) ?: PresentationRegistry.resolve(active.id)?.descriptor
+                    ?.takeIf(ExperiencePageHostContract::isEnabled)?.let { history.backTransition(steps, target, it) },
+                pageId = lowerPage?.id,
             )
         }
         return JourneyPresentationActionResult.Navigate(target)

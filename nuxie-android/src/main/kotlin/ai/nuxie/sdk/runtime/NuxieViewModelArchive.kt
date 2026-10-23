@@ -10,6 +10,8 @@ internal class NuxieViewModelArchive private constructor(
 ) {
     private data class Instance(val id: Long, val schemaIndex: Int, val schemaName: String?, val values: List<NativeViewModelSnapshotValue>)
 
+    internal val rootSchemaIndex: Int get() = instances.single { it.id == rootId }.schemaIndex
+
     internal val instanceIdentities: Set<Long> get() = instances.map { it.id }.toSet()
 
     internal fun withPaywallProducts(products: Map<Long, NuxiePaywallSelection.Identity>, selected: Boolean): NuxieViewModelArchive =
