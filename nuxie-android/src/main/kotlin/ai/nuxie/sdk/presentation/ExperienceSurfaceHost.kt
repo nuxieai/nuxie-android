@@ -163,6 +163,13 @@ internal class ExperienceSurfaceHost(
         } + prepared.commerceValues.get())
     }
 
+    internal fun takePageIncomingOnLane(page: ExperienceInteractivePage, target: String, source: String, isBack: Boolean) {
+        page.takeIncomingOnLane(target, source, isBack, nextCorrelationId++) { step ->
+            captureLayerStep(step)
+            publishSteps()
+        }
+    }
+
     internal suspend fun selectLayerRow(screenId: String) = layerOperation { layer ->
         activeRowId = screenId
         viewModelState = layer.valuesOnLane(screenId)

@@ -15,39 +15,41 @@ class ExperiencePageHostContractTest {
             .resolve("journeys/rendered-custom-transition/release-entry.json").readText()).jsonObject
         val bytes = Base64.getDecoder().decode(entry.getValue("envelope").jsonObject
             .getValue("descriptorBytesBase64").jsonPrimitive.content)
-        return Json.parseToJsonElement(bytes.decodeToString()).jsonObject.getValue("render").jsonObject
+        val old = Json.parseToJsonElement(bytes.decodeToString()).jsonObject.getValue("render").jsonObject
+        return JsonObject(old + ("transitions" to JsonArray(old.getValue("transitions").jsonArray.map {
+            val value = it.jsonObject
+            JsonObject((value - "incomingOnTop") + ("kind" to JsonPrimitive("page")) +
+                ("reverse" to JsonObject(value.getValue("reverse").jsonObject - "incomingOnTop")))
+        })))
     }
-    @Test fun `shared format vectors validate through exact render schema and thin reader`() {
+    @Test fun `page declarations validate and retired host and transition fields are refused`() {
         val render = render()
         assertEquals("\$nuxie.page", ExperiencePageHostContract.Host().artboardName)
         assertEquals("\$nuxie.Page", ExperiencePageHostContract.Host().modelName)
-        assertEquals("screens", ExperiencePageHostContract.Host().listPath)
         JourneyRenderSchema.validate(render)
-        for (value in cases.getValue("layerHosts").jsonArray) {
-            val case = value.jsonObject
-            val changed = JsonObject(render + ("layerHost" to case.getValue("value")))
-            assertAccepted(case) { JourneyRenderSchema.validate(changed); ExperiencePageHostContract.readHost(case.getValue("value")) }
+        for (field in listOf("layerHost", "unknown")) assertThrows(JourneyReleaseAuthenticationException::class.java) {
+            JourneyRenderSchema.validate(JsonObject(render + (field to JsonObject(emptyMap()))))
         }
-        for (value in cases.getValue("transitionKinds").jsonArray) {
-            val case = value.jsonObject
-            val transitions = render.getValue("transitions").jsonArray.map {
-                JsonObject(it.jsonObject + ("kind" to case.getValue("value")))
-            }
-            val changed = JsonObject(render + ("transitions" to JsonArray(transitions)))
-            assertAccepted(case) { JourneyRenderSchema.validate(changed); ExperiencePageHostContract.transitions(changed) }
+        for (kind in listOf("layer", "choreographed", "unknown")) {
+            val changed = JsonObject(render + ("transitions" to JsonArray(render.getValue("transitions").jsonArray.map {
+                JsonObject(it.jsonObject + ("kind" to JsonPrimitive(kind)))
+            })))
+            assertThrows(JourneyReleaseAuthenticationException::class.java) { JourneyRenderSchema.validate(changed) }
         }
-        assertThrows(JourneyReleaseAuthenticationException::class.java) {
-            JourneyRenderSchema.validate(JsonObject(render + ("unknown" to JsonNull)))
-        }
+        val changed = JsonObject(render + ("transitions" to JsonArray(render.getValue("transitions").jsonArray.map {
+            JsonObject(it.jsonObject + ("incomingOnTop" to JsonPrimitive(true)))
+        })))
+        assertThrows(JourneyReleaseAuthenticationException::class.java) { JourneyRenderSchema.validate(changed) }
     }
-    @Test fun `page transition reader does not silently migrate the deferred release validator`() {
-        val baseline = render()
-        val declarations = baseline.getValue("transitions").jsonArray.map {
-            JsonObject(it.jsonObject + ("kind" to JsonPrimitive("page")))
+
+    @Test fun `published route references select by source and missing source cuts`() {
+        for (style in listOf("magic-move", "fade", "none")) {
+            val route = Json.parseToJsonElement("""{"type":"$style","transitionIds":{"a":"ab","c":"cb"}}""").jsonObject
+            JourneyReleaseSchema.transition(route)
+            assertEquals("ab", ExperiencePageHostContract.intent(route, "a").transitionId)
+            assertEquals("cb", ExperiencePageHostContract.intent(route, "c").transitionId)
+            assertEquals(JsonPrimitive("none"), ExperiencePageHostContract.resolveIntent(route, "missing")?.get("type"))
         }
-        val page = JsonObject(baseline + ("transitions" to JsonArray(declarations)))
-        assertEquals(ExperiencePageHostContract.Kind.PAGE, ExperiencePageHostContract.transitions(page).first().kind)
-        assertThrows(JourneyReleaseAuthenticationException::class.java) { JourneyRenderSchema.validate(page) }
     }
 
     @Test fun `default pair fixture vectors validate optional strict boolean markers`() {
@@ -65,32 +67,25 @@ class ExperiencePageHostContractTest {
         assertEquals("Every imported defaultPairs vector must be exercised", outcomes.map { it.first }, outcomes.map { it.second })
     }
 
-    @Test fun `shared Journey vectors keep styles and transition identifiers`() {
-        for (value in cases.getValue("journeyTransitions").jsonArray) {
-            val case = value.jsonObject
-            assertAccepted(case) {
-                val intent = ExperiencePageHostContract.intent(case.getValue("value"))
-                assertEquals(case.getValue("value").jsonObject["transitionId"]?.jsonPrimitive?.content, intent.transitionId)
-                JourneyGrammar.action(buildJsonObject {
-                    put("type", "navigate"); put("screenId", "one"); put("transition", case.getValue("value"))
-                }, setOf("one"), emptySet())
-            }
+    @Test fun `published transition forms are strict and custom is refused`() {
+        for (json in listOf("{\"type\":\"none\"}", "{\"type\":\"fade\"}", "{\"type\":\"push\"}",
+            "{\"type\":\"modal\",\"height\":\"fit-content\"}",
+            "{\"type\":\"magic-move\",\"transitionId\":\"pair\"}")) {
+            val transition = Json.parseToJsonElement(json)
+            JourneyGrammar.action(buildJsonObject { put("type", "navigate"); put("screenId", "one"); put("transition", transition) }, setOf("one"), emptySet())
+        }
+        for (json in listOf("""{"type":"custom","transitionId":"pair"}""",
+            """{"type":"magic-move"}""", """{"type":"push","transitionId":"pair"}""",
+            """{"type":"fade","transitionId":"pair","transitionIds":{}}""",
+            """{"type":"none","transitionIds":{"a":4}}""")) {
+            assertThrows(JourneyReleaseAuthenticationException::class.java) { ExperiencePageHostContract.intent(Json.parseToJsonElement(json)) }
         }
     }
-    @Test fun `declarations retain kind and forward and reverse completion names`() {
-        for (kind in listOf("layer", "choreographed")) {
-            val render = render()
-            val transitions = JsonArray(render.getValue("transitions").jsonArray.map {
-                JsonObject(it.jsonObject + ("kind" to JsonPrimitive(kind)))
-            })
-            val declaration = ExperiencePageHostContract.transitions(JsonObject(render + ("transitions" to transitions))).first()
-            assertEquals(kind.uppercase(), declaration.kind.name)
-            val forward = checkNotNull(declaration.resolve(declaration.sourceScreenId, declaration.destinationScreenId))
-            val reverse = checkNotNull(declaration.resolve(declaration.destinationScreenId, declaration.sourceScreenId))
-            assertFalse(forward.outgoingCompletionEvent.endsWith(".reverse"))
-            assertTrue(reverse.outgoingCompletionEvent.endsWith(".reverse"))
-            assertNull(declaration.resolve("other", declaration.destinationScreenId))
-        }
+    @Test fun `page declaration retains forward and reverse completion names`() {
+        val declaration = ExperiencePageHostContract.transitions(render()).first()
+        assertEquals(ExperiencePageHostContract.Kind.PAGE, declaration.kind)
+        assertTrue(checkNotNull(declaration.reverse).outgoingCompletionEvent.endsWith(".reverse"))
+        assertNull(declaration.resolve("other", declaration.destinationScreenId))
     }
     @Test fun `row allocation uses discovered schema and ignores authored index and leg type name`() {
         val catalog = NuxieViewModelCatalog(listOf(

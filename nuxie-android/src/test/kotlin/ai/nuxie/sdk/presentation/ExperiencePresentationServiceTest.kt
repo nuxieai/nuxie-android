@@ -2674,7 +2674,7 @@ class ExperiencePresentationServiceTest {
         val signed = renderedJourneyRelease("text-input-navigation.json")
         val field = signed.javaClass.getDeclaredField("envelope").apply { isAccessible = true }
         val render = signed.descriptor.getValue("render").jsonObject
-        val declaration = Json.parseToJsonElement("""{"id":"pair","kind":"layer","sourceScreenId":"screen_welcome",
+        val declaration = Json.parseToJsonElement("""{"id":"pair","kind":"page","sourceScreenId":"screen_welcome",
             "destinationScreenId":"screen_details","durationMs":400,"incomingOnTop":true,
             "source":{"completeEventName":"leave"},"destination":{"completeEventName":"arrive"},
             "reverse":{"incomingOnTop":false,"source":{"completeEventName":"back-leave"},"destination":{"completeEventName":"back-arrive"}}}""").jsonObject

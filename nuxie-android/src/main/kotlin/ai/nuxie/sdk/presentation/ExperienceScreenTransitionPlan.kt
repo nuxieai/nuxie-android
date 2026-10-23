@@ -27,7 +27,8 @@ internal data class ExperienceScreenTransitionPlan(
 
     companion object {
         fun resolveLayer(intent: JsonObject?, descriptor: JsonObject, source: String, destination: String): Custom? {
-            val id = intent?.let(ai.nuxie.sdk.experiences.ExperiencePageHostContract::intent)?.transitionId ?: return null
+            val selected = ai.nuxie.sdk.experiences.ExperiencePageHostContract.resolveIntent(intent, source)
+            val id = selected?.let { ai.nuxie.sdk.experiences.ExperiencePageHostContract.intent(it, source) }?.transitionId ?: return null
             val render = descriptor["render"] as JsonObject
             val declaration = ai.nuxie.sdk.experiences.ExperiencePageHostContract.transitions(render).firstOrNull { it.id == id }
                 ?: return null
