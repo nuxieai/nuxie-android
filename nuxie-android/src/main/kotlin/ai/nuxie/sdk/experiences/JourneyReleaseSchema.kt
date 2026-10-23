@@ -29,6 +29,32 @@ internal object JourneyReleaseSchema {
     private val intervals = arrayOf("lifetime", "minute", "hour", "day", "week", "month", "quarter", "semiAnnual", "year")
     private val productTypes = arrayOf("subscription", "consumable", "nonConsumable")
 
+    /** Mirrors iOS validateJourneyTransition: exact shape first, then bounded values. */
+    fun transition(input: JsonElement) {
+        val value = record(input)
+        when (oneOf(value["type"], "magic-move", "fade", "none", "push", "modal")) {
+            "modal" -> {
+                exact(value, setOf("type"), setOf("present", "height", "closedby"))
+                value["present"]?.let { oneOf(it, "sheet", "fullscreen") }
+                value["height"]?.let { oneOf(it, "large", "medium", "fit-content") }
+                value["closedby"]?.let { oneOf(it, "any", "none") }
+            }
+            "push" -> exact(value, setOf("type"))
+            else -> {
+                exact(value, setOf("type"), setOf("transitionId", "transitionIds"))
+                if (value.containsKey("transitionId") && value.containsKey("transitionIds")) fail("transition reference")
+                value["transitionId"]?.let(::releaseId)
+                value["transitionIds"]?.let { input ->
+                    val routes = record(input)
+                    if (routes.size > 256) fail("transition routes")
+                    routes.forEach { (source, id) -> releaseId(JsonPrimitive(source)); releaseId(id) }
+                }
+                if (text(value["type"]) == "magic-move" &&
+                    !value.containsKey("transitionId") && !value.containsKey("transitionIds")) fail("transition reference")
+            }
+        }
+    }
+
     fun validate(root: JsonObject) {
         val identity = exact(root["identity"], setOf("appId", "environment", "experienceId", "experienceVersionId",
             "versionNumber", "buildId", "publishedAt", "publishedAtSeq"))

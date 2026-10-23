@@ -49,7 +49,7 @@ class ExperiencePageStepTest {
     @Test fun `cut with transition waits for each published half and swaps after begin`() = runBlocking {
         val trace = Trace(); perform(trace, Style.NONE)
         assertEquals(listOf("input:false", "prepare", "register:a:leave", "batch", "a:exiting:pair", "commit:true",
-            "present", "wait:1:650", "register:b:arrive", "batch", "take", "b:entering:pair", "begin:pair", "retire",
+            "present", "wait:1:650", "batch", "take", "register:b:arrive", "b:entering:pair", "begin:pair", "retire",
             "a:hidden:", "commit:true", "present", "wait:1:650", "batch", "end:pair", "b:active:", "commit:false",
             "hidden", "active", "input:true"), trace.events)
     }
@@ -70,7 +70,7 @@ class ExperiencePageStepTest {
     @Test fun `reduced motion calls begin and end in one batch and never waits`() = runBlocking {
         for (style in listOf(Style.MAGIC_MOVE, Style.FADE, Style.NONE)) {
             val trace = Trace(); perform(trace, style, reduced = true)
-            assertEquals(listOf("input:false", "prepare", "batch", "a:exiting:pair", "take", "b:entering:pair",
+            assertEquals(listOf("input:false", "prepare", "batch", "take", "a:exiting:pair", "b:entering:pair",
                 "begin:pair", "end:pair", "retire", "a:hidden,b:active:", "commit:false", "hidden", "active", "input:true"), trace.events)
         }
     }

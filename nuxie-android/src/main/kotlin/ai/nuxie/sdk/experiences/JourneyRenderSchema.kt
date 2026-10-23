@@ -42,8 +42,7 @@ internal object JourneyRenderSchema {
     fun validate(input: JsonObject) {
         val renderer = oneOf(input["renderer"], "nux")
         val sceneField = "nux"
-        val render = exact(input, setOf("renderer", sceneField, "screens", "transitions", "textInputs", "assets"), setOf("videoElements", "layerHost"))
-        render["layerHost"]?.let(ExperiencePageHostContract::readHost)
+        val render = exact(input, setOf("renderer", sceneField, "screens", "transitions", "textInputs", "assets"), setOf("videoElements"))
         videoElements(render)
         val scene = exact(render[sceneField], setOf("key", "sha256", "sizeBytes", "contentType"))
         val sha = hash(scene["sha256"])
@@ -61,18 +60,22 @@ internal object JourneyRenderSchema {
             releaseId(screen["id"])
         }.toSet()
         if (screens.isEmpty() || screens.size != array(render["screens"]).size) fail("render screens")
+        val transitionIds = mutableSetOf<String>()
+        val defaultPairs = mutableSetOf<Pair<String, String>>()
         for (input in array(render["transitions"], 1024)) {
             val transition = exact(input, setOf("id", "kind", "sourceScreenId", "destinationScreenId", "durationMs",
-                "incomingOnTop", "source", "destination"), setOf("reverse", "defaultPair"))
-            releaseId(transition["id"]); oneOf(transition["kind"], "layer", "choreographed")
-            transition["defaultPair"]?.let { boolean(it) }
+                "source", "destination"), setOf("reverse", "defaultPair"))
+            releaseId(transition["id"]); oneOf(transition["kind"], "page")
+            if (!transitionIds.add(releaseId(transition["id"]))) fail("duplicate transition id")
+            if (transition["defaultPair"]?.let { boolean(it) } == true &&
+                !defaultPairs.add(text(transition["sourceScreenId"]) to text(transition["destinationScreenId"])))
+                fail("duplicate default pair")
             for (key in listOf("sourceScreenId", "destinationScreenId")) if (releaseId(transition[key]) !in screens) fail("transition screen")
-            integer(transition["durationMs"], maximum = 60_000); boolean(transition["incomingOnTop"])
+            integer(transition["durationMs"], maximum = 60_000)
             endpoints(transition)
             transition["reverse"]?.let { input ->
-                val reverse = exact(input, setOf("source", "destination"), setOf("durationMs", "incomingOnTop"))
+                val reverse = exact(input, setOf("source", "destination"), setOf("durationMs"))
                 reverse["durationMs"]?.let { integer(it, maximum = 60_000) }
-                reverse["incomingOnTop"]?.let { boolean(it) }
                 endpoints(reverse)
             }
         }

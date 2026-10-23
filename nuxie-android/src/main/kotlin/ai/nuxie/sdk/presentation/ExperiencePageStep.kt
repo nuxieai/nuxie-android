@@ -55,8 +55,8 @@ internal object ExperiencePageStep {
             val active = listOf(target to ExperienceScreenLifecycle.Phase.ACTIVE)
             if (reducedMotion) {
                 operations.batch {
-                    operations.phases(exiting, phasesTransition)
                     operations.takeIncoming()
+                    operations.phases(exiting, phasesTransition)
                     operations.phases(entering, phasesTransition)
                     operations.begin(transition)
                     operations.end(transition)
@@ -85,15 +85,16 @@ internal object ExperiencePageStep {
                     operations.phases(exiting, phasesTransition)
                 }
                 if (outgoing != null) awaitHalf(listOf(outgoing), leaveBudget)
-                val incoming = plan?.let { operations.register(target, it.incomingCompletionEvent) }
-                operations.batch(present = incoming != null, watchdogMs = plan?.watchdogMs ?: 250) {
+                var incoming: Deferred<Unit>? = null
+                operations.batch(present = plan != null, watchdogMs = plan?.watchdogMs ?: 250) {
                     operations.takeIncoming()
+                    incoming = plan?.let { operations.register(target, it.incomingCompletionEvent) }
                     operations.phases(entering, phasesTransition)
                     operations.begin(transition)
                     operations.retire()
                     operations.phases(hidden, "")
                 }
-                if (incoming != null) awaitHalf(listOf(incoming), checkNotNull(plan).watchdogMs)
+                incoming?.let { awaitHalf(listOf(it), checkNotNull(plan).watchdogMs) }
                 operations.batch {
                     operations.end(transition)
                     operations.phases(active, "")
