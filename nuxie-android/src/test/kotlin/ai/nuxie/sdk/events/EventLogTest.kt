@@ -235,9 +235,11 @@ class EventLogTest {
     @Test fun failedHeadRetainsDeadlinePositionAndRetriesWithoutAnotherCapture() = runBlocking {
         val log = log(RecordingStore())
         val observed = java.util.concurrent.CopyOnWriteArrayList<String>()
-        var attempts = 0
+        val ordinary = java.util.concurrent.CopyOnWriteArrayList<String>()
+        log.subscribeCommitted { ordinary += it.name }
+        val repaired = java.util.concurrent.atomic.AtomicBoolean(false)
         log.subscribeCommittedWithAdmission(sampleGeneration = { 1L }) { event, _ ->
-            if (event.name == "earlier" && ++attempts == 1) false
+            if (event.name == "earlier" && !repaired.get()) false
             else { observed += event.name; true }
         }
         log.setJourneyDeadlineHandler { observed += "deadline"; true }
@@ -246,8 +248,11 @@ class EventLogTest {
         log.capture("later")
         log.awaitBarrier()
         assertTrue(observed.isEmpty())
+        assertEquals(listOf("earlier", "later"), ordinary.toList())
+        repaired.set(true)
         withTimeout(5_000L) { while (observed.size < 3) delay(10) }
         assertEquals(listOf("earlier", "deadline", "later"), observed.toList())
+        assertEquals(listOf("earlier", "later"), ordinary.toList())
         log.closeWorkers()
     }
 

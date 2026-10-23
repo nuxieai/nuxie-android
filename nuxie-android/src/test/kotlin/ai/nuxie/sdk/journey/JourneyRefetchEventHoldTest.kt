@@ -98,6 +98,7 @@ class JourneyRefetchEventHoldTest {
 
     @Test fun `a failed first checkpoint save keeps the triggering route pending until retry`() = runBlocking {
         for (step in listOf(waitSteps().first().jsonObject, delayStep())) {
+            val eventId = "first-park-${step.getValue("id").jsonPrimitive.content}"
             directory.deleteRecursively()
             context.getSharedPreferences("nuxie_journey_release_high_water", 0).edit().clear().commit()
             val sleeper = WakeSleeper()
@@ -109,7 +110,7 @@ class JourneyRefetchEventHoldTest {
                 beforePersist = {
                     if (parkWriteArmed.get() && failPark.getAndSet(false)) error("First checkpoint save failed")
                 }, afterJourney = { event, accepted ->
-                    if (event.id == "first-park") {
+                    if (event.id == eventId) {
                         deliveries += accepted
                         if (!accepted) releaseRejection.await()
                     }
@@ -117,13 +118,13 @@ class JourneyRefetchEventHoldTest {
             try {
                 val snapshot = launch.copy("customer", 1, "start_waiting", JsonArray(listOf(step) + waitSteps().drop(1)))
                 launch.start(); launch.commit("customer", snapshot)
-                assertTrue(launch.eventLog.captureIdempotently("start_waiting", emptyMap(), "first-park", "customer"))
+                assertTrue(launch.eventLog.captureIdempotently("start_waiting", emptyMap(), eventId, "customer"))
                 // Keep rejection observable even if this assertion task is descheduled past one second.
                 withTimeout(10_000L) { while (deliveries.isEmpty()) delay(10) }
                 assertEquals(listOf(false), deliveries.toList())
                 val admitted = launch.journal().runs().single()
                 assertTrue(admitted.park == null)
-                assertTrue(launch.store.queryPendingLocalRoutes("customer").any { it.id == "first-park" })
+                assertTrue(launch.store.queryPendingLocalRoutes("customer").any { it.id == eventId })
                 releaseRejection.complete(Unit)
                 withTimeout(10_000L) { while (deliveries.lastOrNull() != true) delay(10) }
                 launch.eventLog.awaitBarrier()
@@ -142,6 +143,43 @@ class JourneyRefetchEventHoldTest {
                 assertEquals(1, launch.outcomes("customer", outcome))
             } finally { releaseRejection.complete(Unit); launch.close() }
         }
+    }
+
+    @Test fun `failed warm recovery releases ordinary delivery while Journey admission waits`() = runBlocking {
+        val failing = java.util.concurrent.atomic.AtomicBoolean(true)
+        val observed = CopyOnWriteArrayList<String>()
+        val deliveryKicks = java.util.concurrent.atomic.AtomicInteger()
+        val admissions = CopyOnWriteArrayList<Boolean>()
+        val launch = Launch("customer", beforePersist = { check(!failing.get()) { "Warm recovery failed" } },
+            beforeJourney = { event -> if (event.name in listOf("start_waiting", "analytics_after")) observed += event.name },
+            afterJourney = { event, accepted -> if (event.name == "start_waiting") admissions += accepted })
+        launch.eventLog.subscribeCommitted { event ->
+            if (event.name in listOf("start_waiting", "analytics_after")) deliveryKicks.incrementAndGet()
+        }
+        val snapshot = launch.copy("customer", 1, "start_waiting")
+        val journal = launch.journal()
+        assertTrue(journal.admit(snapshot.profile.armedLegs.single(), JourneyFrequency.EveryMatch, "wait", 900_000L,
+            release = snapshot.profile.releases.single(), executionSnapshot = JourneyRun.ExecutionSnapshot(
+                snapshot.profile.delivery, snapshot.profile.facts.getValue("assignments").jsonObject)) != null)
+        launch.commit("customer", snapshot)
+        launch.start()
+        launch.journeys.profileRefetchWillBegin("customer")
+        launch.journeys.profileRefetchDidSettle("customer")
+        launch.track("start_waiting")
+        launch.track("analytics_after")
+        assertEquals(listOf("start_waiting", "analytics_after"), observed.toList())
+        assertEquals(2, deliveryKicks.get())
+        assertTrue(admissions.isNotEmpty() && admissions.all { !it })
+        assertEquals(0, launch.starts("customer"))
+        assertEquals(listOf("start_waiting", "analytics_after"),
+            launch.store.queryPendingLocalRoutes("customer").map { it.name })
+        failing.set(false)
+        launch.commit("customer", snapshot)
+        launch.eventLog.awaitBarrier()
+        assertTrue(admissions.last())
+        assertTrue(launch.journal().runs().single().park != null)
+        assertTrue(launch.store.queryPendingLocalRoutes("customer").isEmpty())
+        assertEquals("Recovery must not repeat ordinary delivery notifications", 2, deliveryKicks.get())
     }
 
     @Test fun `failed first profile fetch releases committed subscribers without a refresh`() = runBlocking {

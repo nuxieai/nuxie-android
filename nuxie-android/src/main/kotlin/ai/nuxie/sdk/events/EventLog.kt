@@ -263,10 +263,15 @@ internal class EventLog(
                     pendingRoutes.addLast(command)
                     // Only the retry timer or a routing release retries a failed head.
                     if (!routeDeliveryFailed) drainRoutes()
+                    else if (command is RouteCommand.Event && !routingDeferred.get()) notifyCommittedSubscribers(command)
                 }
                 is RouteCommand.RecoveryPrefix -> {
                     command.events.asReversed().forEach(pendingRoutes::addFirst)
                     if (!routeDeliveryFailed) drainRoutes()
+                    else for (route in command.events) {
+                        if (routingDeferred.get()) break
+                        notifyCommittedSubscribers(route)
+                    }
                 }
                 RouteCommand.Retry -> {
                     drainRoutes()
@@ -347,6 +352,7 @@ internal class EventLog(
                     if (!deliverRouteHead(head)) {
                         routeDeliveryFailed = true
                         scheduleRouteRetry()
+                        notifyPendingCommittedSubscribers()
                         return
                     }
                     acknowledgeLocalRouteIfNeeded(head.localRouteEventId)
@@ -364,12 +370,24 @@ internal class EventLog(
         }
     }
 
-    private suspend fun deliverRouteHead(head: RouteCommand.Event): Boolean {
+    private suspend fun notifyPendingCommittedSubscribers() {
+        // Journey admission can refuse a head while ordinary analytics continues.
+        for (route in pendingRoutes) {
+            if (routingDeferred.get()) return
+            if (route is RouteCommand.Event) notifyCommittedSubscribers(route)
+        }
+    }
+
+    private suspend fun notifyCommittedSubscribers(head: RouteCommand.Event) {
         while (head.nextSubscriber < subscribers.size) {
             val subscriber = subscribers[head.nextSubscriber++]
             if (subscriber.predicate(head.event)) runCatching { subscriber.handler.onCommitted(head.event) }
                 .onFailure { Log.w(LOG_TAG, "Committed-event subscriber failed", it) }
         }
+    }
+
+    private suspend fun deliverRouteHead(head: RouteCommand.Event): Boolean {
+        notifyCommittedSubscribers(head)
         while (head.nextAdmission < head.admissionTickets.size) {
             var ticket = head.admissionTickets[head.nextAdmission]
             if (ticket.subscriber.predicate(head.event)) {

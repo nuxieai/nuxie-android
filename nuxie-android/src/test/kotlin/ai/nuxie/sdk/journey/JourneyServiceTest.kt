@@ -1060,6 +1060,81 @@ class JourneyServiceTest {
                 replayedCustomerEvents.map { it.name })
         }
 
+    @Test fun `declined presentation backs off with a moving clock until the surface is free`() = runBlocking {
+        val identity = identity("customer")
+        val renderedEntry = fixture.getValue("renderedEntry").jsonObject
+        val catalog = catalog(renderedEntry)
+        val ownerAuthority = authority(renderedEntry)
+        catalog.commit("customer", catalog.prepare(profile(releaseEntry = renderedEntry), ownerAuthority))
+        val snapshot = requireNotNull(catalog.snapshot("customer"))
+        val clock = java.util.concurrent.atomic.AtomicLong(100_000L)
+        val occupied = java.util.concurrent.atomic.AtomicBoolean(true)
+        val attempts = CopyOnWriteArrayList<Long>()
+        val deadlines = CopyOnWriteArrayList<ai.nuxie.sdk.events.JourneyDeadline>()
+        val sleeper = PresentationRetrySleeper()
+        lateinit var presenter: RecordingJourneyPresenter
+        presenter = RecordingJourneyPresenter(beforePresent = {
+            // Each attempt moves the clock, as a real occupied surface would.
+            attempts += clock.incrementAndGet()
+            presenter.presentationResult = if (occupied.get()) JourneyPresentationResult.Declined else JourneyPresentationResult.Shown
+        })
+        val service = JourneyService(identity, store, catalog, directory, scope,
+            capture = { _, _, _, _ -> true }, presenter = presenter, nowMillis = clock::get,
+            sleepMillis = sleeper::sleep, enqueueJourneyDeadline = { deadlines += it })
+        service.initialize(); service.onAppWillEnterForeground()
+        service.profileDidCommit(snapshot, ownerAuthority, "customer", 1)
+        val journal = JourneyRunJournal(directory, "customer", JourneyStorageScope(ownerAuthority))
+        val runId = journal.runs().single().id
+        val firstWake = requireNotNull(journal.runs().single().park?.wakeAtMillis)
+        assertEquals(attempts.single() + 1_000L, firstWake)
+        withTimeout(5_000L) { while (1_000L !in sleeper.pendingDurations) kotlinx.coroutines.delay(10) }
+        clock.set(firstWake - 1L)
+        service.onAppWillEnterForeground()
+        assertEquals(1, attempts.size)
+        assertEquals(firstWake, journal.runs().single().park?.wakeAtMillis)
+        withTimeout(5_000L) { while (1L !in sleeper.pendingDurations) kotlinx.coroutines.delay(10) }
+        clock.set(firstWake)
+        sleeper.completeAll()
+        withTimeout(5_000L) { while (attempts.size < 2) kotlinx.coroutines.delay(10) }
+        service.onAppWillEnterForeground() // FIFO barrier after re-parking.
+        assertEquals(2, attempts.size)
+        val secondWake = requireNotNull(journal.runs().single().park?.wakeAtMillis)
+        assertEquals(attempts.last() + 1_000L, secondWake)
+        occupied.set(false)
+        clock.set(secondWake - 1L)
+        service.onAppWillEnterForeground()
+        assertEquals(2, attempts.size)
+        withTimeout(5_000L) { while (1L !in sleeper.pendingDurations) kotlinx.coroutines.delay(10) }
+        clock.set(secondWake)
+        sleeper.completeAll()
+        withTimeout(5_000L) { while (attempts.size < 3) kotlinx.coroutines.delay(10) }
+        service.onAppWillEnterForeground()
+        assertEquals(3, attempts.size)
+        assertTrue(attempts.zipWithNext().all { (earlier, later) -> later - earlier >= 1_000L })
+        assertEquals(runId, journal.runs().single().id)
+        assertNull(journal.runs().single().park)
+        assertEquals(JourneyPresentationResult.Shown, presenter.presentationResult)
+        assertTrue(deadlines.isEmpty())
+        assertTrue(sleeper.pendingDurations.isEmpty())
+    }
+
+    private class PresentationRetrySleeper {
+        private data class Request(val duration: Long, val done: CompletableDeferred<Unit>, val job: kotlinx.coroutines.Job?)
+        private val requests = CopyOnWriteArrayList<Request>()
+        val pendingDurations: List<Long>
+            get() = requests.filter { it.job?.isActive == true && !it.done.isCompleted }.map { it.duration }
+
+        suspend fun sleep(duration: Long) {
+            val request = Request(duration, CompletableDeferred(), kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job])
+            requests += request
+            try { request.done.await() } finally { requests.remove(request) }
+        }
+
+        fun completeAll() {
+            requests.filter { it.job?.isActive == true }.forEach { it.done.complete(Unit) }
+        }
+    }
+
     @Test fun `declined presentation remains parked for a later evaluation`() = runBlocking {
         val identity = identity("customer")
         val renderedEntry = fixture.getValue("renderedEntry").jsonObject
@@ -1069,6 +1144,7 @@ class JourneyServiceTest {
         runBlocking { catalog.commit("customer", prepared) }
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val captures = CopyOnWriteArrayList<String>()
+        val clock = java.util.concurrent.atomic.AtomicLong(100_000L)
         val presenter = RecordingJourneyPresenter(
             presentationResult = JourneyPresentationResult.Declined,
         )
@@ -1080,7 +1156,7 @@ class JourneyServiceTest {
             scope = scope,
             capture = { name, _, _, _ -> captures += name; true },
             presenter = presenter,
-            nowMillis = { 100_000L },
+            nowMillis = clock::get,
         )
         service.initialize()
         service.onAppWillEnterForeground()
@@ -1092,10 +1168,11 @@ class JourneyServiceTest {
             "customer",
             JourneyStorageScope(renderedAuthority),
         )
-        assertEquals(100_000L, journal.runs().single().park?.wakeAtMillis)
+        assertEquals(101_000L, journal.runs().single().park?.wakeAtMillis)
         assertEquals(listOf(JourneyEventNames.LEG_STARTED), captures)
 
         presenter.presentationResult = JourneyPresentationResult.Shown
+        clock.addAndGet(1_000L)
         val replacement = catalog.prepare(
             profile(
                 releaseEntry = renderedEntry,

@@ -533,6 +533,7 @@ internal class JourneyService(
             }.onFailure {
                 Log.w(LOG_TAG, "Journey command failed", it)
             }
+            updateRoutingHold()
             if (command is Command.Event) {
                 command.accepted?.complete(result.getOrNull() == true)
             }
@@ -859,9 +860,8 @@ internal class JourneyService(
     }
 
     private fun updateRoutingHold() {
-        val needsJournal = journal?.distinctId != identity.distinctId() &&
-            !(startupProfileSettled && storageScope == null)
-        if (!initialized || needsJournal ||
+        val awaitingStartup = journal?.distinctId != identity.distinctId() && !startupProfileSettled
+        if (!initialized || awaitingStartup ||
             foreground.isRevalidating() || holdsEvents(identity.distinctId())) holdRouting()
         else synchronized(routingDeferralLock) {
             routingDeferral?.let { generation ->
@@ -1245,13 +1245,14 @@ internal class JourneyService(
         profileRefetchesInFlight.remove(distinctId)
         // No copy landed: the waiting events go through without one, as
         // they would have, in the order they were captured.
-        if (identity.distinctId() != distinctId || currentState() != null) return
-        reconcileWithoutCopyNow()
+        if (identity.distinctId() != distinctId) return
         finishStartupRoutingNow()
+        if (currentState() != null) return
+        reconcileWithoutCopyNow()
     }
 
     private fun finishStartupRoutingNow() {
-        // Unlike authenticated recovery, a failed first fetch has no journal to open.
+        // Prefetch completion releases live routing even when Journey recovery is unavailable.
         startupProfileSettled = true
         updateRoutingHold()
     }
@@ -1714,7 +1715,10 @@ internal class JourneyService(
         }
     }
 
-    private fun deadlineFor(run: JourneyRun, owner: String): JourneyDeadline? = ParkCheckpoint.of(run)?.let {
+    private fun deadlineFor(run: JourneyRun, owner: String): JourneyDeadline? = ParkCheckpoint.of(run)?.takeIf {
+        // Availability parks own a retry time, not a timed control's queue entry.
+        it.anchorAtMillis != null
+    }?.let {
         JourneyDeadline(owner, run.id, it.stepId, it.anchorAtMillis, it.wakeAtMillis)
     }
 
@@ -3021,7 +3025,7 @@ internal class JourneyService(
                                     return
                                 }
                                 JourneyPresentationResult.Declined -> {
-                                    target.park(run.id, result.stepId, nowMillis())
+                                    target.park(run.id, result.stepId, nowMillis() + 1_000L)
                                     scheduleNextWake()
                                     return
                                 }
@@ -3434,6 +3438,10 @@ internal class JourneyService(
         }
         if (journal !== target || generation != wakeGeneration) return
         val deadlines = runs.mapNotNull { deadlineFor(it, target.distinctId) }
+        val availabilityWake = if (foreground.get()) runs.filter {
+            it.completion == null && it.pendingPresentationPublication == null && it.park?.anchorAtMillis == null &&
+                nativeRestoreRetries[it.id]?.checkpoint != ParkCheckpoint.of(it)
+        }.mapNotNull { it.park?.wakeAtMillis }.minOrNull() else null
         val savedInputRunIds = runs.filter {
             it.park?.pendingEvent != null || it.park?.candidateEvents?.isNotEmpty() == true
         }.mapTo(mutableSetOf()) { it.id }
@@ -3460,8 +3468,10 @@ internal class JourneyService(
         enqueuedDeadlines.addAll(due)
         if (savedInputRetryNeeded) requestJourneyResumeRetry()
         due.forEach(::queueDeadline)
-        val next = dated.filter { it.second > now }.minOfOrNull { it.second } ?: return
-        scheduleWake(generation, next, dated.filter { it.second == next }.map { it.first })
+        val nextDeadline = dated.filter { it.second > now }.minOfOrNull { it.second }
+        val nextAvailability = availabilityWake?.let { if (it <= now) now + 1_000L else it }
+        val next = listOfNotNull(nextDeadline, nextAvailability).minOrNull() ?: return
+        scheduleWake(generation, next, if (next == nextDeadline) dated.filter { it.second == next }.map { it.first } else emptyList())
     }
 
     private fun scheduleWake(generation: Long, atMillis: Long, deadlines: List<JourneyDeadline>?) {
@@ -3479,6 +3489,11 @@ internal class JourneyService(
             return
         }
         if (deadlines == null) { scheduleNextWake(); return }
+        // An empty selection retries availability; null only retries journal inspection.
+        if (deadlines.isEmpty()) {
+            resumeParkedRuns(currentState(), null)
+            return
+        }
         val due = deadlines.filter { it !in enqueuedDeadlines }
         enqueuedDeadlines.addAll(due)
         due.forEach(::queueDeadline)
