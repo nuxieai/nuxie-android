@@ -19,6 +19,7 @@ import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -182,6 +183,8 @@ class NuxieWarmStartRecoveryTest {
             failReport.set(false)
             withTimeout(5_000) {
                 assertTrue(core.profile.refreshAndWait())
+                // A routing barrier does not bypass a failed input's one-second backoff.
+                while (sqlite.queryPendingLocalRoutes(customer).isNotEmpty()) delay(10)
                 core.eventLog.awaitBarrier()
             }
             assertEquals(customer, sqlite.stableEvent(retained.startedEventId)?.distinctId)

@@ -596,6 +596,7 @@ internal class NuxieCore(
         // Subscriber registration precedes recovery, while the synchronous
         // enqueue keeps every later capture behind initialization in its FIFO.
         journeys.enqueueInitialization()
+        if (!requestInitialProfileRefresh) journeys.finishStartupRouting()
         // Outbox work begins only once everything that consumes its events is
         // ready: the event subscribers are registered and Journey routing is
         // queued, since the event log samples its subscribers at capture and

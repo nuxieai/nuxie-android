@@ -4,6 +4,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 
 /** A process-local queue entry. Durable routes and parks recreate entries after recovery. */
@@ -14,6 +16,9 @@ internal class JourneyWork(
     val repairsCustomer: Boolean = false,
     initiallyDeferred: Boolean = false,
     val kind: Kind = Kind.OPERATION,
+    var input: StoredEvent? = null,
+    val deadline: JourneyDeadline? = null,
+    val pendingInputs: () -> List<JourneyWork> = { emptyList() },
     val attempt: suspend () -> Result,
 ) {
     enum class Kind { EVENT, OPERATION }
@@ -30,6 +35,7 @@ internal class JourneyWork(
     internal var retryAtMillis: Long? = null
     internal var completed: suspend () -> Unit = {}
     internal var failed: suspend () -> Unit = {}
+    internal var inputsChecked = false
 }
 
 /**
@@ -86,8 +92,29 @@ internal class JourneyWorkQueue(
                     index++
                     continue
                 }
+                val deadline = work.deadline
+                if (deadline != null && !work.inputsChecked) {
+                    // Freeze eligibility once, before the deadline's first attempt.
+                    // Event plans and their children still use their ordinary apply path.
+                    work.inputsChecked = true
+                    val committed = work.pendingInputs()
+                    val inputs = (entries.drop(index + 1) + committed).filter { candidate ->
+                        candidate.input?.let { input ->
+                            input.distinctId == deadline.distinctId && input.timestampMillis <= deadline.wakeAtMillis
+                        } == true
+                    }.distinctBy { it.key }.sortedBy { it.input!!.timestampMillis }
+                    if (inputs.isNotEmpty()) {
+                        val keys = inputs.mapTo(mutableSetOf()) { it.key }
+                        entries.removeAll { it.key in keys }
+                        entries.addAll(index, inputs)
+                        continue
+                    }
+                }
                 val result = try { work.attempt() }
-                catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: CancellationException) {
+                    currentCoroutineContext().ensureActive()
+                    JourneyWork.Result.Retry
+                }
                 catch (_: Exception) { JourneyWork.Result.Retry }
                 when (result) {
                     JourneyWork.Result.Blocked -> {
@@ -107,6 +134,7 @@ internal class JourneyWorkQueue(
                     is JourneyWork.Result.Done -> {
                         entries.removeAt(index)
                         work.completed()
+                        result.following.forEach { if (it.input == null) it.input = work.input }
                         insertAt(index, result.following)
                         progress++
                     }
@@ -115,6 +143,7 @@ internal class JourneyWorkQueue(
                         if (result.children.isEmpty()) work.completed() else {
                             var remaining = result.children.size
                             for (child in result.children) {
+                                if (child.input == null) child.input = work.input
                                 val completed = child.completed
                                 val failed = child.failed
                                 child.completed = {

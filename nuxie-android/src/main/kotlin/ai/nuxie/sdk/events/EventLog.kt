@@ -13,6 +13,8 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 /** Process-local control route; durable parks recreate it after recovery replay. */
 internal data class JourneyDeadline(
@@ -58,6 +60,7 @@ internal class EventLog(
     /** Stamps \$session_id and touches the session; null until sessions exist. */
     private val sessionIdProvider: (() -> String?)? = null,
     private val retrySleep: suspend (Long) -> Unit = { delay(it) },
+    private val retryClockMillis: () -> Long = { System.nanoTime() / 1_000_000L },
 ) {
     internal data class IdempotentCaptureResult(
         val succeeded: Boolean,
@@ -163,6 +166,7 @@ internal class EventLog(
             var nextSubscriber: Int = 0,
             var nextAdmission: Int = 0,
             val children: MutableList<JourneyWork> = mutableListOf(),
+            var submitted: Boolean = false,
         ) : RouteCommand
         data class RecoveryPrefix(val work: List<JourneyWork>) : RouteCommand
         data class Work(val work: JourneyWork) : RouteCommand
@@ -193,7 +197,11 @@ internal class EventLog(
     @Volatile private var journeyDeadlineHandler: (suspend (JourneyDeadline) -> JourneyWork.Result)? = null
     private val routeQueue = JourneyWorkQueue(scope, {
         routeCommands.trySend(RouteCommand.RetryTimer)
-    }, retrySleep)
+    }, retrySleep, retryClockMillis)
+    // Index committed commands not yet offered to the queue. It never applies
+    // inputs or retries them; a deadline freezes this index exactly once.
+    private val committedInputsLock = Any()
+    private val committedInputs = linkedMapOf<String, RouteCommand.Event>()
     private val pendingCommittedNotifications = mutableListOf<RouteCommand.Event>()
     private var acknowledgementRetryJob: Job? = null
     private val closing = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -267,13 +275,17 @@ internal class EventLog(
             when (command) {
                 is RouteCommand.Event -> {
                     pendingCommittedNotifications += command
-                    routeQueue.add(eventWork(command))
+                    if (!command.submitted) {
+                        command.submitted = true
+                        routeQueue.add(eventWork(command))
+                    }
                     drainRoutes()
                 }
                 is RouteCommand.Deadline -> {
                     val deadline = command.deadline
                     routeQueue.add(JourneyWork(
                         key = deadline.queueKey, distinctId = deadline.distinctId, runId = deadline.runId,
+                        deadline = deadline, pendingInputs = { takeCommittedInputs(deadline) },
                     ) {
                         if (deadline.distinctId != identity.distinctId()) JourneyWork.Result.Done()
                         else journeyDeadlineHandler?.invoke(deadline) ?: JourneyWork.Result.Done()
@@ -350,9 +362,21 @@ internal class EventLog(
         }
     }
 
+    private fun takeCommittedInputs(deadline: JourneyDeadline): List<JourneyWork> = synchronized(committedInputsLock) {
+        committedInputs.values.filter { head ->
+            !head.submitted && head.event.distinctId == deadline.distinctId &&
+                head.event.timestampMillis <= deadline.wakeAtMillis
+        }.map { head ->
+            head.submitted = true
+            eventWork(head)
+        }
+    }
+
     private fun eventWork(head: RouteCommand.Event): JourneyWork = JourneyWork(
         key = "event:${head.event.id}", distinctId = head.event.distinctId, kind = JourneyWork.Kind.EVENT,
+        input = head.event,
     ) {
+        synchronized(committedInputsLock) { committedInputs.remove(head.event.id) }
         notifyCommittedSubscribers(head)
         while (head.nextAdmission < head.admissionTickets.size) {
             var ticket = head.admissionTickets[head.nextAdmission]
@@ -967,10 +991,13 @@ internal class EventLog(
         admissionTickets: List<AdmissionTicket>,
         localRouteEventId: String? = null,
     ) {
-        val result = routeCommands.trySend(
-            RouteCommand.Event(event, admissionTickets, localRouteEventId),
-        )
+        val head = RouteCommand.Event(event, admissionTickets, localRouteEventId)
+        val result = synchronized(committedInputsLock) {
+            committedInputs[event.id] = head
+            routeCommands.trySend(head)
+        }
         if (result.isFailure) {
+            synchronized(committedInputsLock) { committedInputs.remove(event.id) }
             localRouteEventId?.let(activeLocalRouteIds::remove)
             Log.w(LOG_TAG, "Committed event dropped: route pipeline is closed", null, Log.sensitive("event", event.name))
         }
@@ -1020,7 +1047,10 @@ internal class EventLog(
 
     private suspend fun attemptRecoveryWork(work: JourneyWork): RecoveryAttempt {
         val result = try { work.attempt() }
-        catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: CancellationException) {
+            currentCoroutineContext().ensureActive()
+            JourneyWork.Result.Retry
+        }
         catch (error: Exception) {
             Log.w(LOG_TAG, "Recovered Journey work failed", error)
             JourneyWork.Result.Retry

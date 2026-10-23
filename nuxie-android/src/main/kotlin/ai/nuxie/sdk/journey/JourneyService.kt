@@ -269,6 +269,7 @@ internal class JourneyService(
         data class Initialize(
             override val done: CompletableDeferred<Unit>? = null,
         ) : Command
+        data class StartupSettled(override val done: CompletableDeferred<Unit>? = null) : Command
         data class ProfileCommit(
             val snapshot: JourneyProfileCatalog.Snapshot,
             val authority: ProfileDeliveryAuthority,
@@ -565,6 +566,7 @@ internal class JourneyService(
             val result = runCatching {
                 when (command) {
                     is Command.Initialize -> initializeNow()
+                    is Command.StartupSettled -> finishStartupRoutingNow()
                     is Command.ProfileCommit -> profileDidCommitNow(
                         command.snapshot,
                         command.authority,
@@ -657,6 +659,10 @@ internal class JourneyService(
     /** Queue startup synchronously so every later event command follows it. */
     fun enqueueInitialization() {
         commands.trySend(Command.Initialize())
+    }
+
+    fun finishStartupRouting() {
+        commands.trySend(Command.StartupSettled())
     }
 
     override suspend fun profileDidCommit(
@@ -3593,9 +3599,11 @@ internal class JourneyService(
             // All known deadlines keep their wakes even while Journey execution
             // or a journal read suspends the worker. This timer never retries work.
             for ((atMillis, due) in deadlines.groupBy { it.wakeAtMillis }.toSortedMap()) {
-                do {
-                    sleepMillis((atMillis - nowMillis()).coerceAtLeast(0L))
-                } while (nowMillis() < atMillis)
+                while (true) {
+                    val remaining = atMillis - nowMillis()
+                    if (remaining <= 0L) break
+                    sleepMillis(remaining)
+                }
                 synchronized(deadlineSchedulingLock) {
                     if (generation != wakeGeneration) return@launch
                     enqueueDeadlines(due)

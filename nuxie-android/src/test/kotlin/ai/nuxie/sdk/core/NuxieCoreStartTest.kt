@@ -19,6 +19,7 @@ import java.io.File
 import java.security.MessageDigest
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonPrimitive
@@ -38,6 +39,7 @@ class NuxieCoreStartTest {
     @Test
     fun anEntryDueAtLaunchReportsItsSyncToJourneys() = runBlocking {
         val journeyEvents = CopyOnWriteArrayList<StoredEvent>()
+        val syncedRouted = CompletableDeferred<Unit>()
         val evidenceStore = InMemoryPurchaseEvidenceStore()
         val transport = FakeTransport()
         val storage = temporaryFolder.newFolder("core")
@@ -55,7 +57,10 @@ class NuxieCoreStartTest {
                 profileCacheDirectory = File(storage, "profiles"),
                 requestInitialProfileRefresh = false,
                 billingClientFactory = InertBillingClientAdapter.factory,
-                journeyEventObserver = { journeyEvents += it },
+                journeyEventObserver = {
+                    journeyEvents += it
+                    if (it.name == SystemEventNames.PURCHASE_SYNCED) syncedRouted.complete(Unit)
+                },
             ),
         )
         try {
@@ -101,6 +106,7 @@ class NuxieCoreStartTest {
             withTimeout(10_000) {
                 while (evidenceStore.load().getValue("launch-token").syncedEventEmitted.not()) delay(10)
             }
+            withTimeout(10_000) { syncedRouted.await() }
             core.eventLog.awaitBarrier()
             // The event log may offer one event again with a fresher admission;
             // what matters is that this event reached Journey routing.

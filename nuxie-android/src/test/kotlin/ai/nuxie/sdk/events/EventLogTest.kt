@@ -191,6 +191,86 @@ class EventLogTest {
         eventLog.subscribeForwarding(isEnabled = forwardingEnabled) {}
     }
 
+    @Test fun operationCancellationWithAnActiveScopeKeepsRoutingAndBarriersAlive() = runBlocking {
+        val log = log(RecordingStore())
+        val cancelled = CompletableDeferred<Unit>()
+        val delivered = java.util.concurrent.CopyOnWriteArrayList<String>()
+        log.subscribeJourneyEvents(sampleGeneration = { 1L }) { event, _ ->
+            delivered += event.name
+            emptyList()
+        }
+        try {
+            log.enqueueJourneyWork(JourneyWork("cancelled:run", "anon-1", "run") {
+                cancelled.complete(Unit)
+                throw kotlinx.coroutines.CancellationException("Feature check superseded")
+            })
+            withTimeout(5_000L) { cancelled.await() }
+            assertTrue(scope.coroutineContext[Job]!!.isActive)
+            log.capture("later")
+            withTimeout(5_000L) { log.awaitBarrier() }
+            assertEquals(listOf("later"), delivered.toList())
+        } finally { withTimeout(5_000L) { log.closeWorkers() } }
+    }
+
+    @Test fun deadlineSnapshotsCommittedMailboxInputsAndAppliesThemOnceInOccurrenceOrder() = runBlocking {
+        val log = log(RecordingStore())
+        val blockerEntered = CompletableDeferred<Unit>()
+        val releaseBlocker = CompletableDeferred<Unit>()
+        val observed = java.util.concurrent.CopyOnWriteArrayList<String>()
+        log.subscribeJourneyEvents(sampleGeneration = { 1L }) { event, _ ->
+            observed += event.name
+            emptyList()
+        }
+        log.setJourneyDeadlineHandler {
+            observed += "deadline"
+            JourneyWork.Result.Done()
+        }
+        try {
+            log.enqueueJourneyWork(JourneyWork("blocker", "other") {
+                blockerEntered.complete(Unit)
+                releaseBlocker.await()
+                JourneyWork.Result.Done()
+            })
+            withTimeout(5_000L) { blockerEntered.await() }
+            log.enqueueJourneyDeadline(JourneyDeadline("anon-1", "run", "wait", 0L, 1_000L))
+            for ((name, occurredAt) in listOf("after" to 1_001L, "tap900" to 900L, "tap800" to 800L)) {
+                assertTrue(log.captureScreenEvent(name, emptyMap(), name, "anon-1", occurredAt, null).settled)
+            }
+            // The routing worker has not even read these committed event commands yet.
+            releaseBlocker.complete(Unit)
+            withTimeout(5_000L) { log.awaitBarrier() }
+            assertEquals(listOf("tap800", "tap900", "deadline", "after"), observed.toList())
+        } finally { releaseBlocker.complete(Unit); log.closeWorkers() }
+    }
+
+    @Test fun aDeadlineDoesNotExtendItsCommittedSnapshotWhileApplyingAnInput() = runBlocking {
+        val log = log(RecordingStore())
+        val inputEntered = CompletableDeferred<Unit>()
+        val releaseInput = CompletableDeferred<Unit>()
+        val observed = java.util.concurrent.CopyOnWriteArrayList<String>()
+        log.subscribeJourneyEvents(sampleGeneration = { 1L }) { event, _ ->
+            if (event.name == "before") {
+                inputEntered.complete(Unit)
+                releaseInput.await()
+            }
+            observed += event.name
+            emptyList()
+        }
+        log.setJourneyDeadlineHandler { observed += "deadline"; JourneyWork.Result.Done() }
+        val hold = log.deferCommittedRouting()
+        try {
+            log.enqueueJourneyDeadline(JourneyDeadline("anon-1", "run", "wait", 0L, 1_000L))
+            assertTrue(log.captureScreenEvent("before", emptyMap(), "before", "anon-1", 900L, null).settled)
+            log.awaitBarrier()
+            log.releaseCommittedRouting(hold)
+            withTimeout(5_000L) { inputEntered.await() }
+            assertTrue(log.captureScreenEvent("after-snapshot", emptyMap(), "after-snapshot", "anon-1", 800L, null).settled)
+            releaseInput.complete(Unit)
+            withTimeout(5_000L) { log.awaitBarrier() }
+            assertEquals(listOf("before", "deadline", "after-snapshot"), observed.toList())
+        } finally { releaseInput.complete(Unit); log.releaseCommittedRouting(hold); log.closeWorkers() }
+    }
+
     @Test fun savedJourneyResumeRetriesWithoutADeadlineAndLetsEventsThrough() = runBlocking {
         val log = log(RecordingStore())
         val attempts = java.util.concurrent.atomic.AtomicInteger()

@@ -5,6 +5,7 @@ import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.events.EventLog
 import ai.nuxie.sdk.events.JourneyWork
 import ai.nuxie.sdk.events.JourneyDeadline
+import ai.nuxie.sdk.events.JourneyEventOrigin
 import ai.nuxie.sdk.events.NuxieContextBuilder
 import ai.nuxie.sdk.events.SQLiteEventStore
 import ai.nuxie.sdk.events.StoredEvent
@@ -381,6 +382,67 @@ class JourneyRefetchEventHoldTest {
         } finally { releaseRetry.complete(Unit) }
     }
 
+    @Test fun `a renderer tap committed behind a held deadline satisfies its saved window`() = runBlocking {
+        committedTapDeadline(occurredAt = 900L, afterTimeout = false)
+    }
+
+    @Test fun `a renderer tap committed after timeout does not reopen the wait`() = runBlocking {
+        committedTapDeadline(occurredAt = 900L, afterTimeout = true)
+    }
+
+    @Test fun `a committed tap occurring exactly at the deadline satisfies the wait`() = runBlocking {
+        committedTapDeadline(occurredAt = 1_000L, afterTimeout = false)
+    }
+
+    @Test fun `a tap occurring after the deadline keeps its delivery position behind it`() = runBlocking {
+        committedTapDeadline(occurredAt = 1_001L, afterTimeout = false)
+    }
+
+    private suspend fun committedTapDeadline(occurredAt: Long, afterTimeout: Boolean) {
+        val sleeper = WakeSleeper()
+        val enqueued = CompletableDeferred<Unit>()
+        val observed = CopyOnWriteArrayList<String>()
+        lateinit var launch: Launch
+        launch = Launch("customer", withScreens = true, sleep = sleeper::sleep,
+            enqueueDeadline = { deadline ->
+                launch.eventLog.enqueueJourneyDeadline(deadline)
+                enqueued.complete(Unit)
+            }, beforeJourney = { event -> if (event.name == "go") observed += "tap" })
+        launch.start()
+        launch.commit("customer", launch.copy("customer", 1, "start_waiting", waitSteps(maxTimeMillis = 1_000L)))
+        launch.track("start_waiting")
+        val run = launch.journal().runs().single()
+        val hold = if (afterTimeout) null else launch.eventLog.deferCommittedRouting()
+        launch.eventLog.setJourneyDeadlineHandler { deadline ->
+            observed += "deadline"
+            launch.journeys.handleJourneyDeadline(deadline)
+        }
+        try {
+            withTimeout(5_000L) { while (1_000L !in sleeper.pendingDurations) delay(10) }
+            launch.clock.set(1_001_000L)
+            sleeper.completeAllAndJoin()
+            withTimeout(5_000L) { enqueued.await() }
+            launch.eventLog.awaitBarrier()
+            assertEquals(if (afterTimeout) 1 else 0, launch.outcomes("customer", "timed_out"))
+            launch.clock.set(1_001_100L)
+            val origin = JourneyEventOrigin(run.journeyId,
+                run.reference.getValue("experienceId").jsonPrimitive.content,
+                run.reference.getValue("versionId").jsonPrimitive.content,
+                run.reference.getValue("legId").jsonPrimitive.content,
+                run.generation, null, "tap", screenId = "screen", actionId = "go", invocationId = "tap")
+            assertTrue(launch.eventLog.captureScreenEvent("go", emptyMap(), "renderer-tap", "customer",
+                1_000_000L + occurredAt, null, origin).settled)
+            launch.clock.set(1_001_200L)
+            if (hold != null) launch.eventLog.releaseCommittedRouting(hold)
+            launch.eventLog.awaitBarrier()
+            val satisfies = !afterTimeout && occurredAt <= 1_000L
+            assertEquals(if (satisfies) listOf("tap", "deadline") else listOf("deadline", "tap"), observed.toList())
+            assertEquals(if (satisfies) 1 else 0, launch.outcomes("customer", "took_go"))
+            assertEquals(if (satisfies) 0 else 1, launch.outcomes("customer", "timed_out"))
+            assertTrue(launch.store.queryPendingLocalRoutes("customer").isEmpty())
+        } finally { if (hold != null) launch.eventLog.releaseCommittedRouting(hold) }
+    }
+
     @Test fun `deadline wakes enqueue ahead of later captures while the Journey worker is busy`() = runBlocking {
         val sleeper = WakeSleeper()
         val blockPreparation = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -488,16 +550,18 @@ class JourneyRefetchEventHoldTest {
             directory.deleteRecursively()
             context.getSharedPreferences("nuxie_journey_release_high_water", 0).edit().clear().commit()
             val sleeper = WakeSleeper()
+            val retrySleeper = WakeSleeper()
+            val retryClock = AtomicLong(0L)
             val failing = java.util.concurrent.atomic.AtomicBoolean(true)
             val preparations = java.util.concurrent.atomic.AtomicInteger()
             val retryDelays = CopyOnWriteArrayList<Long>()
             val activeTimers = java.util.concurrent.atomic.AtomicInteger()
-            val allowRetry = CompletableDeferred<Unit>()
             val launch = Launch("customer", withScreens = hasScreens, sleep = sleeper::sleep,
+                retryClockMillis = retryClock::get,
                 retrySleep = { duration ->
                     retryDelays += duration
                     assertEquals(1, activeTimers.incrementAndGet())
-                    try { allowRetry.await(); delay(duration) } finally { activeTimers.decrementAndGet() }
+                    try { retrySleeper.sleep(duration) } finally { activeTimers.decrementAndGet() }
                 }, prepare = { preparations.incrementAndGet(); check(!failing.get()) { "Native restoration failed" } })
             val snapshot = launch.copy("customer", 1, "start_waiting", waitSteps(maxTimeMillis = 10_000L))
             launch.start(); launch.commit("customer", snapshot); launch.track("start_waiting")
@@ -509,17 +573,20 @@ class JourneyRefetchEventHoldTest {
             launch.journeys.onAppDidEnterBackground()
             val before = preparations.get()
             failing.set(false)
-            allowRetry.complete(Unit)
+            withTimeout(5_000L) { while (retrySleeper.pendingDurations.isEmpty()) delay(10) }
+            retryClock.set(1_000L)
+            retrySleeper.completeAllAndJoin()
+            launch.eventLog.awaitBarrier()
             if (hasScreens) {
-                withTimeout(5_000L) { while (activeTimers.get() != 0) delay(10) }
-                launch.eventLog.awaitBarrier()
                 assertEquals(1, retryDelays.size)
                 assertEquals(before, preparations.get())
-            } else withTimeout(5_000L) { while (preparations.get() == before) delay(10) }
+            } else assertTrue(preparations.get() > before)
+            assertEquals(0, activeTimers.get())
             assertEquals(0, launch.outcomes("customer", "timed_out"))
             assertEquals(park, launch.journal().runs().single().park)
+            withTimeout(5_000L) { while (10_000L !in sleeper.pendingDurations) delay(10) }
             launch.clock.addAndGet(10_000L)
-            sleeper.completeAll()
+            sleeper.completeAllAndJoin()
             if (hasScreens) {
                 launch.eventLog.awaitBarrier()
                 assertEquals(0, launch.outcomes("customer", "timed_out"))
@@ -1430,6 +1497,7 @@ class JourneyRefetchEventHoldTest {
         prepare: suspend () -> Unit = {},
         sleep: suspend (Long) -> Unit = { delay(it) },
         retrySleep: suspend (Long) -> Unit = { delay(it) },
+        retryClockMillis: () -> Long = { System.nanoTime() / 1_000_000L },
         withScreens: Boolean = false,
         dropJourneyStarted: Boolean = false,
         /** Runs in EventLog's route worker before Journey sees each event. */
@@ -1455,6 +1523,7 @@ class JourneyRefetchEventHoldTest {
             scope = launchScope,
             nowMillis = { clock.get() },
             retrySleep = retrySleep,
+            retryClockMillis = retryClockMillis,
         )
         val journeys = JourneyService(
             identity = identity,
@@ -1474,6 +1543,7 @@ class JourneyRefetchEventHoldTest {
             readJournalRuns = readRuns,
             prepareNativeValues = { _, _, _ -> prepare() },
             sleepMillis = sleep,
+            retryClockMillis = retryClockMillis,
             enqueueJourneyDeadline = enqueueDeadline ?: eventLog::enqueueJourneyDeadline,
             enqueueJourneyWork = eventLog::enqueueJourneyWork,
             resumeJourneyWork = eventLog::resumeJourneyWork,
@@ -1566,6 +1636,12 @@ class JourneyRefetchEventHoldTest {
 
         fun completeAll() {
             requests.filter { it.job?.isActive == true }.forEach { it.done.complete(Unit) }
+        }
+
+        suspend fun completeAllAndJoin() {
+            val pending = requests.filter { it.job?.isActive == true }
+            pending.forEach { it.done.complete(Unit) }
+            pending.forEach { it.job?.join() }
         }
 
         fun complete(duration: Long) {
