@@ -39,6 +39,30 @@ class ExperienceLayerSurfaceFailureTest {
         }
     }
 
+    @Test fun `mount and ordinary steps deliver takeoff and landing commands once in order`() = runBlocking {
+        withSurface { surface, page, native, lane ->
+            val commands = mutableListOf<String>()
+            lane.call {
+                set(surface, "firstFrameComposed", true)
+                set(surface, "listener", object : ExperienceSurfaceHost.Listener {
+                    override fun onFirstFrame() = Unit
+                    override fun onFailure(error: ExperiencePresentationException) { throw error }
+                    override fun onRuntimeStep(outcome: NuxiePlayerStepOutcome, correlationId: ULong,
+                        viewModelSnapshot: NuxieViewModelSnapshot?, saves: List<ExperienceResponseSaveRequest>) {
+                        commands += outcome.hostCommands.map { it.name }
+                    }
+                })
+                surface.takePageIncomingOnLane(page, "b", "a", false)
+                page.beginOnLane("b", "pair"); page.endOnLane("b", "pair")
+                // The retained move supplies the next normal result, before its own phase batch.
+                surface.takePageIncomingOnLane(page, "a", "b", false)
+                assertEquals(listOf("takeoff", "landing"), commands)
+                surface.takePageIncomingOnLane(page, "b", "a", false)
+                assertEquals(listOf("takeoff", "landing"), commands)
+            }
+        }
+    }
+
     @Test fun `ordinary layer frames avoid catalog queries and save frames still capture answers`() = runBlocking {
         withSurface { surface, layer, native, lane ->
             lane.call {

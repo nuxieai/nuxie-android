@@ -74,6 +74,18 @@ class ExperiencePageStepTest {
                 "begin:pair", "end:pair", "retire", "a:hidden,b:active:", "commit:false", "hidden", "active", "input:true"), trace.events)
         }
     }
+    @Test fun `primitive fade without a published id cuts with a null step name`() = runBlocking {
+        val fade = kotlinx.serialization.json.Json.parseToJsonElement("""{"type":"fade"}""") as kotlinx.serialization.json.JsonObject
+        val descriptor = kotlinx.serialization.json.Json.parseToJsonElement("""{"render":{"transitions":[]}}""") as kotlinx.serialization.json.JsonObject
+        val resolved = ExperienceScreenTransitionPlan.resolveLayer(fade, descriptor, "a", "b")
+        assertNull(resolved)
+        val trace = Trace()
+        perform(trace, Style.FADE, plan = resolved, exit = ExperiencePageStep.Exit(null, null))
+        assertTrue("begin:null" in trace.events); assertTrue("end:null" in trace.events)
+        assertFalse(trace.events.any { it.startsWith("wait:") })
+        assertTrue(org.robolectric.shadows.ShadowLog.getLogsForTag("ExperiencePageStep").any { it.msg.contains("fade has no transitionId") })
+    }
+
     @Test fun `self navigation has no step or phase change`() = runBlocking {
         val trace = Trace(); perform(trace, Style.MAGIC_MOVE, target = "a"); assertTrue(trace.events.isEmpty())
     }

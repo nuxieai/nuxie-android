@@ -71,6 +71,37 @@ class ExperienceInteractivePageTest {
         }
     }
 
+    @Test fun `three rows revisit and skipping Back reconcile before collapse at the new index`() = runBlocking {
+        withLayer { page, native ->
+            for (id in listOf("a", "b", "c")) page.insertIncoming(id, Style.NONE, false)
+            page.setCollapsed("a", true); page.setCollapsed("b", true)
+            native.trace.clear()
+            page.takeIncoming("a", "c", false)
+            assertEquals(listOf("b", "c", "a"), page.mountedScreenIds())
+            assertEquals(listOf("step:0.0", "collapse:2:false"), native.trace)
+            page.setCollapsed("c", true)
+            native.trace.clear()
+            page.takeIncoming("c", "a", true)
+            assertEquals(listOf("b", "c", "a"), page.mountedScreenIds())
+            assertEquals(listOf("collapse:1:false"), native.trace)
+            native.trace.clear()
+            page.takeIncoming("b", "a", true)
+            assertEquals(listOf("c", "b", "a"), page.mountedScreenIds())
+            assertEquals(listOf("step:0.0", "collapse:1:false"), native.trace)
+            page.retire(setOf("b", "c"), "b")
+            assertEquals(listOf("c", "b"), page.mountedScreenIds())
+            assertEquals(listOf("collapse:0:true", "remove"), native.trace.takeLast(2))
+            assertEquals(3, native.allocated)
+        }
+    }
+
+    @Test fun `a release without the fixed page artboard is refused`() = runBlocking {
+        val native = RecordingNative().apply { pageAvailable = false }
+        assertTrue(runCatching { withLayer(native) { _, _ -> fail("Missing page admitted") } }
+            .exceptionOrNull()?.message.orEmpty().contains("Page host artboard is unavailable"))
+        assertEquals(0, native.players)
+    }
+
     @Test fun `step begin refuses a collapsed incoming row before calling native`() = runBlocking {
         withLayer { page, native ->
             page.insertIncoming("a", Style.NONE, false)
@@ -300,8 +331,8 @@ class ExperienceInteractivePageTest {
         val file = NuxieRuntimeFile(1, native)
         val descriptor = Json.parseToJsonElement("""{"leg":{"screens":[
             {"id":"a","defaultViewModelName":"A","defaultInstanceId":"alias-a"},
-            {"id":"b","defaultViewModelName":"B","defaultInstanceId":"alias-b"}]},
-            "render":{"screens":[{"id":"a","artboardName":"A"},{"id":"b","artboardName":"B"}],"layerHost":{"artboardName":"LayerList","list":"screens"},"textInputs":[]}}""").jsonObject
+            {"id":"b","defaultViewModelName":"B","defaultInstanceId":"alias-b"},{"id":"c","defaultViewModelName":"C"}]},
+            "render":{"screens":[{"id":"a","artboardName":"A"},{"id":"b","artboardName":"B"},{"id":"c","artboardName":"C"}],"layerHost":{"artboardName":"LayerList","list":"screens"},"textInputs":[]}}""").jsonObject
         try {
             val shared = if (native.globals) lane.call { file.newAuthoredViewModel("Experience", 0) } else null
             try {
@@ -319,6 +350,7 @@ class ExperienceInteractivePageTest {
         var events = emptyArray<NativeRuntimeEvent>()
         private val pendingCommands = mutableListOf<NativeHostCommand>()
         var players = 0
+        var pageAvailable = true
         var kind = 1
         var failStep = false
         var failWrites = false
@@ -338,19 +370,21 @@ class ExperienceInteractivePageTest {
             NativeViewModelSchema(2,"B",5,4,0,0,-1,false),
             NativeViewModelSchema(3,"Screen",9,4,0,0,-1,false),
             NativeViewModelSchema(4,"env",13,2,0,0,-1,globals),
-            NativeViewModelSchema(5,"Experience",14,0,0,0,-1,false)), arrayOf(
+            NativeViewModelSchema(5,"Experience",14,0,0,0,-1,false),
+            NativeViewModelSchema(6,"C",15,4,0,0,-1,false)), arrayOf(
             prop(0,0,"screens",8), prop(1,0,"screen",9,3), prop(1,1,"fontScale",2), prop(1,2,"keptValue",2), prop(1,3,"experience",9,5),
             prop(2,0,"screen",9,3), prop(2,1,"fontScale",2), prop(2,2,"keptValue",2), prop(2,3,"experience",9,5),
             prop(3,0,"phase",5,labels=arrayOf("hidden","entering","active","exiting")), prop(3,1,"appearances",2),
             prop(3,2,"transition",1), prop(3,3,"exitReason",5,labels=arrayOf("none","dismissed","navigation")),
-            prop(4,0,"reduceMotion",3), prop(4,1,"fontScale",2)), emptyArray())
+            prop(4,0,"reduceMotion",3), prop(4,1,"fontScale",2),
+            prop(6,0,"screen",9,3), prop(6,1,"fontScale",2), prop(6,2,"keptValue",2), prop(6,3,"experience",9,5)), emptyArray())
         override fun viewModelCatalog(fileHandle: Long): NativeCallResult<NativeViewModelCatalog> {
             catalogQueries++
             return NativeCallResult(0, catalog)
         }
-        override fun newNamedArtboard(fileHandle: Long, name: String) = when (name) { "A" -> 21L; "B" -> 22L; else -> 2L }
+        override fun newNamedArtboard(fileHandle: Long, name: String) = when (name) { "A" -> 21L; "B" -> 22L; "C" -> 26L; else -> if (pageAvailable) 2L else 0L }
         override fun newDefaultViewModel(artboardHandle: Long): NativeCallResult<Long> {
-            val schema = when (artboardHandle) { 21L -> 1; 22L -> 2; else -> 0 }
+            val schema = when (artboardHandle) { 21L -> 1; 22L -> 2; 26L -> 6; else -> 0 }
             val id = if (schema == 0) 100L else 1000L + schema
             schemas[id] = schema
             return NativeCallResult(0, id)
@@ -375,7 +409,7 @@ class ExperienceInteractivePageTest {
         override fun playerKind(playerHandle: Long) = NativeCallResult(0,kind)
         override fun playerFocusState(playerHandle: Long) = NativeCallResult(0,NuxieFocusState(false,false))
         override fun newViewModel(fileHandle: Long, schemaIndex: Int, authoredInstanceIndex: Int?): NativeCallResult<Long> {
-            if (schemaIndex in 1..2) allocated++
+            if (schemaIndex in setOf(1, 2, 6)) allocated++
             val id = (schemaIndex + 1) * 100L; schemas[id] = schemaIndex
             return NativeCallResult(0,id)
         }

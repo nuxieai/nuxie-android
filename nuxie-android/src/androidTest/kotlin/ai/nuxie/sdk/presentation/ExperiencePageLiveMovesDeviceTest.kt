@@ -59,7 +59,7 @@ class ExperiencePageLiveMovesDeviceTest {
     }
 
     private suspend fun move(page: ExperienceInteractivePage, lane: NuxieRuntimeLane, source: String, target: String,
-        transition: String?, reachable: Set<String>) {
+        transition: String?, reachable: Set<String>, retireRows: Boolean = true) {
         page.prepare(target)
         val lifecycle = Json.parseToJsonElement(bytes("lifecycle2.json").decodeToString()).jsonObject
         val step = transition?.let { lifecycle.getValue("steps").jsonObject.getValue(it).jsonObject }
@@ -90,7 +90,7 @@ class ExperiencePageLiveMovesDeviceTest {
                     }
                     override suspend fun begin(transition: String?) { mutations += { it.beginOnLane(target, transition) } }
                     override suspend fun end(transition: String?) { mutations += { it.endOnLane(target, transition) } }
-                    override suspend fun retire() { mutations += { it.retireOnLane(reachable, target) } }
+                    override suspend fun retire() { if (retireRows) mutations += { it.retireOnLane(reachable, target) } }
                     override suspend fun present() = Unit
                     override suspend fun wait(completions: List<Deferred<Unit>>, milliseconds: Long) {
                         repeat((milliseconds * 60 / 1000).toInt()) {
@@ -131,6 +131,19 @@ class ExperiencePageLiveMovesDeviceTest {
             move(page, lane, "A", "B", "t1", setOf("A", "B"))
             move(page, lane, "B", "A", "back", setOf("A"))
             page.step(1.0 / 60)
+        }
+    }
+
+    @Test fun nativeListRemovalAfterLandingAllowsTheNextOrdinaryStep() = runBlocking {
+        withPage(2) { page, lane ->
+            move(page, lane, "A", "B", "t1", setOf("A", "B"))
+            move(page, lane, "B", "A", "back", setOf("A", "B"), retireRows = false)
+            lane.call {
+                // Isolate the native contract from actor removal and snapshot capture.
+                page.artboard.removeDefaultListItem("screens", 1)
+                page.player.stepTyped(elapsedSeconds = 1.0 / 60)
+                Unit
+            }
         }
     }
 

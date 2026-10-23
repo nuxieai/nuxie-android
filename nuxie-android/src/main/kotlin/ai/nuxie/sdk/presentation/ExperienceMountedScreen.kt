@@ -11,7 +11,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
-/** One mounted surface and overlays; layer-host releases retain their Screen rows here. */
+/** One mounted page surface and its retained Screen rows and overlays. */
 internal class ExperienceMountedScreen(
     private val activity: Activity,
     private var prepared: PreparedPresentation,
@@ -79,6 +79,10 @@ internal class ExperienceMountedScreen(
             override fun onRuntimeEvent(event: ai.nuxie.sdk.runtime.NuxieRuntimeEvent, viewModelSnapshot: NuxieViewModelSnapshot?) {
                 transitionEvents.receive(event.name)
                 listener.onRuntimeEvent(event, viewModelSnapshot)
+            }
+            override fun onRuntimeStep(outcome: ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome,
+                correlationId: ULong, viewModelSnapshot: NuxieViewModelSnapshot?, saves: List<ExperienceResponseSaveRequest>) {
+                activeListener.onRuntimeStep(outcome, correlationId, viewModelSnapshot, saves)
             }
             override fun onLayerRuntimeStep(screenId: String, outcome: ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome,
                 correlationId: ULong, snapshot: NuxieViewModelSnapshot, saves: List<ExperienceResponseSaveRequest>) {
@@ -274,7 +278,17 @@ internal class ExperienceMountedScreen(
     }
 
     /** The step controls rows; the Activity only transfers the presentation lease afterward. */
-    suspend fun navigateLayer(target: PreparedPresentation, isBack: Boolean) {
+    suspend fun cutCoveredPage(screenId: String, history: List<String>, listener: ExperienceSurfaceHost.Listener): PreparedPresentation {
+        val retained = checkNotNull(rows[screenId]).prepared
+        val target = retained.copy(transition = null, pageHistory = history, isBack = true,
+            isPushPage = prepared.isPushPage, opensLayer = prepared.opensLayer,
+            layerAncestors = prepared.layerAncestors, closeLayer = prepared.closeLayer)
+        prepareRow(target, listener)
+        navigateLayer(target, isBack = true, covered = true)
+        return target
+    }
+
+    suspend fun navigateLayer(target: PreparedPresentation, isBack: Boolean, covered: Boolean = false) {
         val sourceId = checkNotNull(prepared.screenId)
         val targetId = checkNotNull(target.screenId)
         val intent = target.transition?.let(ai.nuxie.sdk.experiences.ExperiencePageHostContract::intent)
@@ -286,9 +300,9 @@ internal class ExperienceMountedScreen(
         val mutations = mutableListOf<(ExperienceInteractivePage) -> Unit>()
         var collecting = false
         try {
-            ExperiencePageStep.perform(sourceId, targetId, style, isBack, plan, layerExit(prepared), reduceMotionEnabled,
+            ExperiencePageStep.perform(sourceId, targetId, style, isBack, plan, layerExit(prepared), reduceMotionEnabled || covered,
                 object : ExperiencePageStep.Operations {
-                    override fun input(enabled: Boolean) { setInputEnabled(enabled) }
+                    override fun input(enabled: Boolean) { setInputEnabled(enabled && !covered) }
                     override suspend fun prepare() = Unit
                     override suspend fun register(screenId: String, event: String): kotlinx.coroutines.Deferred<Unit> {
                         val waiter = kotlinx.coroutines.CompletableDeferred<Unit>()
@@ -313,7 +327,9 @@ internal class ExperienceMountedScreen(
                     }
                     override suspend fun takeIncoming() { mutations += { surface.takePageIncomingOnLane(it, targetId, sourceId, isBack) } }
                     override suspend fun phases(values: List<Pair<String, ExperienceScreenLifecycle.Phase>>, transition: String) {
-                        mutations += { it.setPhasesOnLane(values, transition) }
+                        mutations += { page -> page.setPhasesOnLane(if (covered) values.map { (id, phase) ->
+                            id to if (phase == ExperienceScreenLifecycle.Phase.ACTIVE) ExperienceScreenLifecycle.Phase.HIDDEN else phase
+                        } else values, transition) }
                     }
                     override suspend fun begin(transition: String?) { mutations += { it.beginOnLane(targetId, transition) } }
                     override suspend fun end(transition: String?) { mutations += { it.endOnLane(targetId, transition) } }
