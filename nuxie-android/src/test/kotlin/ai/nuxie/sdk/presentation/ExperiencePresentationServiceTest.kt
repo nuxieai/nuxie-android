@@ -47,6 +47,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
+import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -2719,7 +2721,7 @@ class ExperiencePresentationServiceTest {
         PresentationRegistry.attach(currentId!!, host(currentId!!))
         PresentationRegistry.reportFirstFrame(currentId!!)
         first.await()
-        val push = Json.parseToJsonElement("""{"type":"push","transitionId":"pair"}""").jsonObject
+        val push = Json.parseToJsonElement("""{"type":"fade","transitionId":"pair"}""").jsonObject
         val forward = async { show("screen_details", push) }
         runCurrent()
         val self = async { show("screen_details") }
@@ -2739,13 +2741,136 @@ class ExperiencePresentationServiceTest {
             "screen_details", "screen_welcome")!!
         assertFalse(resolved.incomingOnTop)
         assertEquals("back-leave", resolved.outgoingCompletionEvent)
+        assertEquals("pair.reverse", resolved.id)
         show("screen_details", push)
         assertTrue(checkNotNull(prepared.last().requestBack).invoke())
         runCurrent()
         assertEquals("screen_welcome", service.journeyScreenId(JourneyPresentationOwner("journey-1", "customer-1")))
         assertEquals("screen_welcome" to "screen_welcome", revealSources.last())
         assertTrue(prepared.last().isBack)
+        show("screen_details", push)
+        val legacy = Json.parseToJsonElement("""{"type":"none"}""").jsonObject
+        assertEquals(JourneyPresentationActionResult.Navigate("screen_welcome"), service.dispatchJourneyAction(
+            JourneyPresentationOwner("journey-1", "customer-1"), JsonObject(mapOf("type" to JsonPrimitive("back"), "transition" to legacy)), "legacy-back"))
+        show("screen_welcome")
+        assertEquals(legacy, prepared.last().transition)
         service.dismissFromHost("customer-1")
+    }
+
+    @Test fun pushOpensPageAndBackPopsRetainedLowerPage() = runTest {
+        val signed = renderedJourneyRelease("text-input-navigation.json")
+        val envelope = signed.javaClass.getDeclaredField("envelope").apply { isAccessible = true }.get(signed)
+            as ai.nuxie.sdk.experiences.JourneyReleaseEnvelope
+        val render = signed.descriptor.getValue("render").jsonObject
+        val release = AuthenticatedJourneyRelease(envelope, signed.identity,
+            JsonObject(signed.descriptor + ("render" to JsonObject(render + ("layerHost" to
+                Json.parseToJsonElement("""{"artboardName":"Ignored","list":"screens"}"""))))), null)
+        lateinit var service: ExperiencePresentationService
+        val pages = mutableListOf<String>()
+        val prepared = mutableListOf<PreparedPresentation>()
+        val hosts = mutableMapOf<String, PresentationScreenHandle>()
+        var acquisitions = 0
+        var windowPagesToClose = 1
+        val shownScreens = mutableListOf<String>()
+        fun host(id: String): PresentationScreenHandle = object : PresentationScreenHandle {
+            var reason: CloseReason? = null
+            override fun requestCloseFromService(reason: CloseReason): Boolean { this.reason = reason; return true }
+            override fun screenCloseReason() = reason
+            override fun finishAfterServiceClose() {
+                if (reason != CloseReason.JourneyNavigation) PresentationRegistry.detach(id, this)
+            }
+            override suspend fun dismissLayerFromJourney(): Boolean {
+                val content = checkNotNull(PresentationRegistry.resolve(id))
+                return checkNotNull(content.closeLayer).invoke(object : PreparedLayerReveal {
+                    override val pagesToClose = windowPagesToClose
+                    override suspend fun prepare() {
+                        repeat(pagesToClose) {
+                            val retired = pages.removeAt(pages.lastIndex)
+                            PresentationRegistry.detach(retired, hosts.getValue(retired))
+                        }
+                    }
+                    override fun activate() = Unit
+                })
+            }
+            override suspend fun prepareNavigation(target: String, content: PreparedPresentation): PreparedScreenNavigation {
+                prepared += content
+                return object : PreparedScreenNavigation {
+                    override suspend fun awaitExit() = Unit
+                    override fun activate() {
+                        val next = host(target); hosts[target] = next
+                        PresentationRegistry.attach(target, next)
+                        if (content.opensLayer) pages += target else {
+                            pages[pages.lastIndex] = target
+                            PresentationRegistry.detach(id, hosts.getValue(id))
+                        }
+                        PresentationRegistry.reportFirstFrame(target)
+                    }
+                    override suspend fun abort() = Unit
+                }
+            }
+        }
+        service = service(this, launch = { id ->
+            val next = host(id); hosts[id] = next; pages += id
+            PresentationRegistry.attach(id, next); PresentationRegistry.reportFirstFrame(id)
+        })
+        suspend fun boundary(label: String, action: suspend () -> Unit) {
+            try { kotlinx.coroutines.withTimeout(2_000) { action() } }
+            catch (error: Throwable) { throw AssertionError("Page host stalled during $label", error) }
+        }
+        suspend fun show(screen: String, transition: JsonObject? = null) = boundary("show $screen $transition") {
+            val initial = pages.isEmpty()
+            val presentation = async {
+                service.presentJourney(testPresentationFences(), release, screen, "journey-1", "customer-1",
+                    if (initial) service.reserveJourney("customer-1") else null,
+                    acquire = { acquisitions++; acquired(release.identity, Lease()) }, onOutcome = {}, transition = transition,
+                    onScreenChanged = { shownScreens += it; true })
+            }
+            runCurrent()
+            // The acquisition shell's frame cannot reveal content that is not ready yet.
+            if (initial) PresentationRegistry.reportFirstFrame(pages.single())
+            presentation.await()
+        }
+        show("screen_welcome")
+        show("screen_details")
+        val lower = pages.single()
+        val lowerHost = hosts.getValue(lower)
+        val lowerContent = checkNotNull(PresentationRegistry.resolve(lower))
+        show("screen_welcome", Json.parseToJsonElement("""{"type":"push"}""").jsonObject)
+        assertEquals(listOf(listOf("screen_welcome", "screen_details"), listOf("screen_welcome")), service.layerScreenIds())
+        assertTrue(prepared.last().opensLayer); assertTrue(prepared.last().isPushPage)
+        assertEquals(listOf("screen_welcome"), prepared.last().pageHistory)
+        assertNotSame(lowerContent.screenLifecycle, prepared.last().screenLifecycle)
+        show("screen_details")
+        assertTrue(prepared.last().isPushPage)
+        assertFalse(prepared.last().opensLayer)
+        assertEquals(listOf("screen_welcome", "screen_details"), prepared.last().pageHistory)
+        val before = acquisitions
+        val owner = JourneyPresentationOwner("journey-1", "customer-1")
+        assertEquals(JourneyPresentationActionResult.Navigate("screen_details"), service.dispatchJourneyAction(owner,
+            Json.parseToJsonElement("""{"type":"back","steps":2}""").jsonObject, "back-page"))
+        show("screen_details")
+        assertEquals(before, acquisitions)
+        assertEquals(listOf(lower), pages)
+        assertSame(lowerHost, PresentationRegistry.currentScreen(lower))
+        assertSame(lowerContent, PresentationRegistry.resolve(lower))
+        assertEquals(listOf(listOf("screen_welcome", "screen_details")), service.layerScreenIds())
+        show("screen_welcome")
+        assertEquals(listOf("screen_welcome", "screen_details", "screen_welcome"), prepared.last().pageHistory)
+        val retainedRoot = pages.single()
+        show("screen_details", Json.parseToJsonElement("""{"type":"modal"}""").jsonObject)
+        show("screen_welcome", Json.parseToJsonElement("""{"type":"push"}""").jsonObject)
+        assertEquals(3, pages.size)
+        windowPagesToClose = 2
+        shownScreens.clear()
+        boundary("native sheet closes its pushed pages") {
+            assertTrue(hosts.getValue(pages.last()).dismissLayerFromJourney())
+        }
+        assertEquals(listOf(retainedRoot), pages)
+        assertEquals(listOf("screen_welcome"), shownScreens)
+        assertEquals(listOf(listOf("screen_welcome", "screen_details", "screen_welcome")), service.layerScreenIds())
+        windowPagesToClose = 1
+        boundary("terminal dismissal") { service.dismissFromHost("customer-1") }
+        pages.forEach { id -> PresentationRegistry.detach(id, hosts.getValue(id)) }
     }
 
     private fun service(

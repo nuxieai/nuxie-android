@@ -2451,6 +2451,65 @@ static jfloatArray new_float_values(JNIEnv *env, const float *values, jsize coun
   return result;
 }
 
+/* A null Java step name is a null NuxStringView pointer, not an empty name. */
+static jint player_live_step(JNIEnv *env, jlong player, jbyteArray incoming,
+                             jbyteArray step, int ending) {
+  if (incoming == NULL) return NUX_STATUS_NULL_ARGUMENT;
+  jsize incoming_length = (*env)->GetArrayLength(env, incoming);
+  jsize step_length = step == NULL ? 0 : (*env)->GetArrayLength(env, step);
+  if (incoming_length > 4096 || step_length > 4096) return NUX_STATUS_LIMIT_EXCEEDED;
+  jbyte *incoming_bytes = (*env)->GetByteArrayElements(env, incoming, NULL);
+  if (incoming_bytes == NULL) return NUX_STATUS_RUNTIME_ERROR;
+  jbyte *step_bytes = NULL;
+  if (step != NULL) {
+    step_bytes = (*env)->GetByteArrayElements(env, step, NULL);
+    if (step_bytes == NULL) {
+      (*env)->ReleaseByteArrayElements(env, incoming, incoming_bytes, JNI_ABORT);
+      return NUX_STATUS_RUNTIME_ERROR;
+    }
+  }
+  struct NuxStringView screen = {(const char *)incoming_bytes, (size_t)incoming_length};
+  struct NuxStringView name = {(const char *)step_bytes, (size_t)step_length};
+  const struct NuxStringView *optional_name = step == NULL ? NULL : &name;
+  NuxStatus status = ending
+      ? nux_player_step_end((struct NuxPlayer *)from_handle(player), screen, optional_name)
+      : nux_player_step_begin((struct NuxPlayer *)from_handle(player), screen, optional_name);
+  if (step_bytes != NULL) (*env)->ReleaseByteArrayElements(env, step, step_bytes, JNI_ABORT);
+  (*env)->ReleaseByteArrayElements(env, incoming, incoming_bytes, JNI_ABORT);
+  return (jint)status;
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepBegin(
+    JNIEnv *env, jobject self, jlong player, jbyteArray incoming, jbyteArray step) {
+  (void)self;
+  return player_live_step(env, player, incoming, step, 0);
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerStepEnd(
+    JNIEnv *env, jobject self, jlong player, jbyteArray incoming, jbyteArray step) {
+  (void)self;
+  return player_live_step(env, player, incoming, step, 1);
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerSetRowCollapsed(
+    JNIEnv *env, jobject self, jlong player, jbyteArray list, jint index, jboolean collapsed) {
+  (void)self;
+  if (list == NULL) return NUX_STATUS_NULL_ARGUMENT;
+  if (index < 0) return NUX_STATUS_INVALID_ARGUMENT;
+  jsize length = (*env)->GetArrayLength(env, list);
+  if (length > 4096) return NUX_STATUS_LIMIT_EXCEEDED;
+  jbyte *bytes = (*env)->GetByteArrayElements(env, list, NULL);
+  if (bytes == NULL) return NUX_STATUS_RUNTIME_ERROR;
+  struct NuxStringView name = {(const char *)bytes, (size_t)length};
+  NuxStatus status = nux_player_set_row_collapsed((struct NuxPlayer *)from_handle(player),
+      name, (uint32_t)index, collapsed ? 1 : 0);
+  (*env)->ReleaseByteArrayElements(env, list, bytes, JNI_ABORT);
+  return (jint)status;
+}
+
 JNIEXPORT jint JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerGlobalViewModelSet(
     JNIEnv *env, jobject self, jlong player, jbyteArray name, jlong view_model) {

@@ -1,6 +1,6 @@
 package ai.nuxie.sdk.presentation
 
-import ai.nuxie.sdk.experiences.ExperienceLayerHostContract
+import ai.nuxie.sdk.experiences.ExperiencePageHostContract
 import ai.nuxie.sdk.experiences.JourneyReleaseValuePolicy
 import ai.nuxie.sdk.runtime.NuxieFocusInput
 import ai.nuxie.sdk.runtime.NuxieFocusState
@@ -120,12 +120,12 @@ internal class ExperienceSurfaceHost(
     private var renderer: NuxieAndroidVulkanRenderer? = null
     private var window: NuxieRuntimeWindow? = null
     private var player: NuxieRuntimePlayer? = null
-    private var interactiveLayer: ExperienceInteractiveLayer? = null
+    private var interactiveLayer: ExperienceInteractivePage? = null
     private var activeRowId: String? = null
     private val layerRetainedValues = mutableMapOf<String, java.util.concurrent.atomic.AtomicReference<NuxieViewModelSnapshot?>>()
 
     /** Native mutations wait until this surface has delivered its submitted revision. */
-    internal suspend fun <T> layerOperation(work: (ExperienceInteractiveLayer) -> T): T {
+    internal suspend fun <T> layerOperation(work: (ExperienceInteractivePage) -> T): T {
         val completion = CompletableDeferred<T>()
         val accepted = lane.enqueue {
             pendingTextWrites.addLast {
@@ -159,7 +159,7 @@ internal class ExperienceSurfaceHost(
             lifecycle = prepared.screenLifecycle)
         layerRetainedValues[id] = prepared.retainedViewModel
         layer.applyRuntimeValuesOnLane(id, runtimeValues.filterKeys {
-            it == "fontScale" || it == "env/reduceMotion" || it.startsWith("safeArea/")
+            it == "env/fontScale" || it == "env/reduceMotion" || it.startsWith("safeArea/")
         } + prepared.commerceValues.get())
     }
 
@@ -170,7 +170,7 @@ internal class ExperienceSurfaceHost(
     }
 
     internal suspend fun applyLayerTransition(presentationTimeoutMs: Long = 250,
-        work: (ExperienceInteractiveLayer) -> Unit): Boolean {
+        work: (ExperienceInteractivePage) -> Unit): Boolean {
         val completion = CompletableDeferred<Unit>()
         val accepted = lane.enqueue {
             if (released.get() || failureReported.get()) completion.cancel()
@@ -209,11 +209,15 @@ internal class ExperienceSurfaceHost(
         }
     }
 
-    internal suspend fun restoreLayerRow(sourceId: String, targetId: String) = layerOperation { layer ->
+    internal suspend fun restoreLayerRow(sourceId: String, targetId: String, keepTarget: Boolean = false) = layerOperation { layer ->
         if (sourceId != targetId) {
+            layer.cancelStepOnLane(sourceId)
             val targetMounted = targetId in layer.mountedScreenIdsOnLane()
-            if (targetMounted) captureLayerStep(layer.removeOnLane(targetId, nextCorrelationId++))
-            if (sourceId !in layer.mountedScreenIdsOnLane()) layer.insertOnLane(sourceId, 0)
+            if (targetMounted) {
+                if (keepTarget) layer.setCollapsedOnLane(targetId, true)
+                else layer.removeOnLane(targetId)
+            }
+            layer.takeIncomingOnLane(sourceId)
             // Cancelled preparation may not have created the target row.
             layer.setPhasesOnLane(listOfNotNull((targetId to ExperienceScreenLifecycle.Phase.HIDDEN).takeIf { targetMounted },
                 sourceId to ExperienceScreenLifecycle.Phase.ACTIVE))
@@ -649,13 +653,13 @@ internal class ExperienceSurfaceHost(
         val boundArtboard = artboard ?: return emptySet()
         interactiveLayer?.let { layer ->
             val accepted = mutableSetOf<String>()
-            val common = values.filterKeys { it == "fontScale" || it == "env/reduceMotion" || it.startsWith("safeArea/") }
+            val common = values.filterKeys { it == "env/fontScale" || it == "env/reduceMotion" || it.startsWith("safeArea/") }
             val rowValues = values - common.keys
             for (id in layerRetainedValues.keys) {
                 accepted += layer.applyRuntimeValuesOnLane(id, common)
             }
             activeRowId?.let { accepted += layer.applyRuntimeValuesOnLane(it, rowValues) }
-            runtimeValues.keys.retainAll { it == "fontScale" || it == "env/reduceMotion" || it.startsWith("safeArea/") }
+            runtimeValues.keys.retainAll { it == "env/fontScale" || it == "env/reduceMotion" || it.startsWith("safeArea/") }
             return accepted
         }
         val accepted = mutableSetOf<String>()
@@ -742,6 +746,7 @@ internal class ExperienceSurfaceHost(
         textInputs: List<ExperienceTextInput> = emptyList(),
         retainedViewModel: java.util.concurrent.atomic.AtomicReference<NuxieViewModelSnapshot?>? = null,
         layerScreen: PreparedPresentation? = null,
+        enteringPage: Boolean = true,
         onLoaded: ((Boolean) -> Unit)? = null,
     ) {
         refreshColorScheme(resources.configuration.uiMode)
@@ -850,21 +855,21 @@ internal class ExperienceSurfaceHost(
             if (layerScreen != null) {
                 try {
                     requireLayerPresentation(layerScreen.fitsContentHeight)
-                    val layer = ExperienceInteractiveLayer.openOnLane(lane, runtime, loadedFile,
+                    val layer = ExperienceInteractivePage.openOnLane(lane, runtime, loadedFile,
                         checkNotNull(descriptor), shared?.values)
                     interactiveLayer = layer
                     artboard = layer.artboard
                     player = layer.player
+                    environment = layer.environment
+                    environmentBindings = ExperienceEnvironmentBindings(loadedFile.viewModelCatalog())
+                    applyColorScheme()
                     val id = checkNotNull(layerScreen.screenId)
                     layer.prepareOnLane(id, projection = viewModelProjection, snapshot = layerScreen.retainedViewModel.get(),
                         lifecycle = layerScreen.screenLifecycle)
                     layerRetainedValues[id] = layerScreen.retainedViewModel
                     activeRowId = id
                     viewModelState = layer.valuesOnLane(id)
-                    layer.insertOnLane(id, 0)
-                    if (layerScreen.screenLifecycle.phase == ExperienceScreenLifecycle.Phase.HIDDEN)
-                        layer.setPhasesOnLane(listOf(id to ExperienceScreenLifecycle.Phase.ENTERING))
-                    else layer.applyLifecycleOnLane(id)
+                    layer.mountInitialOnLane(id, enteringPage)
                     completeRuntimeWrites(applyRuntimeValues(runtimeValues))
                     if (semanticsEnabled) layer.player.enableSemantics()
                     if (videoBindings.isNotEmpty()) {
@@ -1262,7 +1267,7 @@ internal class ExperienceSurfaceHost(
             lane.enqueue { pointerInput.reset() }
         }
         if (!enabled) {
-            if (interactiveLayer != null) retireSemantics(preserveFocus = true) else accessibility.withdraw()
+            accessibility.withdraw()
         } else accessibility.invalidateState()
     }
 
@@ -1352,7 +1357,8 @@ internal class ExperienceSurfaceHost(
         val layout = surfaceLayout ?: return false
         if (appliedLayout == layout) return true
         return try {
-            presentationHeight.apply(checkNotNull(file), active, fitsContentHeight, layout.widthPoints, layout.heightPoints)
+            if (interactiveLayer != null) active.setLayoutSize(layout.widthPoints, layout.heightPoints)
+            else presentationHeight.apply(checkNotNull(file), active, fitsContentHeight, layout.widthPoints, layout.heightPoints)
             appliedLayout = layout
             layoutStepPending = true
             true
@@ -1865,7 +1871,7 @@ internal class ExperienceSurfaceHost(
     }
 
     /** Keep the complete step, even when a removed row requested the advance. */
-    private fun captureLayerStep(step: ExperienceInteractiveLayer.Step) {
+    private fun captureLayerStep(step: ExperienceInteractivePage.Step) {
         for ((id, row) in step.rows) {
             layerRetainedValues[id]?.set(row.snapshot.withoutRootProperty("experience"))
             val saves = saveDescriptor?.takeIf {
@@ -1906,8 +1912,7 @@ internal class ExperienceSurfaceHost(
 
     internal companion object {
         internal fun requireLayerPresentation(fitContent: Boolean) {
-            if (fitContent) Log.w(LOG_TAG, "Layer host refuses fit-content: runtime cannot measure the active Screen row")
-            require(!fitContent) { "Layer host cannot measure the active Screen row for fit-content presentation" }
+            if (fitContent) Log.w(LOG_TAG, "Page content height is unavailable; fit-content uses the large sheet height")
         }
 
         const val LOG_TAG = "Nuxie"

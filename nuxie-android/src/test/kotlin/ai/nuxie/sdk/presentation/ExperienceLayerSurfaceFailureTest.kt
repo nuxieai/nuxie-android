@@ -14,14 +14,14 @@ import org.robolectric.RuntimeEnvironment
 @RunWith(RobolectricTestRunner::class)
 @OptIn(ExperimentalCoroutinesApi::class)
 class ExperienceLayerSurfaceFailureTest {
-    private suspend fun withSurface(globals: Boolean = false, prepareTarget: Boolean = true, body: suspend (ExperienceSurfaceHost, ExperienceInteractiveLayer,
-        ExperienceInteractiveLayerTest.RecordingNative, NuxieRuntimeLane) -> Unit) {
-        val native = ExperienceInteractiveLayerTest.RecordingNative().apply { this.globals = globals }
+    private suspend fun withSurface(globals: Boolean = false, prepareTarget: Boolean = true, body: suspend (ExperienceSurfaceHost, ExperienceInteractivePage,
+        ExperienceInteractivePageTest.RecordingNative, NuxieRuntimeLane) -> Unit) {
+        val native = ExperienceInteractivePageTest.RecordingNative().apply { this.globals = globals }
         val lane = NuxieRuntimeLane()
         val file = NuxieRuntimeFile(1, native)
         val descriptor = Json.parseToJsonElement("""{"leg":{"screens":[{"id":"a","defaultViewModelName":"A"},
-            {"id":"b","defaultViewModelName":"B"}]},"render":{"layerHost":{"artboardName":"LayerList","list":"screens"}}}""").jsonObject
-        val layer = ExperienceInteractiveLayer.open(lane, NuxieRuntime(native), file, descriptor, null)
+            {"id":"b","defaultViewModelName":"B"}]},"render":{"screens":[{"id":"a","artboardName":"A"},{"id":"b","artboardName":"B"}],"layerHost":{"artboardName":"LayerList","list":"screens"}}}""").jsonObject
+        val layer = ExperienceInteractivePage.open(lane, NuxieRuntime(native), file, descriptor, null)
         val surface = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native), usesSystemFrameCallbacks = false)
         try {
             lane.call {
@@ -47,7 +47,7 @@ class ExperienceLayerSurfaceFailureTest {
                 layer.insertOnLane("b", 1)
                 val ordinary = NuxiePlayerStepOutcome(false, emptyList(), emptyList(), emptyList(), emptyList())
                 val step = layer.captureOnLane(ordinary, 1u)
-                val capture = surface.javaClass.getDeclaredMethod("captureLayerStep", ExperienceInteractiveLayer.Step::class.java)
+                val capture = surface.javaClass.getDeclaredMethod("captureLayerStep", ExperienceInteractivePage.Step::class.java)
                     .apply { isAccessible = true }
                 native.catalogQueries = 0
                 repeat(60) { capture.invoke(surface, step) }
@@ -128,8 +128,11 @@ class ExperienceLayerSurfaceFailureTest {
             if (running) lane.call {
                 runCatching { surface.javaClass.getDeclaredMethod("applyNextTransitionWrite").apply { isAccessible = true }.invoke(surface) }
             }
-            lane.call {}; runCurrent()
-            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            // Native failure cleanup crosses the lane, coroutine dispatcher and UI queue.
+            repeat(4) {
+                lane.call {}; runCurrent()
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            }
             try {
                 assertTrue("Mutation failures must finish the removed write", write.isCompleted)
                 assertTrue(write.await().exceptionOrNull() is NuxieRuntimeCallException)
@@ -190,7 +193,7 @@ class ExperienceLayerSurfaceFailureTest {
             val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
             val scene = java.io.File.createTempFile("layer-watchdog", ".riv").apply { writeBytes(byteArrayOf(1)) }
             val descriptor = Json.parseToJsonElement("""{"leg":{"screens":[{"id":"a","defaultViewModelName":"A"},
-                {"id":"b","defaultViewModelName":"B"}]},"render":{"layerHost":{"artboardName":"LayerList","list":"screens"},
+                {"id":"b","defaultViewModelName":"B"}]},"render":{"screens":[{"id":"a","artboardName":"A"},{"id":"b","artboardName":"B"}],"layerHost":{"artboardName":"LayerList","list":"screens"},
                 "transitions":[{"id":"pair","kind":"layer","sourceScreenId":"a","destinationScreenId":"b","durationMs":100,
                 "incomingOnTop":true,"source":{"completeEventName":"leave"},"destination":{"completeEventName":"arrive"}}]}}""").jsonObject
             val source = PreparedPresentation(scene, "A", 0, PresentationShell.FullScreen(), "a", descriptor)
@@ -218,11 +221,48 @@ class ExperienceLayerSurfaceFailureTest {
                 navigation.await()
                 assertEquals(listOf("b"), layer.mountedScreenIds())
                 assertTrue(surface.isEnabled)
-                assertEquals(1, org.robolectric.shadows.ShadowLog.getLogsForTag("ExperienceLayerStep").count {
+                assertEquals(1, org.robolectric.shadows.ShadowLog.getLogsForTag("ExperiencePageStep").count {
                     it.msg.contains("presentation watchdog expired")
                 })
             } finally {
                 navigation?.cancelAndJoin()
+                mounted.close(false) {}
+                assertTrue(ownedLane.awaitQuiescence(5_000))
+                activity.pause().stop().destroy(); scene.delete()
+            }
+        }
+    }
+
+    @Test fun `cut swap keeps the incoming completion waiter alive until its arrival`() = runBlocking {
+        withSurface { surface, page, native, _ ->
+            val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
+            val scene = java.io.File.createTempFile("page-cut-waiter", ".riv").apply { writeBytes(byteArrayOf(1)) }
+            val baseline = field(page, "descriptor") as JsonObject
+            val render = baseline.getValue("render").jsonObject
+            val descriptor = JsonObject(baseline + ("render" to JsonObject(render + ("transitions" to
+                Json.parseToJsonElement("""[{"id":"pair","kind":"page","sourceScreenId":"a","destinationScreenId":"b",
+                    "durationMs":100,"source":{"completeEventName":"leave"},"destination":{"completeEventName":"arrive"}}]""")))))
+            val source = PreparedPresentation(scene, "A", 0, PresentationShell.FullScreen(), "a", descriptor,
+                pageHistory = listOf("a"))
+            val target = source.copy(screenId = "b", artboardName = "B", pageHistory = listOf("a", "b"),
+                transition = Json.parseToJsonElement("""{"type":"none","transitionId":"pair"}""").jsonObject)
+            val listener = object : ExperienceSurfaceHost.Listener {
+                override fun onFirstFrame() = Unit
+                override fun onFailure(error: ExperiencePresentationException) { throw AssertionError(error) }
+            }
+            val mounted = ExperienceMountedScreen(activity.get(), source, listener, { throw AssertionError(it) })
+            val ownedLane = field(mounted, "lane") as NuxieRuntimeLane
+            set(mounted, "surface", surface)
+            try {
+                mounted.prepareRow(target, listener)
+                native.events = arrayOf(
+                    NativeRuntimeEvent(0, 0, "leave", "", "", 0f, emptyArray(), 200),
+                    NativeRuntimeEvent(0, 0, "arrive", "", "", 0f, emptyArray(), 300))
+                withTimeout(5_000) { mounted.navigateLayer(target, false) }
+                assertEquals(listOf("a", "b"), page.mountedScreenIds())
+                assertTrue(page.isCollapsed("a"))
+                assertEquals(NuxieViewModelScalarValue.StringValue("active"), page.lifecycle("b")["screen/phase"])
+            } finally {
                 mounted.close(false) {}
                 assertTrue(ownedLane.awaitQuiescence(5_000))
                 activity.pause().stop().destroy(); scene.delete()
@@ -365,7 +405,7 @@ class ExperienceLayerSurfaceFailureTest {
     }
 
     private suspend fun installPendingSubmission(surface: ExperienceSurfaceHost,
-        native: ExperienceInteractiveLayerTest.RecordingNative, lane: NuxieRuntimeLane) {
+        native: ExperienceInteractivePageTest.RecordingNative, lane: NuxieRuntimeLane) {
         lane.call {
             val renderer = NuxieAndroidVulkanRenderer(900, native)
             val window = NuxieRuntimeWindow(901, native)

@@ -18,7 +18,7 @@ internal class ExperienceScreenViewTransition(
 
     suspend fun play(visible: Boolean = true) {
         check(animator == null && !completion.isCompleted)
-        target.bringToFront()
+        if (kind != ExperienceScreenTransitionPlan.Kind.POP) target.bringToFront()
         applyProgress(0f)
         val animation = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = 300
@@ -71,6 +71,13 @@ internal class ExperienceScreenViewTransition(
                 val direction = if (target.layoutDirection == View.LAYOUT_DIRECTION_RTL) -1 else 1
                 source.translationX = -direction * source.width * fraction
                 target.translationX = direction * target.width * (1f - fraction)
+            }
+            ExperienceScreenTransitionPlan.Kind.POP -> {
+                target.alpha = 1f
+                source.alpha = 1f
+                val direction = if (target.layoutDirection == View.LAYOUT_DIRECTION_RTL) -1 else 1
+                source.translationX = direction * source.width * fraction
+                target.translationX = -direction * target.width * (1f - fraction)
             }
             ExperienceScreenTransitionPlan.Kind.MODAL -> {
                 target.alpha = 1f

@@ -63,6 +63,11 @@ internal data class ExperienceTextInput(
     }
 
     companion object {
+        fun forPage(descriptor: JsonObject?): List<ExperienceTextInput> {
+            val screens = ((descriptor?.get("render") as? JsonObject)?.get("screens") as? JsonArray).orEmpty()
+            return screens.flatMap { forScreen(descriptor, (it as JsonObject).text("id")) }.distinctBy { it.id }
+        }
+
         /** Schema validation precedes this projection; ambiguous IDs are never activated. */
         fun forScreen(descriptor: JsonObject?, screenId: String?): List<ExperienceTextInput> {
             val render = descriptor?.get("render") as? JsonObject ?: return emptyList()

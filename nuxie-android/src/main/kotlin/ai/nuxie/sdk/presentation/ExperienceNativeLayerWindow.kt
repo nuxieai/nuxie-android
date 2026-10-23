@@ -33,6 +33,8 @@ internal class ExperienceNativeLayerWindow(
     private var heightReady = !shell.fitsContent
     private var measuredHeight: Float? = null
     private var showRequested = false
+    private var presentationCompletion: (() -> Unit)? = null
+    private var presented = false
     private var retired = false
     private var inputEnabled = false
     private var backHandler: (() -> Unit)? = null
@@ -111,6 +113,16 @@ internal class ExperienceNativeLayerWindow(
         clipToOutline = true
     }
 
+    fun whenPresented(completion: () -> Unit) {
+        if (presented) completion() else presentationCompletion = completion
+    }
+
+    private fun finishPresentation() {
+        if (retired || presented) return
+        presented = true
+        presentationCompletion?.also { presentationCompletion = null }?.invoke()
+    }
+
     fun show() {
         showRequested = true
         if (retired || !heightReady) return
@@ -118,7 +130,27 @@ internal class ExperienceNativeLayerWindow(
         (dialog as? BottomSheetDialog)?.findViewById<View>(com.google.android.material.R.id.coordinator)
             ?.addOnLayoutChangeListener(layoutListener)
         updateBounds()
-        (dialog as? BottomSheetDialog)?.behavior?.state = BottomSheetBehavior.STATE_EXPANDED
+        val sheet = dialog as? BottomSheetDialog
+        if (sheet == null) content.post { finishPresentation() }
+        else {
+            val callback = object : BottomSheetBehavior.BottomSheetCallback() {
+                override fun onSlide(bottomSheet: View, slideOffset: Float) = Unit
+                override fun onStateChanged(bottomSheet: View, newState: Int) {
+                    if (newState == BottomSheetBehavior.STATE_EXPANDED) {
+                        sheet.behavior.removeBottomSheetCallback(this)
+                        finishPresentation()
+                    }
+                }
+            }
+            sheet.behavior.addBottomSheetCallback(callback)
+            sheet.behavior.state = BottomSheetBehavior.STATE_EXPANDED
+            content.post {
+                if (sheet.behavior.state == BottomSheetBehavior.STATE_EXPANDED) {
+                    sheet.behavior.removeBottomSheetCallback(callback)
+                    finishPresentation()
+                }
+            }
+        }
     }
 
     private fun updateBounds() {
@@ -277,6 +309,7 @@ internal class ExperienceNativeLayerWindow(
 
     fun retire() {
         retired = true
+        presentationCompletion = null
         if (android.os.Build.VERSION.SDK_INT >= 33) backCallback?.let { dialog.onBackInvokedDispatcher.unregisterOnBackInvokedCallback(it) }
         backCallback = null
         backPressedCallback?.remove()

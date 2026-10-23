@@ -84,6 +84,22 @@ class ExperienceNativeTextInputOverlayTest {
         assertTrue(overlay.semanticViews().isEmpty())
     }
 
+    @Test fun `page step preserves editor identity and focus while fencing native edits`() = withOverlay { overlay, writes, _ ->
+        overlay.updateNativeFields(listOf(field(10, "kept", ownerId = 123)))
+        val original = editor(overlay, 10)
+        assertTrue(original.requestFocus())
+        overlay.setInputEnabled(false, preserveFocus = true)
+        assertSame(original, editor(overlay, 10))
+        assertTrue(original.hasFocus())
+        assertEquals(View.VISIBLE, original.visibility)
+        assertTrue(writes.isEmpty())
+        overlay.setInputEnabled(true, preserveFocus = true)
+        overlay.updateNativeFields(listOf(field(10, "kept", ownerId = 123, captureId = 2)))
+        assertSame(original, editor(overlay, 10))
+        original.setText("after landing")
+        assertEquals("after landing", writes.single().write.text)
+    }
+
     private fun withOverlay(block: (ExperienceTextInputOverlay, MutableList<Pending>, MutableList<Pair<Long, String>>) -> Unit) {
         val controller = Robolectric.buildActivity(Activity::class.java).setup()
         val writes = mutableListOf<Pending>()
