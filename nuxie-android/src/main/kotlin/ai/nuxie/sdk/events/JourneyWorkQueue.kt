@@ -76,7 +76,9 @@ internal class JourneyWorkQueue(
                 val work = entries[index]
                 val obstructed = blocked.any { earlier ->
                     earlier.distinctId == work.distinctId &&
-                        ((earlier.runId == null && !work.repairsCustomer) ||
+                        // An unexpanded event holds admission order. Independent
+                        // work (such as reconciliation) holds only its own key.
+                        ((earlier.kind == JourneyWork.Kind.EVENT && earlier.runId == null && !work.repairsCustomer) ||
                             (work.runId != null && earlier.runId == work.runId))
                 }
                 if (work.waiting || obstructed) {

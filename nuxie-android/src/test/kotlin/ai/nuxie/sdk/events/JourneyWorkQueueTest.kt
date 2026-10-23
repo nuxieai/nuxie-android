@@ -15,6 +15,53 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class JourneyWorkQueueTest {
+    @Test fun failedReconciliationDoesNotObstructAdmissionChecksOrCompletedRouteCleanup() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val clock = AtomicLong(0L)
+        val retry = CompletableDeferred<Unit>()
+        val tick = CompletableDeferred<Unit>()
+        val queue = JourneyWorkQueue(scope, { tick.complete(Unit) }, { retry.await() }, clock::get)
+        val observed = mutableListOf<String>()
+        var recovered = false
+        try {
+            queue.add(JourneyWork("reconcile:customer", "customer", repairsCustomer = true) {
+                observed += "reconcile"
+                if (!recovered) JourneyWork.Result.Retry else JourneyWork.Result.Done()
+            })
+            queue.drain()
+            queue.add(JourneyWork("event:start", "customer", kind = JourneyWork.Kind.EVENT) {
+                observed += "admission"
+                if (!recovered) JourneyWork.Result.Retry else JourneyWork.Result.Done()
+            })
+            queue.drain()
+            assertEquals(listOf("reconcile", "admission"), observed)
+
+            // A profile publication can recover the journal before the repair's retry tick.
+            recovered = true
+            queue.add(JourneyWork("event:report", "customer", kind = JourneyWork.Kind.EVENT) {
+                observed += "report acknowledged"
+                JourneyWork.Result.Done()
+            })
+            clock.set(1_000L); retry.complete(Unit)
+            withTimeout(1_000L) { tick.await() }; queue.retryReady(); queue.drain()
+            assertEquals(listOf("reconcile", "admission", "reconcile", "admission", "report acknowledged"), observed)
+
+            // A still-deferred independent repair cannot hold an already deliverable route.
+            var deferredAttempts = 0
+            queue.add(JourneyWork("reconcile:deferred", "customer", repairsCustomer = true, initiallyDeferred = true) {
+                deferredAttempts++
+                JourneyWork.Result.Done()
+            })
+            queue.add(JourneyWork("event:completed", "customer", kind = JourneyWork.Kind.EVENT) {
+                observed += "completed acknowledged"
+                JourneyWork.Result.Done()
+            })
+            queue.drain()
+            assertEquals("completed acknowledged", observed.last())
+            assertEquals("The repair must retain its backoff", 0, deferredAttempts)
+        } finally { queue.close(); scope.cancel() }
+    }
+
     @Test fun failedWorkKeepsItsPositionAndBackoffWhileUnrelatedRunsAndCustomersProgress() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         val clock = AtomicLong(0L)

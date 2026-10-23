@@ -441,6 +441,8 @@ class JourneyServiceTest {
             core.journeys.initialize()
             core.journeys.onAppWillEnterForeground()
             core.journeys.profileDidCommit(snapshot, authority, owner, 1)
+            // State admission completes through the ordered Journey queue.
+            core.eventLog.awaitBarrier()
             assertTrue(core.store.hasEvent(JourneyEventNames.LEG_COMPLETED, owner))
         } finally { core.stopAndAwait() }
     }

@@ -381,6 +381,60 @@ class JourneyRefetchEventHoldTest {
         } finally { releaseRetry.complete(Unit) }
     }
 
+    @Test fun `deadline wakes enqueue ahead of later captures while the Journey worker is busy`() = runBlocking {
+        val sleeper = WakeSleeper()
+        val blockPreparation = java.util.concurrent.atomic.AtomicBoolean(false)
+        val preparing = CompletableDeferred<Unit>()
+        val releasePreparation = CompletableDeferred<Unit>()
+        val queued = CopyOnWriteArrayList<Long>()
+        val observed = CopyOnWriteArrayList<String>()
+        lateinit var launch: Launch
+        launch = Launch("customer", sleep = sleeper::sleep, prepare = {
+            if (blockPreparation.getAndSet(false)) {
+                preparing.complete(Unit)
+                releasePreparation.await()
+            }
+        }, enqueueDeadline = { deadline ->
+            launch.eventLog.enqueueJourneyDeadline(deadline)
+            queued += deadline.wakeAtMillis
+        }, beforeJourney = { event -> if (event.name == "later") observed += "later" })
+        try {
+            launch.start()
+            launch.commit("customer", launch.copy("customer", 1, "start_waiting", waitSteps(maxTimeMillis = 10_000L)))
+            launch.track("start_waiting")
+            launch.clock.addAndGet(1_000L)
+            launch.track("start_waiting")
+            withTimeout(5_000L) { while (9_000L !in sleeper.pendingDurations) delay(10) }
+            launch.eventLog.setJourneyDeadlineHandler { deadline ->
+                observed += "deadline:${deadline.wakeAtMillis}"
+                launch.journeys.handleJourneyDeadline(deadline)
+            }
+
+            launch.clock.addAndGet(1_000L)
+            blockPreparation.set(true)
+            launch.eventLog.capture("start_waiting")
+            withTimeout(5_000L) { preparing.await() }
+            withTimeout(5_000L) { while (8_000L !in sleeper.pendingDurations) delay(10) }
+            launch.clock.set(1_010_000L)
+            sleeper.complete(8_000L)
+            withTimeout(5_000L) { while (queued.size < 1) delay(10) }
+            assertFalse(releasePreparation.isCompleted)
+            withTimeout(5_000L) { while (1_000L !in sleeper.pendingDurations) delay(10) }
+            launch.clock.set(1_011_000L)
+            sleeper.complete(1_000L)
+            withTimeout(5_000L) { while (queued.size < 2) delay(10) }
+            assertEquals(listOf(1_010_000L, 1_011_000L), queued.toList())
+
+            launch.clock.incrementAndGet()
+            launch.eventLog.capture("later")
+            releasePreparation.complete(Unit)
+            launch.eventLog.awaitBarrier()
+            assertEquals(listOf("deadline:1010000", "deadline:1011000", "later"), observed.toList())
+            assertEquals("Rescheduling after native preparation must not append duplicate deadlines", 2, queued.size)
+            assertEquals(2, launch.outcomes("customer", "timed_out"))
+        } finally { releasePreparation.complete(Unit) }
+    }
+
     @Test fun `held routing queues every deadline before events accepted after it`() = runBlocking {
         val sleeper = WakeSleeper()
         val secondWakeScheduled = CompletableDeferred<Unit>()

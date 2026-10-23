@@ -359,8 +359,6 @@ internal class JourneyService(
         ) : Command
         data class Wake(
             val generation: Long,
-            val deadlineMillis: Long,
-            val deadlines: List<JourneyDeadline>,
             override val done: CompletableDeferred<Unit>? = null,
         ) : Command
         data class Deadline(val deadline: JourneyDeadline, val accepted: CompletableDeferred<JourneyWork.Result>? = null) : Command {
@@ -416,6 +414,8 @@ internal class JourneyService(
     }
     private val routingDeferralLock = Any()
     private var routingDeferral: Long? = null
+    /** Timer publication and worker rescheduling share checkpoint ownership. */
+    private val deadlineSchedulingLock = Any()
     private val enqueuedDeadlines = mutableSetOf<JourneyDeadline>()
     // Setup can run from a receiver, worker, or service before any Activity is
     // visible. Keep screen-bearing admission closed until the lifecycle
@@ -428,11 +428,13 @@ internal class JourneyService(
     private var replayingRoutes = false
     private var journal: JourneyRunJournal? = null
         set(value) {
-            field = value
-            journalGeneration++
-            recoveryPending = value != null
-            enqueuedDeadlines.clear()
-            cancelWake()
+            synchronized(deadlineSchedulingLock) {
+                cancelWake()
+                field = value
+                journalGeneration++
+                recoveryPending = value != null
+                enqueuedDeadlines.clear()
+            }
         }
     private data class NativeRunValues(val owner: String, val values: ai.nuxie.sdk.presentation.ExperienceRunValues,
         val descriptor: JsonObject)
@@ -598,7 +600,9 @@ internal class JourneyService(
                     is Command.UserChange -> userDidChangeNow(command.from, command.to)
                     is Command.RefetchBegin -> refetchWillBeginNow(command.distinctId)
                     is Command.RefetchSettle -> refetchDidSettleNow(command.distinctId)
-                    is Command.Wake -> wakeNow(command.generation, command.deadlineMillis, command.deadlines)
+                    is Command.Wake -> {
+                        if (synchronized(deadlineSchedulingLock) { command.generation == wakeGeneration }) scheduleNextWake()
+                    }
                     is Command.Deadline -> handleJourneyDeadlineNow(command.deadline)
                     is Command.PlanEvent -> prepareEventWorkNow(command.event, command.generation)
                     is Command.Operation -> command.attempt()
@@ -920,7 +924,7 @@ internal class JourneyService(
         }.also { deadline.work = it }
         val result = work.attempt()
         if (result is JourneyWork.Result.Done && journal === target) {
-            enqueuedDeadlines.remove(deadline)
+            synchronized(deadlineSchedulingLock) { enqueuedDeadlines.remove(deadline) }
             scheduleNextWake()
         }
         return result
@@ -3554,9 +3558,8 @@ internal class JourneyService(
     }
 
     private suspend fun scheduleNextWake() {
-        cancelWake()
         val target = journal?.takeIf { initialized && it.distinctId == identity.distinctId() } ?: return
-        val generation = wakeGeneration
+        val generation = synchronized(deadlineSchedulingLock) { wakeGeneration }
         val runs = try { readJournalRuns(target) }
         catch (cancelled: CancellationException) { throw cancelled }
         catch (error: Exception) {
@@ -3564,39 +3567,45 @@ internal class JourneyService(
             queueReconciliation(target.distinctId)
             return
         }
-        if (journal !== target || generation != wakeGeneration) return
         val deadlines = runs.mapNotNull { deadlineFor(it, target.distinctId) }
-        enqueuedDeadlines.retainAll(deadlines.toSet())
-        val pending = deadlines.filter { it !in enqueuedDeadlines }
-        val now = nowMillis()
-        val due = pending.filter { it.wakeAtMillis <= now }
-        enqueuedDeadlines.addAll(due)
-        due.forEach(::queueDeadline)
-        val next = pending.filter { it.wakeAtMillis > now }.minOfOrNull { it.wakeAtMillis } ?: return
-        scheduleWake(generation, next, pending.filter { it.wakeAtMillis == next })
+        synchronized(deadlineSchedulingLock) {
+            if (journal !== target || generation != wakeGeneration) return
+            // Keep the previous timer live while the journal read suspends.
+            cancelWake()
+            enqueuedDeadlines.retainAll(deadlines.toSet())
+            val pending = deadlines.filter { it !in enqueuedDeadlines }
+            val now = nowMillis()
+            enqueueDeadlines(pending.filter { it.wakeAtMillis <= now })
+            scheduleWake(wakeGeneration, pending.filter { it.wakeAtMillis > now })
+        }
     }
 
-    private fun scheduleWake(generation: Long, atMillis: Long, deadlines: List<JourneyDeadline>) {
+    /** Called under deadlineSchedulingLock; publication itself never waits for the worker. */
+    private fun enqueueDeadlines(deadlines: List<JourneyDeadline>) {
+        for (deadline in deadlines) {
+            if (enqueuedDeadlines.add(deadline)) queueDeadline(deadline)
+        }
+    }
+
+    private fun scheduleWake(generation: Long, deadlines: List<JourneyDeadline>) {
+        if (deadlines.isEmpty()) return
         wakeJob = scope.launch {
-            sleepMillis((atMillis - nowMillis()).coerceAtLeast(0L))
-            commands.trySend(Command.Wake(generation, atMillis, deadlines))
+            // All known deadlines keep their wakes even while Journey execution
+            // or a journal read suspends the worker. This timer never retries work.
+            for ((atMillis, due) in deadlines.groupBy { it.wakeAtMillis }.toSortedMap()) {
+                do {
+                    sleepMillis((atMillis - nowMillis()).coerceAtLeast(0L))
+                } while (nowMillis() < atMillis)
+                synchronized(deadlineSchedulingLock) {
+                    if (generation != wakeGeneration) return@launch
+                    enqueueDeadlines(due)
+                    commands.trySend(Command.Wake(generation))
+                }
+            }
         }
     }
 
-    private suspend fun wakeNow(generation: Long, deadlineMillis: Long, deadlines: List<JourneyDeadline>) {
-        if (generation != wakeGeneration) return
-        wakeJob = null
-        if (nowMillis() < deadlineMillis) {
-            scheduleWake(generation, deadlineMillis, deadlines)
-            return
-        }
-        val due = deadlines.filter { it !in enqueuedDeadlines }
-        enqueuedDeadlines.addAll(due)
-        due.forEach(::queueDeadline)
-        if (generation == wakeGeneration) scheduleNextWake()
-    }
-
-    private fun cancelWake() {
+    private fun cancelWake() = synchronized(deadlineSchedulingLock) {
         wakeGeneration += 1
         wakeJob?.cancel()
         wakeJob = null
