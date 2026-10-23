@@ -65,6 +65,25 @@ class JourneyRunJournalTest {
         Unit
     }
 
+    @Test fun `saved cursor keeps its input and evaluation time across failed park persistence`() {
+        var failWrite = false
+        val journal = JourneyRunJournal(directory, "customer", beforePersist = { check(!failWrite) })
+        val run = requireNotNull(journal.admit(arm(), JourneyFrequency.EveryMatch, "wait", 100_000L))
+        journal.markStartedQueued(run)
+        val event = JourneyControlExecutor.Event("start", 90_000L, JsonObject(emptyMap()), "start-id")
+        val cursor = journal.prepareCursor(run.id, 90_000L, 10_000L, JourneyControlExecutor.Signal(event)).cursor
+        failWrite = true
+        assertTrue(runCatching { journal.transition(run.id, "wait", run.context,
+            JourneyControlExecutor.Checkpoint(90_000L, 150_000L)) }.isFailure)
+        failWrite = false
+        val reopened = JourneyRunJournal(directory, "customer")
+        assertEquals(cursor, reopened.runs().single().cursor)
+        assertEquals(cursor, reopened.prepareCursor(run.id, 130_000L, null, JourneyControlExecutor.Signal()).cursor)
+        reopened.transition(run.id, "wait", run.context, JourneyControlExecutor.Checkpoint(90_000L, 150_000L))
+        assertNull(reopened.runs().single().cursor)
+        assertEquals(150_000L, reopened.runs().single().park?.wakeAtMillis)
+    }
+
     @Test fun `timed resume saves outlet with checkpoint consumption or retains park on failure`() {
         var failWrite = false
         val journal = JourneyRunJournal(directory, "customer", beforePersist = { check(!failWrite) { "write failed" } })

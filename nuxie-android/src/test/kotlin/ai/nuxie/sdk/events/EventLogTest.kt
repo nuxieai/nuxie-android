@@ -300,7 +300,7 @@ class EventLogTest {
         val delivered = CompletableDeferred<Unit>()
         log.subscribeCommitted { event -> if (event.name == "later") delivered.complete(Unit) }
         fun resume() = JourneyWork("saved:run", "anon-1", "run") {
-            if (attempts.incrementAndGet() >= 3) JourneyWork.Result.Done() else JourneyWork.Result.Retry
+            if (attempts.incrementAndGet() >= 3) JourneyWork.Result.Done() else JourneyWork.Result.Failed
         }
         try {
             repeat(3) { log.enqueueJourneyWork(resume()) }
@@ -321,7 +321,7 @@ class EventLogTest {
         log.subscribeJourneyEvents(sampleGeneration = { 1L }) { event, _ ->
             listOf("a", "b").map { run ->
                 JourneyWork("${event.id}:$run", event.distinctId, run) {
-                    if (run == "a" && !repaired.get()) JourneyWork.Result.Retry
+                    if (run == "a" && !repaired.get()) JourneyWork.Result.Failed
                     else { observed += "$run:${event.name}"; JourneyWork.Result.Done() }
                 }
             }
@@ -433,7 +433,7 @@ class EventLogTest {
         val repaired = java.util.concurrent.atomic.AtomicBoolean(false)
         log.setJourneyDeadlineHandler {
             if (repaired.get()) { observed += "deadline"; JourneyWork.Result.Done() }
-            else JourneyWork.Result.Retry
+            else JourneyWork.Result.Failed
         }
         log.subscribeCommitted { observed += it.name }
         try {

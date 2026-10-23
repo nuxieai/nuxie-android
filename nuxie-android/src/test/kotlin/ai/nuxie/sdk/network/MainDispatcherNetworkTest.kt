@@ -10,6 +10,7 @@ import ai.nuxie.sdk.billing.StoredPurchaseState
 import ai.nuxie.sdk.identity.CustomerKind
 import ai.nuxie.sdk.journey.JourneyResponseSave
 import java.io.IOException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertThrows
@@ -82,25 +83,44 @@ class MainDispatcherNetworkTest {
     @Test fun syncedPurchaseRefreshFromMainUsesIoForTheRealHttpRequest() = runBlocking {
         val mainThread = AtomicReference<Thread>()
         val requestLine = AtomicReference<String>()
-        val serverFailure = AtomicReference<Throwable>()
+        val serverFinished = CompletableDeferred<Unit>()
+        val transportFailure = AtomicReference<Throwable>()
+        val response = AtomicReference<HttpTransport.Response>()
+        val acceptedConnection = AtomicReference<java.net.Socket>()
         val socket = ServerSocket(0)
         val server = Thread {
             try {
                 socket.accept().use { connection ->
-                    connection.soTimeout = 5_000
-                    val input = connection.getInputStream().bufferedReader()
-                    requestLine.set(input.readLine())
+                    acceptedConnection.set(connection)
+                    // HTTP Content-Length counts bytes, independent of decoder buffering.
+                    val input = connection.getInputStream().buffered()
+                    fun line(): String {
+                        val bytes = java.io.ByteArrayOutputStream()
+                        while (true) {
+                            val byte = input.read()
+                            check(byte >= 0) { "Connection ended during HTTP headers" }
+                            if (byte == 10) return bytes.toByteArray().decodeToString().removeSuffix("\r")
+                            bytes.write(byte)
+                        }
+                    }
+                    requestLine.set(line())
                     var length = 0
                     while (true) {
-                        val line = input.readLine() ?: break
-                        if (line.isEmpty()) break
-                        if (line.startsWith("Content-Length:", ignoreCase = true)) length = line.substringAfter(':').trim().toInt()
+                        val header = line()
+                        if (header.isEmpty()) break
+                        if (header.startsWith("Content-Length:", ignoreCase = true)) length = header.substringAfter(':').trim().toInt()
                     }
                     repeat(length) { check(input.read() >= 0) }
                     val body = """{"success":true,"customer_id":"customer","catalog_product":{"id":"product","store_product_id":"play-pro","store_product_type":"subscription"}}"""
-                    connection.getOutputStream().write(("HTTP/1.1 200 OK\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n" + body).encodeToByteArray())
+                    val output = connection.getOutputStream()
+                    val bytes = body.encodeToByteArray()
+                    output.write("HTTP/1.1 200 OK\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n".encodeToByteArray())
+                    output.write(bytes)
+                    output.flush()
+                    connection.shutdownOutput()
                 }
-            } catch (error: Throwable) { if (!socket.isClosed) serverFailure.set(error) }
+                serverFinished.complete(Unit)
+            } catch (error: Throwable) { serverFinished.completeExceptionally(error) }
         }.apply { isDaemon = true; start() }
         Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "host-main").also(mainThread::set) }
             .asCoroutineDispatcher().use { main ->
@@ -109,9 +129,12 @@ class MainDispatcherNetworkTest {
                     val realTransport = HttpUrlConnectionTransport()
                     val api = NuxieApi("test-key", NuxieEnvironment.DEVELOPMENT,
                         transport = HttpTransport { request ->
-                            // JVM equivalent of Android's main-thread network prohibition.
-                            check(Thread.currentThread() !== mainThread.get()) { "Network on host Main dispatcher" }
-                            realTransport.execute(request)
+                            try {
+                                // JVM equivalent of Android's main-thread network prohibition.
+                                check(Thread.currentThread() !== mainThread.get()) { "Network on host Main dispatcher" }
+                                realTransport.execute(request).also(response::set)
+                            }
+                            catch (error: Throwable) { transportFailure.set(error); throw error }
                         }, baseUrlOverride = URL("http://127.0.0.1:${socket.localPort}"))
                     val evidence = PurchaseEvidence(
                         purchaseToken = "test-token", packageName = "test.package", storeProductIds = listOf("play-pro"),
@@ -125,12 +148,17 @@ class MainDispatcherNetworkTest {
                             PurchaseSyncRequest(PurchaseSyncReason.RESTORE, "customer", CustomerKind.IDENTIFIED),
                         )
                     }
-                    assertTrue("A retained purchase refresh must reach the backend from a Main caller", result is PurchaseSyncOutcome.Accepted)
+                    transportFailure.get()?.let { throw AssertionError("Real HTTP transport failed", it) }
+                    assertTrue("The synchronizer must execute HTTP", response.get() != null)
+                    serverFinished.await()
                     assertEquals("POST /purchase HTTP/1.1", requestLine.get())
-                    assertEquals(null, serverFailure.get())
+                    assertEquals(200, response.get()?.statusCode)
+                    assertTrue("A retained purchase refresh must reach the backend from a Main caller; response=${response.get()?.body?.decodeToString()}",
+                        result is PurchaseSyncOutcome.Accepted)
                 } finally {
                     Dispatchers.resetMain()
                     socket.close()
+                    acceptedConnection.get()?.close()
                     server.join(5_000)
                 }
             }

@@ -9,6 +9,7 @@ import ai.nuxie.sdk.events.JourneyEventOrigin
 import ai.nuxie.sdk.events.NuxieContextBuilder
 import ai.nuxie.sdk.events.SQLiteEventStore
 import ai.nuxie.sdk.events.StoredEvent
+import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.experiences.JourneyProfileCatalog
 import ai.nuxie.sdk.experiences.JourneyReleaseHighWaterStore
 import ai.nuxie.sdk.experiences.JourneyReleaseLimits
@@ -97,6 +98,132 @@ class JourneyRefetchEventHoldTest {
         runBlocking { launches.toList().forEach { it.close() } }
         scope.cancel()
         directory.deleteRecursively()
+    }
+
+    @Test fun `every match retry resumes its admitted cursor after native condition preparation fails`() = runBlocking {
+        val retries = WakeSleeper()
+        val clock = AtomicLong(0L)
+        val failing = java.util.concurrent.atomic.AtomicBoolean(true)
+        val effects = CopyOnWriteArrayList<String>()
+        val launch = Launch("customer", retrySleep = retries::sleep, retryClockMillis = clock::get,
+            prepare = { check(!failing.get()) { "Native condition preparation failed" } },
+            dispatcher = JourneyDispatching { effects += it.effectId; JourneyDispatchResult.Outlet("next") })
+        val steps = Json.parseToJsonElement("""[
+            {"id":"work","kind":"action","action":{"type":"app_action","name":"work"},"outlets":{"next":"condition"}},
+            {"id":"condition","kind":"action","action":{"type":"condition","branches":[{"id":"yes","condition":{"type":"Truthy","value":{"type":"Response.Field","key":"consent"}}}]},"outlets":{"yes":"wait","default":"wait"}},
+            ${waitSteps().joinToString(",")}
+        ]""").jsonArray
+        try {
+            launch.start(); launch.commit("customer", launch.copy("customer", 1, "start_waiting", steps))
+            launch.track("start_waiting")
+            val admitted = launch.journal().runs().single()
+            assertEquals("condition", admitted.stepId)
+            assertTrue(admitted.park == null)
+            assertEquals(1, launch.starts("customer"))
+            assertEquals(1, effects.size)
+            assertTrue(launch.store.queryPendingLocalRoutes("customer").any { it.name == "start_waiting" })
+            withTimeout(5_000L) { while (retries.pendingDurations.isEmpty()) delay(10) }
+            failing.set(false); clock.set(1_000L); retries.completeAllAndJoin()
+            launch.eventLog.awaitBarrier()
+            val parked = launch.journal().runs().single()
+            assertEquals(admitted.id, parked.id)
+            assertTrue(parked.park != null)
+            assertEquals(1, launch.starts("customer"))
+            assertEquals(1, effects.size)
+            assertTrue(launch.store.queryPendingLocalRoutes("customer").isEmpty())
+        } finally { launch.close() }
+    }
+
+    @Test fun `purchase settlement stays in its input while parked restoration fails`() = runBlocking {
+        deferredCommerceSettlement("purchase", SystemEventNames.PURCHASE_COMPLETED, "completed")
+    }
+
+    @Test fun `restore settlement stays in its input while parked restoration fails`() = runBlocking {
+        deferredCommerceSettlement("restore", SystemEventNames.RESTORE_COMPLETED, "restored")
+    }
+
+    private suspend fun deferredCommerceSettlement(type: String, outcome: String, outlet: String) {
+        val retries = WakeSleeper()
+        val clock = AtomicLong(0L)
+        val failing = java.util.concurrent.atomic.AtomicBoolean(false)
+        val launch = Launch("customer", withScreens = true, retrySleep = retries::sleep, retryClockMillis = clock::get,
+            readValues = { values -> check(!failing.get()) { "Restoration unavailable" }; values.journeyValues() })
+        val commerce = buildJsonObject {
+            put("id", "commerce"); put("kind", "action")
+            putJsonObject("action") { put("type", type); if (type == "purchase") put("placementId", "golden:monthly") }
+            putJsonObject("outlets") { put(outlet, "settled"); put("failed", "settled") }
+        }
+        val steps = JsonArray(waitSteps().toList() + commerce + buildJsonObject {
+            put("id", "settled"); put("kind", "complete"); put("outcome", "settled")
+        })
+        try {
+            launch.start(); launch.commit("customer", launch.copy("customer", 1, "start_waiting", steps))
+            launch.track("start_waiting")
+            val journal = launch.journal()
+            val parked = journal.runs().single()
+            // The screen moved to a wait while its previously dispatched commerce remained pending.
+            journal.transition(parked.id, "commerce", parked.context)
+            val effect = journal.claimEffect(parked.id, "commerce")
+            journal.retainPresentationCommerce(parked.id, "commerce", effect, "golden:monthly")
+            journal.transition(parked.id, "wait", parked.context,
+                JourneyControlExecutor.Checkpoint(1_000_000L, 1_060_000L))
+            failing.set(true)
+            // Keep the event's stable effect identity so the ordinary settlement correlation applies.
+            assertTrue(launch.eventLog.captureRoutedSystemEvent(outcome, mapOf("placement_id" to "golden:monthly"),
+                effect, "customer", 1_000_100L, null).settled)
+            launch.eventLog.awaitBarrier()
+            assertTrue(launch.store.queryPendingLocalRoutes("customer").any { it.id == effect })
+            assertEquals(effect, journal.runs().single().pendingCommerce?.effectId)
+            withTimeout(5_000L) { while (retries.pendingDurations.isEmpty()) delay(10) }
+            failing.set(false); clock.set(1_000L); retries.completeAllAndJoin()
+            launch.eventLog.awaitBarrier()
+            assertEquals(1, launch.outcomes("customer", "settled"))
+            assertTrue(launch.store.queryPendingLocalRoutes("customer").none { it.id == effect })
+            assertEquals(1, launch.starts("customer"))
+        } finally { launch.close() }
+    }
+
+    @Test fun `deadline with a pending screen publication retains its entry and backoff`() = runBlocking {
+        val retries = WakeSleeper()
+        val wakes = WakeSleeper()
+        val clock = AtomicLong(0L)
+        val queued = CopyOnWriteArrayList<JourneyDeadline>()
+        val attempts = CopyOnWriteArrayList<JourneyWork.Result>()
+        lateinit var launch: Launch
+        launch = Launch("customer", withScreens = true, sleep = wakes::sleep,
+            retrySleep = retries::sleep, retryClockMillis = clock::get,
+            enqueueDeadline = { queued += it; launch.eventLog.enqueueJourneyDeadline(it) })
+        try {
+            launch.start(); launch.commit("customer", launch.copy("customer", 1, "start_waiting", waitSteps(maxTimeMillis = 1_000L)))
+            launch.track("start_waiting")
+            val journal = launch.journal()
+            val parked = journal.runs().single()
+            assertTrue(journal.stagePresentationPublication(parked.id, parked.stepId, parked.context,
+                JourneyRun.PendingPresentationPublication("publication", 0L, 1L, "screen_welcome", "tap", items = listOf(
+                    JourneyRun.PendingPresentationPublication.Item("tap", JsonObject(emptyMap()), "tap", 1_000_900L)))) != null)
+            launch.eventLog.setJourneyDeadlineHandler { deadline ->
+                launch.journeys.handleJourneyDeadline(deadline).also { attempts += it }
+            }
+            withTimeout(5_000L) { while (1_000L !in wakes.pendingDurations) delay(10) }
+            launch.clock.addAndGet(1_000L)
+            wakes.completeAllAndJoin()
+            withTimeout(5_000L) { launch.eventLog.awaitBarrier() }
+            assertEquals(listOf(JourneyWork.Result.NotYet), attempts.toList())
+            assertEquals(1, queued.size)
+            repeat(5) { launch.clock.incrementAndGet(); withTimeout(5_000L) { launch.eventLog.awaitBarrier() } }
+            assertEquals(1, attempts.size)
+            assertEquals(0, launch.outcomes("customer", "timed_out"))
+            withTimeout(5_000L) { while (retries.pendingDurations.isEmpty()) delay(10) }
+            clock.set(1_000L); retries.completeAllAndJoin(); launch.eventLog.awaitBarrier()
+            assertEquals(listOf(JourneyWork.Result.NotYet, JourneyWork.Result.NotYet), attempts.toList())
+            assertEquals(1, queued.size)
+            withTimeout(5_000L) { while (retries.pendingDurations.isEmpty()) delay(10) }
+            assertTrue(journal.clearPresentationPublication(parked.id, "publication") != null)
+            clock.set(2_000L); retries.completeAllAndJoin(); launch.eventLog.awaitBarrier()
+            assertEquals(3, attempts.size)
+            assertEquals(1, queued.size)
+            assertEquals(1, launch.outcomes("customer", "timed_out"))
+        } finally { launch.close() }
     }
 
     @Test fun `a failed first checkpoint save keeps the triggering route pending until retry`() = runBlocking {
@@ -619,13 +746,13 @@ class JourneyRefetchEventHoldTest {
 
     @Test fun `held routing queues every deadline before events accepted after it`() = runBlocking {
         val sleeper = WakeSleeper()
-        val secondWakeScheduled = CompletableDeferred<Unit>()
+        val firstQueued = CompletableDeferred<Unit>()
+        val secondQueued = CompletableDeferred<Unit>()
         val observed = CopyOnWriteArrayList<String>()
         lateinit var launch: Launch
-        launch = Launch("customer", sleep = sleeper::sleep, readRuns = { journal ->
-            journal.runs().also {
-                if (launch.clock.get() == 1_020_000L) secondWakeScheduled.complete(Unit)
-            }
+        launch = Launch("customer", sleep = sleeper::sleep, enqueueDeadline = { deadline ->
+            launch.eventLog.enqueueJourneyDeadline(deadline)
+            if (deadline.wakeAtMillis == 1_010_000L) firstQueued.complete(Unit) else secondQueued.complete(Unit)
         }, beforeJourney = { event -> if (event.name == "later") observed += "event25" })
         val snapshot = launch.copy("customer", 1, "start_waiting", waitSteps(maxTimeMillis = 20_000L))
         val journal = launch.journal()
@@ -649,11 +776,12 @@ class JourneyRefetchEventHoldTest {
             withTimeout(5_000L) { while (10_000L !in sleeper.pendingDurations) delay(10) }
             launch.clock.addAndGet(10_000L)
             sleeper.complete(10_000L)
+            withTimeout(5_000L) { firstQueued.await() }
             withTimeout(5_000L) { while (10_000L !in sleeper.pendingDurations) delay(10) }
             assertTrue("The second timer is armed while the first deadline is held", observed.isEmpty())
             launch.clock.addAndGet(10_000L)
             sleeper.complete(10_000L)
-            withTimeout(5_000L) { secondWakeScheduled.await() }
+            withTimeout(5_000L) { secondQueued.await() }
             launch.clock.addAndGet(5_000L)
             launch.track("later")
             assertTrue(observed.isEmpty())
@@ -698,10 +826,12 @@ class JourneyRefetchEventHoldTest {
             retrySleeper.completeAllAndJoin()
             launch.eventLog.awaitBarrier()
             if (hasScreens) {
-                assertEquals(1, retryDelays.size)
+                withTimeout(5_000L) { while (retryDelays.size < 2) delay(10) }
+                withTimeout(5_000L) { while (retrySleeper.pendingDurations.isEmpty()) delay(10) }
+                assertEquals(2, retryDelays.size)
                 assertEquals(before, preparations.get())
             } else assertTrue(preparations.get() > before)
-            assertEquals(0, activeTimers.get())
+            assertEquals(if (hasScreens) 1 else 0, activeTimers.get())
             assertEquals(0, launch.outcomes("customer", "timed_out"))
             assertEquals(park, launch.journal().runs().single().park)
             withTimeout(5_000L) { while (10_000L !in sleeper.pendingDurations) delay(10) }
@@ -711,6 +841,9 @@ class JourneyRefetchEventHoldTest {
                 launch.eventLog.awaitBarrier()
                 assertEquals(0, launch.outcomes("customer", "timed_out"))
                 launch.journeys.onAppWillEnterForeground()
+                withTimeout(5_000L) { while (retrySleeper.pendingDurations.isEmpty()) delay(10) }
+                retryClock.set(2_000L)
+                retrySleeper.completeAllAndJoin()
             }
             withTimeout(10_000L) { while (launch.outcomes("customer", "timed_out") == 0) delay(10) }
             launch.eventLog.awaitBarrier()

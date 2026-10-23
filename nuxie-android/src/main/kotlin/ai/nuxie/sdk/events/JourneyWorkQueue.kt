@@ -28,10 +28,11 @@ internal class JourneyWork(
     enum class Kind { EVENT, OPERATION }
 
     sealed interface Result {
-        data class Done(val following: List<JourneyWork> = emptyList()) : Result
-        data class Expand(val children: List<JourneyWork>) : Result
-        data object Retry : Result
-        data object Blocked : Result
+        /** The effect is durable; child work must finish before the input is acknowledged. */
+        data class Done(val children: List<JourneyWork> = emptyList()) : Result
+        data object Failed : Result
+        /** Eligibility is blocked. Retain this entry and its one-second backoff. */
+        data object NotYet : Result
     }
 
     internal var hasFailed = initiallyDeferred
@@ -101,7 +102,7 @@ internal class JourneyWorkQueue(
                 }
                 if (work.waiting || obstructed) {
                     val waitingDeadline = work.deadline?.takeIf { work.awaitingInputs }
-                    if (waitingDeadline != null) awaiting += waitingDeadline else blocked += work
+                    if (waitingDeadline != null) awaiting += waitingDeadline else if (work.hasFailed || obstructed) blocked += work
                     index++
                     continue
                 }
@@ -136,32 +137,19 @@ internal class JourneyWorkQueue(
                 val result = try { work.attempt() }
                 catch (_: CancellationException) {
                     currentCoroutineContext().ensureActive()
-                    JourneyWork.Result.Retry
+                    JourneyWork.Result.Failed
                 }
-                catch (_: Exception) { JourneyWork.Result.Retry }
+                catch (_: Exception) { JourneyWork.Result.Failed }
                 when (result) {
-                    JourneyWork.Result.Blocked -> {
-                        // A background pause alone preserves ordinary background input
-                        // selection. An actual failed attempt still holds that run.
-                        if (work.hasFailed) blocked += work
-                        index++
-                    }
-                    JourneyWork.Result.Retry -> {
-                        work.hasFailed = true
+                    JourneyWork.Result.NotYet, JourneyWork.Result.Failed -> {
+                        work.hasFailed = work.hasFailed || result == JourneyWork.Result.Failed
                         work.waiting = true
                         work.retryAtMillis = retryClockMillis() + 1_000L
                         work.failed()
-                        blocked += work
+                        if (work.hasFailed) blocked += work
                         index++
                     }
                     is JourneyWork.Result.Done -> {
-                        entries.removeAt(index)
-                        work.completed()
-                        result.following.forEach { if (it.input == null) it.input = work.input }
-                        insertAt(index, result.following)
-                        progress++
-                    }
-                    is JourneyWork.Result.Expand -> {
                         entries.removeAt(index)
                         if (result.children.isEmpty()) work.completed() else {
                             var remaining = result.children.size

@@ -69,12 +69,12 @@ class JourneyWorkQueueTest {
         try {
             queue.add(JourneyWork("reconcile:customer", "customer", repairsCustomer = true) {
                 observed += "reconcile"
-                if (!recovered) JourneyWork.Result.Retry else JourneyWork.Result.Done()
+                if (!recovered) JourneyWork.Result.Failed else JourneyWork.Result.Done()
             })
             queue.drain()
             queue.add(JourneyWork("event:start", "customer", kind = JourneyWork.Kind.EVENT) {
                 observed += "admission"
-                if (!recovered) JourneyWork.Result.Retry else JourneyWork.Result.Done()
+                if (!recovered) JourneyWork.Result.Failed else JourneyWork.Result.Done()
             })
             queue.drain()
             assertEquals(listOf("reconcile", "admission"), observed)
@@ -121,7 +121,7 @@ class JourneyWorkQueueTest {
         fun presentation() = JourneyWork("presentation:a", "customer", "a") {
             attempts++
             // Re-parking changes the real-clock checkpoint, never this key or retry eligibility.
-            if (!available) JourneyWork.Result.Retry else { observed += "presented"; JourneyWork.Result.Done() }
+            if (!available) JourneyWork.Result.Failed else { observed += "presented"; JourneyWork.Result.Done() }
         }
         try {
             queue.add(presentation())
@@ -147,16 +147,19 @@ class JourneyWorkQueueTest {
         } finally { queue.close(); scope.cancel() }
     }
 
-    @Test fun backgroundEligibilityPauseKeepsBackgroundInputSelectionAndArmsNoRetry() = runBlocking {
+    @Test fun backgroundEligibilityPauseKeepsInputSelectionAndUsesTheOneRetryTimer() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val clock = AtomicLong(0L)
+        val tick = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
         var sleeps = 0
-        val queue = JourneyWorkQueue(scope, {}, { sleeps++ })
+        val queue = JourneyWorkQueue(scope, { tick.complete(Unit) }, { sleeps++; release.await() }, clock::get)
         val observed = mutableListOf<String>()
         var foreground = false
         var matchingInput = false
         try {
             queue.add(JourneyWork("deadline", "customer", "run") {
-                if (!foreground) JourneyWork.Result.Blocked else {
+                if (!foreground) JourneyWork.Result.NotYet else {
                     observed += if (matchingInput) "satisfied" else "timed_out"
                     JourneyWork.Result.Done()
                 }
@@ -166,11 +169,14 @@ class JourneyWorkQueueTest {
             })
             queue.drain()
             assertEquals(listOf("input"), observed)
-            assertEquals(0, sleeps)
+            assertEquals(1, sleeps)
             foreground = true
-            queue.drain()
+            repeat(3) { queue.drain() }
+            assertEquals(listOf("input"), observed)
+            clock.set(1_000L); release.complete(Unit)
+            withTimeout(1_000L) { tick.await() }; queue.retryReady(); queue.drain()
             assertEquals(listOf("input", "satisfied"), observed)
-            assertEquals(0, sleeps)
+            assertEquals(1, sleeps)
         } finally { queue.close(); scope.cancel() }
     }
 
@@ -188,7 +194,7 @@ class JourneyWorkQueueTest {
         try {
             for (kind in kinds) queue.add(JourneyWork(kind, "customer", kind) {
                 attempts[kind] = (attempts[kind] ?: 0) + 1
-                if (clock.get() < 5_000L) JourneyWork.Result.Retry else JourneyWork.Result.Done()
+                if (clock.get() < 5_000L) JourneyWork.Result.Failed else JourneyWork.Result.Done()
             })
             queue.drain()
             assertEquals(kinds.size, attempts.size)

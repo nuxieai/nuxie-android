@@ -57,7 +57,11 @@ internal data class JourneyRun(
     val nextPresentationEmissionSequence: Long = 0,
     val pendingPresentationPublication: PendingPresentationPublication? = null,
     val presentationSource: PresentationSource? = null,
+    /** Evaluation time and input belong to the saved cursor, including a failed park save. */
+    val cursor: Cursor? = null,
 ) {
+    data class Cursor(val atMillis: Long?, val lagMillis: Long?, val event: JourneyControlExecutor.Event?,
+        val responsesChanged: Boolean = false)
     data class PendingCommerce(val stepId: String, val effectId: String, val context: JsonObject, val placementId: String?)
     data class PresentationSource(val eventId: String, val source: JourneyScreenEmissionSource) {
         fun isReplacedBy(eventId: String?): Boolean = eventId == null || this.eventId != eventId
@@ -160,6 +164,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         artifactDigests: Set<String> = emptySet(),
         retainArtifacts: ((JourneyRun) -> Unit)? = null,
         policy: JsonObject? = null,
+        cursor: JourneyRun.Cursor? = null,
     ): JourneyRun? = update { state ->
         if (revocationFile.exists()) return@update null
         if (stateArmReceipt != null && stateArmReceipt in state.stateArmReceipts) {
@@ -206,6 +211,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
             ids.next(),
             stepId = entryStepId,
             context = arm.context,
+            cursor = cursor,
             reentry = reentry,
             requiresReleasePin = release != null,
             artifactDigests = artifactDigests,
@@ -477,6 +483,19 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
     }
 
     /** Persist one executor transition before another step or effect runs. */
+    fun prepareCursor(id: String, atMillis: Long, lagMillis: Long?, signal: JourneyControlExecutor.Signal): JourneyRun = update { state ->
+        val run = checkNotNull(state.runs[id])
+        check(run.completion == null && run.park == null)
+        run.copy(cursor = run.cursor?.takeIf { it.atMillis != null }
+            ?: JourneyRun.Cursor(atMillis, lagMillis, signal.event, signal.responsesChanged)).also { state.runs[id] = it }
+    }
+
+    /** A successful executor yield has no unfinished evaluation to replay. */
+    fun clearCursor(id: String) {
+        if (read { it.runs[id]?.cursor } == null) return
+        update { state -> state.runs[id]?.let { state.runs[id] = it.copy(cursor = null) } }
+    }
+
     fun transition(id: String, stepId: String, context: JsonObject,
         checkpoint: JourneyControlExecutor.Checkpoint? = null,
         experimentExposure: JourneyRun.ExperimentExposure? = null,
@@ -513,6 +532,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
             settled.experimentExposures
         }
         state.runs[id] = settled.copy(stepId = stepId, context = JsonObject(context + ("responses" to JsonObject(emptyMap()))),
+            cursor = if (checkpoint != null) null else settled.cursor?.copy(atMillis = null),
             nativeSnapshot = nativeSnapshot.takeIf { checkpoint != null },
             park = checkpoint?.let { JourneyRun.Park(it.wakeAtMillis, it.anchorAtMillis) },
             effectReceipts = settled.effectReceipts - settled.stepId,
@@ -635,6 +655,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
             stepId = nextStepId ?: run.stepId,
             context = if (nextStepId == null) run.context else pending?.context ?: run.context,
             park = if (nextStepId == null) run.park else null,
+            cursor = if (nextStepId == null) run.cursor else null,
             nativeSnapshot = if (nextStepId == null) run.nativeSnapshot else null,
         ).also { state.runs[id] = it }
     }
@@ -699,7 +720,7 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
             run.park != expectedPark) return@update null
         run.copy(stepId = advancingTo?.first ?: run.stepId,
             context = advancingTo?.second?.let { JsonObject(it + ("responses" to JsonObject(emptyMap()))) } ?: run.context,
-            park = null, nativeSnapshot = null,
+            park = null, nativeSnapshot = null, cursor = null,
             presentationSource = if (clearPresentationSource) null else run.presentationSource).also { state.runs[id] = it }
     }
 
@@ -894,6 +915,12 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
         put("completedEventId", JsonPrimitive(run.completedEventId)); put("startedQueued", JsonPrimitive(run.startedQueued))
         // Form answers are derived from native values, never restored from the journal.
         put("stepId", JsonPrimitive(run.stepId)); put("context", JsonObject(run.context - "formAnswers")); put("outputs", run.outputs)
+        run.cursor?.let { cursor -> put("cursor", buildJsonObject {
+            cursor.atMillis?.let { put("atMillis", JsonPrimitive(it)) }
+            cursor.lagMillis?.let { put("lagMillis", JsonPrimitive(it)) }
+            cursor.event?.let { put("event", encodeControlEvent(it)) }
+            put("responsesChanged", JsonPrimitive(cursor.responsesChanged))
+        }) }
         put("effectReceipts", JsonObject(run.effectReceipts.mapValues { JsonPrimitive(it.value) }))
         run.pendingCommerce?.let { pending -> put("pendingCommerce", buildJsonObject {
             put("stepId", JsonPrimitive(pending.stepId))
@@ -959,6 +986,10 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
             ?.let(::decodeExecutionSnapshot),
         startedQueued = value.getValue("startedQueued").jsonPrimitive.boolean, stepId = value.text("stepId"),
         context = JsonObject(value.getValue("context").jsonObject - "formAnswers"), outputs = value.getValue("outputs").jsonObject,
+        cursor = value["cursor"]?.jsonObject?.let {
+            JourneyRun.Cursor(it["atMillis"]?.jsonPrimitive?.long, it["lagMillis"]?.jsonPrimitive?.long,
+                it["event"]?.jsonObject?.let(::decodeControlEvent), it.getValue("responsesChanged").jsonPrimitive.boolean)
+        },
         nativeSnapshot = (value["nativeSnapshot"] as? JsonArray)?.let { ai.nuxie.sdk.presentation.ExperienceRunSnapshot(it,
             value["nativeLists"]?.let(ai.nuxie.sdk.presentation.ExperienceRunListSnapshot::decode)) },
         park = value["park"]?.jsonObject?.let {

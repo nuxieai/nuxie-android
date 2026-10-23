@@ -438,16 +438,16 @@ internal class EventLog(
                 }
                 if (!accepts()) {
                     val refreshed = sampleAdmissionTickets()
-                    if (refreshed == head.admissionTickets) return@JourneyWork JourneyWork.Result.Retry
+                    if (refreshed == head.admissionTickets) return@JourneyWork JourneyWork.Result.Failed
                     head.admissionTickets = refreshed
                     ticket = refreshed.getOrNull(head.nextAdmission)
-                        ?: return@JourneyWork JourneyWork.Result.Expand(head.children)
-                    if (!accepts()) return@JourneyWork JourneyWork.Result.Retry
+                        ?: return@JourneyWork JourneyWork.Result.Done(head.children)
+                    if (!accepts()) return@JourneyWork JourneyWork.Result.Failed
                 }
             }
             head.nextAdmission++
         }
-        JourneyWork.Result.Expand(head.children)
+        JourneyWork.Result.Done(head.children)
     }.also { work ->
         work.completed = {
             acknowledgeLocalRouteIfNeeded(head.localRouteEventId)
@@ -1100,22 +1100,25 @@ internal class EventLog(
         val result = try { work.attempt() }
         catch (_: CancellationException) {
             currentCoroutineContext().ensureActive()
-            JourneyWork.Result.Retry
+            JourneyWork.Result.Failed
         }
         catch (error: Exception) {
             Log.w(LOG_TAG, "Recovered Journey work failed", error)
-            JourneyWork.Result.Retry
+            JourneyWork.Result.Failed
         }
         return when (result) {
-            JourneyWork.Result.Blocked -> RecoveryAttempt(listOf(work), true)
-            JourneyWork.Result.Retry -> {
+            JourneyWork.Result.NotYet -> {
+                work.waiting = true
+                work.failed()
+                RecoveryAttempt(listOf(work), false)
+            }
+            JourneyWork.Result.Failed -> {
                 work.hasFailed = true
                 work.waiting = true
                 work.failed()
                 RecoveryAttempt(listOf(work), false)
             }
-            is JourneyWork.Result.Done -> { work.completed(); RecoveryAttempt(result.following, true) }
-            is JourneyWork.Result.Expand -> {
+            is JourneyWork.Result.Done -> {
                 if (result.children.isEmpty()) { work.completed(); RecoveryAttempt(emptyList(), true) }
                 else {
                     var remaining = result.children.size
