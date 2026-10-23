@@ -692,13 +692,15 @@ internal class JourneyRunJournal(directory: File, val distinctId: String,
 
     /** Consume only the checkpoint observed before asynchronous preparation. */
     fun resumeParked(id: String, expectedStepId: String, expectedPark: JourneyRun.Park,
-        advancingTo: Pair<String, JsonObject>? = null): JourneyRun? = update { state ->
+        advancingTo: Pair<String, JsonObject>? = null,
+        clearPresentationSource: Boolean = false): JourneyRun? = update { state ->
         val run = state.runs[id] ?: return@update null
         if (!run.startedQueued || run.completion != null || run.stepId != expectedStepId ||
             run.park != expectedPark) return@update null
         run.copy(stepId = advancingTo?.first ?: run.stepId,
             context = advancingTo?.second?.let { JsonObject(it + ("responses" to JsonObject(emptyMap()))) } ?: run.context,
-            park = null, nativeSnapshot = null).also { state.runs[id] = it }
+            park = null, nativeSnapshot = null,
+            presentationSource = if (clearPresentationSource) null else run.presentationSource).also { state.runs[id] = it }
     }
 
     /** Identity teardown blocks admission and retires parked work too. */

@@ -96,6 +96,72 @@ class JourneyRefetchEventHoldTest {
         directory.deleteRecursively()
     }
 
+    @Test fun `failed no copy settle replay retries without leaving routing held`() = runBlocking {
+        val failing = java.util.concurrent.atomic.AtomicBoolean(false)
+        val attempts = java.util.concurrent.atomic.AtomicInteger()
+        val recovered = CompletableDeferred<Unit>()
+        val delivered = CopyOnWriteArrayList<String>()
+        lateinit var launch: Launch
+        launch = Launch("customer", replay = { owner ->
+            if (failing.get()) {
+                attempts.incrementAndGet()
+                false
+            } else launch.eventLog.replayPendingLocalRoutes(owner).also {
+                if (attempts.get() > 0 && it) recovered.complete(Unit)
+            }
+        }, afterJourney = { event, accepted ->
+            if (accepted && event.name in listOf("held", "later")) delivered += event.name
+        })
+        val snapshot = launch.copy("customer", 1, "start_waiting")
+        launch.start(); launch.commit("customer", snapshot)
+        launch.journeys.profileRefetchWillBegin("customer")
+        launch.withdraw("customer")
+        launch.track("held")
+        assertTrue(delivered.isEmpty())
+        failing.set(true)
+        launch.journeys.profileRefetchDidSettle("customer")
+        launch.eventLog.awaitBarrier()
+        assertEquals("A replay failure must release the refetch hold", listOf("held"), delivered.toList())
+        withTimeout(10_000L) { while (attempts.get() < 3) delay(10) }
+        failing.set(false)
+        // Storage recovery alone lets the shared one-second retry finish reconciliation.
+        withTimeout(10_000L) { recovered.await() }
+        launch.track("later")
+        assertEquals(listOf("held", "later"), delivered.toList())
+    }
+
+    @Test fun `language change hold queues its deadline before a later event`() = runBlocking {
+        val sleeper = WakeSleeper()
+        val enqueued = CompletableDeferred<Unit>()
+        val delivered = CopyOnWriteArrayList<String>()
+        lateinit var launch: Launch
+        launch = Launch("customer", sleep = sleeper::sleep, enqueueDeadline = { deadline ->
+            launch.eventLog.enqueueJourneyDeadline(deadline)
+            enqueued.complete(Unit)
+        }, beforeJourney = { event -> if (event.name == "later") delivered += "event" })
+        val snapshot = launch.copy("customer", 1, "start_waiting", waitSteps(maxTimeMillis = 10_000L))
+        launch.start(); launch.commit("customer", snapshot); launch.track("start_waiting")
+        launch.eventLog.setJourneyDeadlineHandler { deadline ->
+            delivered += "deadline"
+            launch.journeys.handleJourneyDeadline(deadline)
+        }
+        // Language changes begin the refetch before withdrawing the current copy.
+        launch.journeys.profileRefetchWillBegin("customer")
+        launch.withdraw("customer")
+        withTimeout(5_000L) { while (10_000L !in sleeper.pendingDurations) delay(10) }
+        launch.clock.addAndGet(10_000L)
+        sleeper.complete(10_000L)
+        withTimeout(5_000L) { enqueued.await() }
+        launch.clock.addAndGet(5_000L)
+        launch.track("later")
+        assertTrue(delivered.isEmpty())
+        launch.commit("customer", snapshot)
+        launch.journeys.profileRefetchDidSettle("customer")
+        launch.eventLog.awaitBarrier()
+        assertEquals(listOf("deadline", "event"), delivered.toList())
+        assertEquals(1, launch.outcomes("customer", "timed_out"))
+    }
+
     @Test fun `saved matching event retries failed foreground resume before its deadline`() = runBlocking {
         val sleeper = WakeSleeper()
         val failedWrite = java.util.concurrent.atomic.AtomicBoolean(false)

@@ -520,7 +520,7 @@ internal class JourneyService(
                     is Command.Deadline -> handleJourneyDeadlineNow(command.deadline)
                     is Command.NativeRetry -> retryNativeRestoration(command.runId, command.checkpoint)
                     is Command.ResumeRetry -> {
-                        resumeParkedRuns(currentState(), null)
+                        retryJourneyResumeNow()
                         true
                     }
                     is Command.PresentationEnded -> presentationEndedNow(command)
@@ -818,12 +818,17 @@ internal class JourneyService(
 
     suspend fun handleJourneyResumeRetry(): Boolean {
         if (coroutineContext[WorkerContext]?.owner === this) {
-            resumeParkedRuns(currentState(), null)
+            retryJourneyResumeNow()
             return true
         }
         val accepted = CompletableDeferred<Boolean>()
         if (commands.trySend(Command.ResumeRetry(accepted)).isFailure) return true
         return accepted.await()
+    }
+
+    private suspend fun retryJourneyResumeNow() {
+        val state = currentState()
+        if (state == null) reconcileWithoutCopyNow() else resumeParkedRuns(state, null)
     }
 
     private suspend fun handleJourneyDeadlineNow(deadline: JourneyDeadline): Boolean {
@@ -992,6 +997,7 @@ internal class JourneyService(
             ?.retainStateArmReceipts(emptySet())
         updateRoutingHold()
         // Journeys already running keep their pinned releases.
+        scheduleNextWake()
         reconcileWithoutCopyNow()
     }
 
@@ -1223,13 +1229,21 @@ internal class JourneyService(
         if (!initialized || foreground.isRevalidating() || currentState() != null ||
             journal?.distinctId != distinctId || holdsEvents(distinctId)
         ) return
-        if (!replayPendingLocalRoutes(distinctId)) {
-            Log.w(LOG_TAG, "Pending Journey routes stay queued; waits resolve after they replay")
-            return
+        try {
+            if (!replayPendingLocalRoutes(distinctId)) {
+                Log.w(LOG_TAG, "Pending Journey routes stay queued; waits resolve after they replay")
+                requestJourneyResumeRetry()
+                return
+            }
+            resumeParkedRuns(null, null)
+            scheduleNextWake()
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (error: Exception) {
+            Log.w(LOG_TAG, "Journey reconciliation without a copy will retry", error)
+            requestJourneyResumeRetry()
+        } finally {
+            updateRoutingHold()
         }
-        resumeParkedRuns(null, null)
-        scheduleNextWake()
-        updateRoutingHold()
     }
 
     /** A fetch of the customer's copy is running and they have no usable copy. */
@@ -1785,12 +1799,16 @@ internal class JourneyService(
                         JourneyControlExecutor.Signal(selected), snapshot.customer) as? JourneyControlExecutor.Result.Advance
                         ?: continue
                 } else null
+                // Pre-advancing must commit the source replacement normally done by execute.
+                val clearSource = advance?.consumedEvent == true &&
+                    parked.presentationSource?.isReplacedBy(selected?.id) == true
                 beforeParkedResume()
                 val resumed = profileFence.performIfCurrent(profileToken) {
                     publishJournalIfCurrent(executionToken, identityScope) {
                         if (release.hasScreens() && !foreground.get()) null else
                             currentJournal.resumeParked(parked.id, parked.stepId, park,
-                                advancingTo = advance?.let { it.stepId to it.context })
+                                advancingTo = advance?.let { it.stepId to it.context },
+                                clearPresentationSource = clearSource)
                     }
                 } ?: continue
                 execute(resumed, release, executionToken, JourneyControlExecutor.Signal(selected),

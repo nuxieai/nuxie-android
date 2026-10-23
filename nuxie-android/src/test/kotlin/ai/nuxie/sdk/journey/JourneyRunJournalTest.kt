@@ -70,20 +70,28 @@ class JourneyRunJournalTest {
         val journal = JourneyRunJournal(directory, "customer", beforePersist = { check(!failWrite) { "write failed" } })
         val run = requireNotNull(journal.admit(arm(), JourneyFrequency.EveryMatch, "wait", 100_000L))
         journal.markStartedQueued(run)
-        journal.transition(run.id, "wait", run.context, JourneyControlExecutor.Checkpoint(100_000L, 200_000L))
+        val publication = JourneyRun.PendingPresentationPublication("renderer-wait", 0, 1, "screen", "wait",
+            sourceInstanceId = "old-card", items = listOf(JourneyRun.PendingPresentationPublication.Item(
+                "begin_wait", JsonObject(emptyMap()), "renderer-event", 100_000L)))
+        assertNotNull(journal.stagePresentationPublication(run.id, "wait", run.context, publication))
+        journal.transition(run.id, "wait", run.context, JourneyControlExecutor.Checkpoint(100_000L, 200_000L),
+            clearingPresentationPublication = publication.invocationId, presentationEventId = "renderer-event")
         val park = requireNotNull(journal.runs().single().park)
+        val source = requireNotNull(journal.runs().single().presentationSource)
         failWrite = true
         assertTrue(runCatching {
-            journal.resumeParked(run.id, "wait", park, advancingTo = "timeout" to run.context)
+            journal.resumeParked(run.id, "wait", park, advancingTo = "timeout" to run.context, clearPresentationSource = true)
         }.isFailure)
         val retained = JourneyRunJournal(directory, "customer").runs().single()
         assertEquals("wait", retained.stepId)
         assertEquals(park, retained.park)
+        assertEquals(source, retained.presentationSource)
         failWrite = false
-        assertNotNull(journal.resumeParked(run.id, "wait", park, advancingTo = "timeout" to run.context))
+        assertNotNull(journal.resumeParked(run.id, "wait", park, advancingTo = "timeout" to run.context, clearPresentationSource = true))
         val consumed = JourneyRunJournal(directory, "customer").runs().single()
         assertEquals("timeout", consumed.stepId)
         assertNull(consumed.park)
+        assertNull(consumed.presentationSource)
     }
 
     @Test fun `derived form answers are never persisted as journey context`() {

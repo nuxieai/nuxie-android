@@ -3806,6 +3806,11 @@ class JourneyServiceTest {
         assertPurchaseOfferRoute(ai.nuxie.sdk.features.FeatureAccess(false, false, null, ai.nuxie.sdk.features.FeatureType.BOOLEAN), noTarget = true, noFailureOutlet = true)
     }
 
+    @Test fun `a different event satisfying a renderer wait clears its purchase source`() = runBlocking {
+        assertPurchaseOfferRoute(ai.nuxie.sdk.features.FeatureAccess(false, false, null,
+            ai.nuxie.sdk.features.FeatureType.BOOLEAN), waitForDifferentEvent = true)
+    }
+
     private suspend fun assertPurchaseOfferRoute(
         access: ai.nuxie.sdk.features.FeatureAccess?,
         dismissAlternative: JsonObject? = null,
@@ -3813,6 +3818,7 @@ class JourneyServiceTest {
         relativeRow: Boolean = false,
         noTarget: Boolean = false,
         noFailureOutlet: Boolean = false,
+        waitForDifferentEvent: Boolean = false,
     ) {
         val directory = java.io.File(this.directory, java.util.UUID.randomUUID().toString()).apply { mkdirs() }
         val identity = IdentityService(context).also { it.setDistinctId("customer") }
@@ -3829,7 +3835,7 @@ class JourneyServiceTest {
             put("id", "purchase")
             putJsonObject("action") {
                 put("type", "purchase")
-                put("placementId", if (noTarget) JsonPrimitive("") else if (relativeRow) Json.parseToJsonElement("""{"ref":{"kind":"path","path":"placementId","isRelative":true}}""") else JsonPrimitive("golden:monthly"))
+                put("placementId", if (noTarget) JsonPrimitive("") else if (waitForDifferentEvent) Json.parseToJsonElement("""{"ref":{"kind":"path","path":"placementId"}}""") else if (relativeRow) Json.parseToJsonElement("""{"ref":{"kind":"path","path":"placementId","isRelative":true}}""") else JsonPrimitive("golden:monthly"))
             }
             putJsonObject("outlets") {
                 put("completed", "completed")
@@ -3861,7 +3867,12 @@ class JourneyServiceTest {
                         completion("skipped"),
                         Json.parseToJsonElement("""{"kind":"action","id":"skip_unknown","action":{"type":"send_event","eventName":"offer_unknown"},"outlets":{"next":"skipped_unknown"}}"""),
                         completion("skipped_unknown"),
-                    ),
+                    ) + if (waitForDifferentEvent) listOf(Json.parseToJsonElement("""{
+                        "kind":"action","id":"wait_for_finish","action":{"type":"wait_until",
+                        "trigger":{"kind":"event","eventName":"finish"},
+                        "condition":{"type":"Truthy","value":{"type":"Boolean","value":true}},"maxTimeMs":60000},
+                        "outlets":{"satisfied":"purchase","timeout":"failed"}}
+                    """)) else emptyList(),
                 ),
                 "offers" to Json.parseToJsonElement("""[{"screenId":"screen_welcome","placementIds":["golden:monthly"],"alreadyEntitledStepId":"skip_offer","unknownStepId":"skip_unknown"}]"""),
                 "routes" to JsonArray(
@@ -3871,8 +3882,8 @@ class JourneyServiceTest {
                                 put("kind", "screen")
                                 put("screenId", "screen_welcome")
                             }
-                            put("eventName", if (relativeRow || noFailureOutlet) "buy" else SystemEventNames.SCREEN_SHOWN)
-                            put("entryStepId", "purchase")
+                            put("eventName", if (relativeRow || noFailureOutlet || waitForDifferentEvent) "buy" else SystemEventNames.SCREEN_SHOWN)
+                            put("entryStepId", if (waitForDifferentEvent) "wait_for_finish" else "purchase")
                         },
                         buildJsonObject {
                             putJsonObject("host") { put("kind", "screen"); put("screenId", "screen_welcome") }
@@ -3995,7 +4006,32 @@ class JourneyServiceTest {
             assertTrue(presenter.owns(JourneyPresentationOwner(request.journeyId, "customer")))
             return
         }
-        if (relativeRow) {
+        if (waitForDifferentEvent) {
+            val frame = ai.nuxie.sdk.runtime.NuxieViewModelSnapshot.fromNative(ai.nuxie.sdk.runtime.NativeViewModelSnapshot(1,
+                arrayOf(ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(1, 0), ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(2, 0)),
+                arrayOf(
+                    ai.nuxie.sdk.runtime.NativeViewModelSnapshotValue(1, 0, "placementId", ai.nuxie.sdk.runtime.NuxieViewModelPropertyKind.STRING.nativeValue, "golden:monthly".encodeToByteArray(), 0),
+                    ai.nuxie.sdk.runtime.NativeViewModelSnapshotValue(2, 0, "placementId", ai.nuxie.sdk.runtime.NuxieViewModelPropertyKind.STRING.nativeValue, "stale:placement".encodeToByteArray(), 0))),
+                instanceIds = mapOf("stale-card" to 2L))
+            presenter.latestSnapshot = frame
+            val batch = JourneyScreenEmissionBatch(request.journeyId, 0, "wait-from-card",
+                JourneyScreenEmissionSource("screen_welcome", "buy", instanceId = "stale-card"),
+                listOf(JourneyScreenEmission("card-buy", 0, 100_000L, "buy", JsonObject(emptyMap()))))
+            assertEquals(JourneyEmissionBatchResult.ACCEPTED, request.onEmissionBatch(batch, null))
+            val sourceJournal = JourneyRunJournal(directory, "customer", JourneyStorageScope(renderedAuthority))
+            withTimeout(5_000L) { while (sourceJournal.runs().single().park == null) kotlinx.coroutines.delay(10) }
+            val parked = sourceJournal.runs().single()
+            assertEquals("wait_for_finish", parked.stepId)
+            assertNotNull(parked.park)
+            assertEquals("stale-card", parked.presentationSource?.source?.instanceId)
+            assertTrue(presenter.actions.isEmpty())
+            assertTrue(service.handleEvent(StoredEvent("external-finish", "finish", timestampMillis = 100_001L,
+                distinctId = "customer"), service.eventAdmissionGeneration()))
+            val resumed = JourneyRunJournal(directory, "customer", JourneyStorageScope(renderedAuthority)).runs().single()
+            assertNull(resumed.presentationSource)
+            assertNull(resumed.park)
+            assertEquals(JsonPrimitive("golden:monthly"), presenter.actions.single().first["placementId"])
+        } else if (relativeRow) {
             val frame = ai.nuxie.sdk.runtime.NuxieViewModelSnapshot.fromNative(ai.nuxie.sdk.runtime.NativeViewModelSnapshot(1,
                 (1L..4L).map { ai.nuxie.sdk.runtime.NativeViewModelSnapshotInstance(it, 0) }.toTypedArray(),
                 (listOf(ai.nuxie.sdk.runtime.NativeViewModelSnapshotValue(1, 0, "rows", ai.nuxie.sdk.runtime.NuxieViewModelPropertyKind.LIST.nativeValue, byteArrayOf(), 0, listItemIds = longArrayOf(2, 3, 4))) +
@@ -4055,7 +4091,7 @@ class JourneyServiceTest {
         assertTrue(journal.runs().isEmpty())
         assertEquals("continue", journal.checkmark(release.identity.experienceId)?.outcome)
         assertEquals(
-            listOf(JourneyEventNames.LEG_STARTED) + (if (relativeRow) listOf("buy") else emptyList()) + JourneyEventNames.LEG_COMPLETED,
+            listOf(JourneyEventNames.LEG_STARTED) + (if (relativeRow || waitForDifferentEvent) listOf("buy") else emptyList()) + JourneyEventNames.LEG_COMPLETED,
             captures.map { it.first },
         )
     }
@@ -4131,10 +4167,17 @@ class JourneyServiceTest {
             }?.screenId
 
         val resolvedNativeIds = mutableListOf<Long>()
+        var latestSnapshot: ai.nuxie.sdk.runtime.NuxieViewModelSnapshot? = null
         override fun resolveAction(owner: JourneyPresentationOwner, action: JsonObject,
             source: JourneyScreenEmissionSource?, eventSource: ai.nuxie.sdk.presentation.JourneyRuntimeEventSource?): JsonObject? {
             val ref = (action["placementId"] as? JsonObject)?.get("ref") as? JsonObject ?: return action
-            if (ref["isRelative"] != JsonPrimitive(true)) return action
+            if (ref["isRelative"] != JsonPrimitive(true)) {
+                val snapshot = latestSnapshot ?: return action
+                val value = snapshot.resolveScopedString(ref.getValue("path").jsonPrimitive.content,
+                    ref["viewModelName"]?.jsonPrimitive?.content,
+                    if (ref["isRelative"] == JsonPrimitive(false)) null else source?.instanceId) ?: return null
+                return JsonObject(action + ("placementId" to JsonPrimitive(value)))
+            }
             val frame = eventSource ?: return null
             resolvedNativeIds += frame.nativeId
             val value = frame.snapshot.resolveNativeString(ref.getValue("path").jsonPrimitive.content, null, frame.nativeId) ?: return null
