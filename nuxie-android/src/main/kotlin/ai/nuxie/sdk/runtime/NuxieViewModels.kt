@@ -469,6 +469,13 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
     fun stepPlayerFrame(playerHandle: Long, elapsedSeconds: Double): Int =
         error("stepPlayerFrame is not implemented")
 
+    fun playerStepBegin(playerHandle: Long, incoming: ByteArray, step: ByteArray?): Int =
+        error("playerStepBegin is not implemented")
+    fun playerStepEnd(playerHandle: Long, incoming: ByteArray, step: ByteArray?): Int =
+        error("playerStepEnd is not implemented")
+    fun setPlayerRowCollapsed(playerHandle: Long, list: ByteArray, index: Int, collapsed: Boolean): Int =
+        error("setPlayerRowCollapsed is not implemented")
+
     fun setPlayerGlobalViewModel(playerHandle: Long, name: ByteArray, viewModelHandle: Long): Int =
         error("setPlayerGlobalViewModel is not implemented")
 
@@ -788,6 +795,13 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
 
     override fun stepPlayerFrame(playerHandle: Long, elapsedSeconds: Double): Int =
         NuxieRuntimeBridge.nativePlayerStep(playerHandle, elapsedSeconds)
+
+    override fun playerStepBegin(playerHandle: Long, incoming: ByteArray, step: ByteArray?): Int =
+        NuxieRuntimeBridge.nativePlayerStepBegin(playerHandle, incoming, step)
+    override fun playerStepEnd(playerHandle: Long, incoming: ByteArray, step: ByteArray?): Int =
+        NuxieRuntimeBridge.nativePlayerStepEnd(playerHandle, incoming, step)
+    override fun setPlayerRowCollapsed(playerHandle: Long, list: ByteArray, index: Int, collapsed: Boolean): Int =
+        NuxieRuntimeBridge.nativePlayerSetRowCollapsed(playerHandle, list, index, collapsed)
 
     override fun setPlayerGlobalViewModel(playerHandle: Long, name: ByteArray, viewModelHandle: Long): Int =
         NuxieRuntimeBridge.nativePlayerGlobalViewModelSet(playerHandle, name, viewModelHandle)

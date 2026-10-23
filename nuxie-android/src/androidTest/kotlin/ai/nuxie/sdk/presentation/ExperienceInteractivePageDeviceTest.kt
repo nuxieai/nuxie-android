@@ -1,6 +1,6 @@
 package ai.nuxie.sdk.presentation
 
-import ai.nuxie.sdk.experiences.ExperienceLayerHostContract.Style
+import ai.nuxie.sdk.experiences.ExperiencePageHostContract.Style
 import ai.nuxie.sdk.runtime.*
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
@@ -9,14 +9,14 @@ import org.junit.Assert.*
 import org.junit.Test
 
 /** Interim file contract shared with the iOS native layer tests. */
-class ExperienceInteractiveLayerDeviceTest {
+class ExperienceInteractivePageDeviceTest {
     private val descriptor = Json.parseToJsonElement("""{"leg":{"screens":[
         {"id":"screen_1","defaultViewModelName":"Runtime","defaultInstanceId":"row-a"},
         {"id":"screen_2","defaultViewModelName":"Runtime_Upsell","defaultInstanceId":"row-b"}]},
-        "render":{"layerHost":{"artboardName":"LayerList","list":"screens"},"textInputs":[]}}""").jsonObject
+        "render":{"screens":[{"id":"screen_1","artboardName":"Paywall"},{"id":"screen_2","artboardName":"Upsell"}],"layerHost":{"artboardName":"LayerList","list":"screens"},"textInputs":[]}}""").jsonObject
     private fun bytes(name: String) = InstrumentationRegistry.getInstrumentation().context.assets
         .open("runtime/layer-host-interim/$name").use { it.readBytes() }
-    private suspend fun withLayer(body: suspend (ExperienceInteractiveLayer) -> Unit) {
+    private suspend fun withLayer(body: suspend (ExperienceInteractivePage) -> Unit) {
         val lane = NuxieRuntimeLane()
         val runtime = NuxieRuntime.shared
         assertTrue(runtime.isAvailable)
@@ -27,7 +27,7 @@ class ExperienceInteractiveLayerDeviceTest {
                 checkNotNull(runtime.importFile(renderer, bytes, checkNotNull(runtime.inspectFileAssets(bytes))))
             }
             try {
-                val layer = ExperienceInteractiveLayer.open(lane,runtime,file,descriptor)
+                val layer = ExperienceInteractivePage.open(lane,runtime,file,descriptor, host = ai.nuxie.sdk.experiences.ExperiencePageHostContract.Host("LayerList", "screens", null))
                 try { body(layer) } finally { layer.close() }
             } finally { lane.call { file.close() } }
         } finally { lane.call { renderer.close() }; lane.shutdown(); assertTrue(lane.awaitQuiescence(5000)) }
@@ -46,7 +46,7 @@ class ExperienceInteractiveLayerDeviceTest {
             assertEquals(setOf("row-b"),b.instanceAliases(b.nativeRootInstanceId))
             layer.applyJourneyValues("screen_2",mapOf("keptValue" to NuxieViewModelScalarValue.NumberValue(42.0)))
             val removed = layer.remove("screen_1")
-            assertEquals(setOf("screen_1","screen_2"),removed.rows.keys)
+            assertEquals(setOf("screen_2"),removed.rows.keys)
             layer.step(0.5)
             assertEquals(42f,number(layer.snapshot("screen_2"),"keptValue"),0.01f)
             assertTrue(number(layer.snapshot("screen_2"),"markerX") > 100f)
@@ -121,8 +121,8 @@ class ExperienceInteractiveLayerDeviceTest {
             assertEquals(events,up.rows.getValue("screen_2").outcome.events)
         }
     }
-    @Test fun pushBackInsertsBelowAndRowsKeepAuthoredSizeWhenRootResizes() = runBlocking {
-        for ((style,back,expected) in listOf(Triple(Style.PUSH,true,listOf("screen_2","screen_1")),
+    @Test fun newRowsAppendAndKeepAuthoredSizeWhenRootResizes() = runBlocking {
+        for ((style,back,expected) in listOf(Triple(Style.PUSH,true,listOf("screen_1","screen_2")),
             Triple(Style.PUSH,false,listOf("screen_1","screen_2")),
             Triple(Style.MAGIC_MOVE,true,listOf("screen_1","screen_2")),
             Triple(Style.FADE,true,listOf("screen_1","screen_2")))) {
@@ -148,12 +148,12 @@ class ExperienceInteractiveLayerDeviceTest {
         withLayer { layer ->
             layer.insertIncoming("screen_1",Style.NONE,false); layer.step(0.0)
             val removed = layer.remove("screen_1")
-            assertEquals(setOf("screen_1"),removed.rows.keys)
+            assertTrue(removed.rows.isEmpty())
             layer.step(0.5)
             assertTrue(layer.mountedScreenIds().isEmpty())
         }
     }
-    @Test fun rawRemoveThenTimedStepFailsUntilRuntimeFixShips() = runBlocking {
+    @Test fun rawRemoveThenTimedStepPassesWithRuntimeFix() = runBlocking {
         val lane = NuxieRuntimeLane()
         try { lane.call {
             val runtime = NuxieRuntime.shared
@@ -172,10 +172,8 @@ class ExperienceInteractiveLayerDeviceTest {
                                 artboard.insertDefaultListItem("screens",0,row)
                                 player.stepTyped(elapsedSeconds=0.0)
                                 artboard.removeDefaultListItem("screens",0)
-                                val failure = runCatching { player.stepTyped(elapsedSeconds=0.5) }.exceptionOrNull()
-                                // UNIV-5186: this should start passing when the runtime fix ships; delete the layer settle then.
-                                assertTrue("Raw remove/timed step unexpectedly passed; revisit removal sequencing", failure is NuxieRuntimeCallException)
-                                assertEquals(11, (failure as NuxieRuntimeCallException).status)
+                                player.stepTyped(elapsedSeconds=0.5)
+                                Unit
                             } finally { player.close() }
                         } finally { row.close() }
                     } finally { artboard.close() }

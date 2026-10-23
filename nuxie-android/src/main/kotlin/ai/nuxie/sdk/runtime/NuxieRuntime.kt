@@ -382,6 +382,11 @@ internal class NuxieRuntimeArtboard internal constructor(
     }
 
     /** Snapshot only the signed default bound to this artboard, on its owning lane. */
+    internal fun defaultSchemaIndex(): Int {
+        bindDefaultViewModel()
+        return checkNotNull(boundRootSchemaIndex)
+    }
+
     fun defaultViewModelSnapshot(): NuxieViewModelSnapshot? = captureDefaultSnapshot()?.values
 
     fun captureDefaultSnapshot(): NuxieCapturedViewModelSnapshot? {
@@ -471,6 +476,11 @@ internal class NuxieRuntimeArtboard internal constructor(
     fun insertDefaultListItem(path: String, index: Int, value: NuxieRuntimeViewModelState) {
         mutateDefaultViewModel(NativeViewModelWrite(NuxieViewModelMutationKind.LIST_INSERT,
             path, index = index.toLong(), relatedViewModel = value.requireHandle()))
+    }
+
+    fun moveDefaultListItem(path: String, from: Int, to: Int) {
+        mutateDefaultViewModel(NativeViewModelWrite(NuxieViewModelMutationKind.LIST_MOVE,
+            path, index = from.toLong(), secondIndex = to.toLong()))
     }
 
     fun removeDefaultListItem(path: String, index: Int) {
@@ -698,8 +708,26 @@ internal class NuxieRuntimePlayer internal constructor(
     private var stepFailed = false
     private val stateMachine by lazy(LazyThreadSafetyMode.NONE) { isStateMachine() }
 
-    fun requireStateMachine() {
-        check(stateMachine) { "Layer host requires a default state machine" }
+    fun requireStateMachine(expectedName: String? = null) {
+        check(stateMachine) { "Page host requires a default state machine" }
+        if (expectedName != null) check(requireNativeValue(native.playerStateMachineName(requireHandle()),
+            "read page default machine") == expectedName) { "Page host has an unexpected default machine" }
+    }
+
+    fun stepBegin(incomingArtboard: String, transitionId: String?) {
+        requireNativeSuccess(native.playerStepBegin(requireHandle(), incomingArtboard.toByteArray(Charsets.UTF_8),
+            transitionId?.toByteArray(Charsets.UTF_8)), "begin page step")
+    }
+
+    fun stepEnd(incomingArtboard: String, transitionId: String?) {
+        requireNativeSuccess(native.playerStepEnd(requireHandle(), incomingArtboard.toByteArray(Charsets.UTF_8),
+            transitionId?.toByteArray(Charsets.UTF_8)), "end page step")
+    }
+
+    fun setRowCollapsed(list: String, index: Int, collapsed: Boolean) {
+        require(index >= 0) { "Negative row index" }
+        requireNativeSuccess(native.setPlayerRowCollapsed(requireHandle(), list.toByteArray(Charsets.UTF_8), index, collapsed),
+            "set page row collapsed")
     }
 
     fun bindGlobalViewModel(name: String, value: NuxieRuntimeViewModelState) {

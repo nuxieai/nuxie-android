@@ -61,6 +61,43 @@ class ExperienceScreenViewTransitionTest {
         assertEquals(-150f, target.translationX, 0f)
     }
 
+    @Test fun `page pop reverses the native push slide and reveals the retained lower view`() {
+        val source = screen()
+        val target = screen()
+        val pop = ExperienceScreenViewTransition(source, target, ExperienceScreenTransitionPlan.Kind.POP)
+        pop.applyProgress(0f)
+        assertEquals(0f, source.translationX, 0f)
+        assertEquals(-200f, target.translationX, 0f)
+        pop.applyProgress(1f)
+        assertEquals(200f, source.translationX, 0f)
+        assertEquals(0f, target.translationX, 0f)
+        assertEquals(1f, target.alpha, 0f)
+    }
+
+    @Test fun `page pop keeps native sheet chrome above the page roots`() {
+        val parent = android.widget.FrameLayout(RuntimeEnvironment.getApplication())
+        val lower = screen()
+        val upper = screen()
+        val chrome = screen()
+        parent.addView(lower); parent.addView(upper); parent.addView(chrome)
+        val pop = ExperienceScreenViewTransition(upper, lower, ExperienceScreenTransitionPlan.Kind.POP)
+        val job = CoroutineScope(Dispatchers.Unconfined).launch { pop.play(false) }
+        try { assertSame(chrome, parent.getChildAt(parent.childCount - 1)) }
+        finally { pop.cancel() }
+        assertTrue(job.isCancelled)
+    }
+
+    @Test fun `native page pop pauses while hidden and completes after resuming`() {
+        val pop = ExperienceScreenViewTransition(screen(), screen(), ExperienceScreenTransitionPlan.Kind.POP)
+        val job = CoroutineScope(Dispatchers.Unconfined).launch { pop.play(false) }
+        shadowOf(Looper.getMainLooper()).idleFor(500, TimeUnit.MILLISECONDS)
+        assertFalse(job.isCompleted)
+        pop.setVisible(true)
+        shadowOf(Looper.getMainLooper()).idleFor(500, TimeUnit.MILLISECONDS)
+        assertTrue(job.isCompleted)
+        assertFalse(job.isCancelled)
+    }
+
     @Test
     fun `native animator completes and cancellation releases its waiter`() {
         val source = screen()

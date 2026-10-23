@@ -11,7 +11,7 @@ internal data class ExperienceScreenTransitionPlan(
     val kind: Kind,
     val custom: Custom? = null,
 ) {
-    enum class Kind { NONE, PUSH, MODAL, FADE, CUSTOM }
+    enum class Kind { NONE, PUSH, POP, MODAL, FADE, CUSTOM }
 
     data class Custom(
         val id: String,
@@ -27,12 +27,13 @@ internal data class ExperienceScreenTransitionPlan(
 
     companion object {
         fun resolveLayer(intent: JsonObject?, descriptor: JsonObject, source: String, destination: String): Custom? {
-            val id = intent?.let(ai.nuxie.sdk.experiences.ExperienceLayerHostContract::intent)?.transitionId ?: return null
+            val id = intent?.let(ai.nuxie.sdk.experiences.ExperiencePageHostContract::intent)?.transitionId ?: return null
             val render = descriptor["render"] as JsonObject
-            val declaration = ai.nuxie.sdk.experiences.ExperienceLayerHostContract.transitions(render).firstOrNull { it.id == id }
+            val declaration = ai.nuxie.sdk.experiences.ExperiencePageHostContract.transitions(render).firstOrNull { it.id == id }
                 ?: return null
             val edge = declaration.resolve(source, destination) ?: return null
-            return Custom(id, edge.durationMs, edge.incomingOnTop, edge.outgoingCompletionEvent, edge.incomingCompletionEvent)
+            val name = if (declaration.sourceScreenId == source) id else "$id.reverse"
+            return Custom(name, edge.durationMs, edge.incomingOnTop, edge.outgoingCompletionEvent, edge.incomingCompletionEvent)
         }
 
         fun resolve(
