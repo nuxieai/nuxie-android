@@ -43,7 +43,7 @@ internal object JourneyRenderSchema {
         val renderer = oneOf(input["renderer"], "nux")
         val sceneField = "nux"
         val render = exact(input, setOf("renderer", sceneField, "screens", "transitions", "textInputs", "assets"), setOf("videoElements", "layerHost"))
-        ExperienceLayerHostContract.host(render)
+        render["layerHost"]?.let(ExperiencePageHostContract::readHost)
         videoElements(render)
         val scene = exact(render[sceneField], setOf("key", "sha256", "sizeBytes", "contentType"))
         val sha = hash(scene["sha256"])
@@ -64,7 +64,7 @@ internal object JourneyRenderSchema {
         for (input in array(render["transitions"], 1024)) {
             val transition = exact(input, setOf("id", "kind", "sourceScreenId", "destinationScreenId", "durationMs",
                 "incomingOnTop", "source", "destination"), setOf("reverse", "defaultPair"))
-            releaseId(transition["id"]); ExperienceLayerHostContract.transitionKind(transition["kind"])
+            releaseId(transition["id"]); oneOf(transition["kind"], "layer", "choreographed")
             transition["defaultPair"]?.let { boolean(it) }
             for (key in listOf("sourceScreenId", "destinationScreenId")) if (releaseId(transition[key]) !in screens) fail("transition screen")
             integer(transition["durationMs"], maximum = 60_000); boolean(transition["incomingOnTop"])

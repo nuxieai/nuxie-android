@@ -169,9 +169,9 @@ internal class ExperienceTextInputOverlay(
     }
 
     /** IME callbacks can outlive touch dispatch; fence them during native preparation too. */
-    fun setInputEnabled(enabled: Boolean) {
+    fun setInputEnabled(enabled: Boolean, preserveFocus: Boolean = false) {
         if (closed || inputEnabled == enabled) return
-        if (!enabled) clearEditorFocus()
+        if (!enabled && !preserveFocus) clearEditorFocus()
         inputEnabled = false
         bindings.forEach { binding ->
             val editor = binding.editor
@@ -189,7 +189,7 @@ internal class ExperienceTextInputOverlay(
                 binding.field.let { draft.present(it.captureId) }
             }
             val node = binding.field.node
-            editor.isEnabled = enabled && binding.geometryAvailable && (node.stateFlags and NativeSemanticState.DISABLED == 0)
+            editor.isEnabled = (enabled || preserveFocus) && binding.geometryAvailable && (node.stateFlags and NativeSemanticState.DISABLED == 0)
         }
         inputEnabled = enabled
     }

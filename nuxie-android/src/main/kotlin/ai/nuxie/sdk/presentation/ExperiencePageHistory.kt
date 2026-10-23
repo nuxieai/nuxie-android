@@ -1,30 +1,33 @@
 package ai.nuxie.sdk.presentation
 
-/** Immutable history for one native layer. Its root is never popped by back. */
-internal data class ExperienceLayerHistory(val screens: List<String>,
+/** History belongs to a native page. Repeated visits keep separate forward references. */
+internal data class ExperiencePageHistory(val screens: List<String>,
     val transitions: List<kotlinx.serialization.json.JsonObject?> = List(screens.size) { null }) {
     init { require(screens.isNotEmpty()) }
 
     fun backTarget(steps: Int): String = screens[(screens.lastIndex - steps.coerceAtLeast(1)).coerceAtLeast(0)]
 
-    fun navigate(target: String, push: Boolean): ExperienceLayerHistory {
+    fun navigate(target: String, push: Boolean): ExperiencePageHistory {
         // E47 provisional decision: reuse an earlier screen and preserve its state.
         val existing = screens.indexOf(target)
-        if (existing >= 0) return ExperienceLayerHistory(screens.take(existing + 1))
-        return ExperienceLayerHistory((if (push) screens else screens.dropLast(1)) + target)
+        if (existing >= 0) return ExperiencePageHistory(screens.take(existing + 1))
+        return ExperiencePageHistory((if (push) screens else screens.dropLast(1)) + target)
     }
 
-    fun visit(target: String, transition: kotlinx.serialization.json.JsonObject?): ExperienceLayerHistory {
-        val existing = screens.indexOf(target)
-        return if (existing >= 0) ExperienceLayerHistory(screens.take(existing + 1), transitions.take(existing + 1))
-        else ExperienceLayerHistory(screens + target, transitions + transition)
+    fun visit(target: String, transition: kotlinx.serialization.json.JsonObject?): ExperiencePageHistory {
+        return ExperiencePageHistory(screens + target, transitions + transition)
+    }
+
+    fun popping(steps: Int): ExperiencePageHistory {
+        val count = (screens.size - steps.coerceAtLeast(1)).coerceAtLeast(1)
+        return ExperiencePageHistory(screens.take(count), transitions.take(count))
     }
 
     fun backTransition(steps: Int, target: String, descriptor: kotlinx.serialization.json.JsonObject): kotlinx.serialization.json.JsonObject? {
         if (steps == 1) return transitions.last()
         val render = descriptor["render"] as kotlinx.serialization.json.JsonObject
-        val pair = ai.nuxie.sdk.experiences.ExperienceLayerHostContract.transitions(render).firstOrNull {
-            it.isDefaultPair && it.resolve(screens.last(), target) != null
+        val pair = ai.nuxie.sdk.experiences.ExperiencePageHostContract.transitions(render).firstOrNull {
+            it.isDefaultPair && it.sourceScreenId == screens.last() && it.destinationScreenId == target
         } ?: return null
         return kotlinx.serialization.json.buildJsonObject {
             put("type", kotlinx.serialization.json.JsonPrimitive("magic-move"))
@@ -36,6 +39,7 @@ internal data class ExperienceLayerHistory(val screens: List<String>,
 /** Native lifecycle work around the service's durable hidden/reveal callbacks. */
 internal interface PreparedLayerReveal {
     val method: String get() = "native_sheet"
+    val pagesToClose: Int get() = 1
     suspend fun prepare()
     fun activate()
 }

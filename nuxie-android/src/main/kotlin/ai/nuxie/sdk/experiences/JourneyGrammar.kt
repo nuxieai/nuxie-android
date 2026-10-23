@@ -130,7 +130,7 @@ internal object JourneyGrammar {
     }
 
     private fun transition(input: JsonElement) {
-        ExperienceLayerHostContract.intent(input)
+        ExperiencePageHostContract.intent(input)
     }
 
     private fun values(input: JsonElement?) {

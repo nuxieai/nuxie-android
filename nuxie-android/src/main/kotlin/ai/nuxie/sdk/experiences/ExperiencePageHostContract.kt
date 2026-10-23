@@ -13,10 +13,15 @@ import ai.nuxie.sdk.experiences.JourneyReleaseJson.text
 import ai.nuxie.sdk.runtime.NuxieViewModelCatalog
 import kotlinx.serialization.json.*
 
-/** Provisional publish metadata until UNIV-5113 supplies the final contract. */
-internal object ExperienceLayerHostContract {
-    data class Host(val artboardName: String, val listPath: String)
-    enum class Kind { LAYER, CHOREOGRAPHED }
+/** Published page names. Legacy release readers remain until the validator follow-up. */
+internal object ExperiencePageHostContract {
+    const val ARTBOARD = "\$nuxie.page"
+    const val MACHINE = "\$nuxie.page"
+    const val MODEL = "\$nuxie.Page"
+    const val SCREENS = "screens"
+    data class Host(val artboardName: String = ARTBOARD, val listPath: String = SCREENS,
+        val modelName: String? = MODEL, val machineName: String? = if (modelName == MODEL) MACHINE else null)
+    enum class Kind { PAGE, LAYER, CHOREOGRAPHED }
     enum class Style { MAGIC_MOVE, PUSH, FADE, NONE, CUSTOM, MODAL }
     data class Intent(val style: Style, val transitionId: String?)
     data class Endpoints(val durationMs: Long, val incomingOnTop: Boolean,
@@ -33,17 +38,18 @@ internal object ExperienceLayerHostContract {
     data class RowSelection(val schemaIndex: Int, val authoredInstanceIndex: Int?,
         val rootName: String, val defaultInstanceId: String?)
 
-    fun host(render: JsonObject): Host? = render["layerHost"]?.let(::readHost)
-
+    // Release admission remains on the interim marker until Q2 and the validator follow-up.
+    // The player always opens the fixed published page names, never this marker's names.
     fun isEnabled(descriptor: JsonObject?): Boolean =
-        (descriptor?.get("render") as? JsonObject)?.let(::host) != null
+        (descriptor?.get("render") as? JsonObject)?.containsKey("layerHost") == true
 
     fun readHost(value: JsonElement): Host {
         val host = exact(value, setOf("artboardName", "list"))
         return Host(id(host["artboardName"], 256), oneOf(host["list"], "screens"))
     }
 
-    fun transitionKind(value: JsonElement?): Kind = when (oneOf(value, "layer", "choreographed")) {
+    fun transitionKind(value: JsonElement?): Kind = when (oneOf(value, "page", "layer", "choreographed")) {
+        "page" -> Kind.PAGE
         "layer" -> Kind.LAYER
         else -> Kind.CHOREOGRAPHED
     }
@@ -76,7 +82,7 @@ internal object ExperienceLayerHostContract {
         val value = record(input)
         fun endpoints(edge: JsonObject): Endpoints = Endpoints(
             integer(edge["durationMs"] ?: value["durationMs"]),
-            boolean(edge["incomingOnTop"] ?: value["incomingOnTop"]),
+            (edge["incomingOnTop"] ?: value["incomingOnTop"])?.let(::boolean) ?: true,
             JourneyReleaseSchema.releaseId(record(edge["source"])["completeEventName"]),
             JourneyReleaseSchema.releaseId(record(edge["destination"])["completeEventName"]))
         Transition(JourneyReleaseSchema.releaseId(value["id"]), transitionKind(value["kind"]),
@@ -85,22 +91,17 @@ internal object ExperienceLayerHostContract {
             value["reverse"]?.let { endpoints(record(it)) }, value["defaultPair"]?.let(::boolean) ?: false)
     }
 
-    /** Catalog defaults index the flat table; allocation takes a schema-local index. */
-    fun rowSelection(descriptor: JsonObject, screenId: String, catalog: NuxieViewModelCatalog): RowSelection {
-        val screens = array(record(descriptor["leg"])["screens"]).map(::record)
-        val screen = requireNotNull(screens.singleOrNull { text(it["id"]) == screenId }) { "Unknown Screen" }
-        val name = text(screen["defaultViewModelName"])
-        require(screens.count { it["defaultViewModelName"] == JsonPrimitive(name) } == 1) {
-            "Layer Screens require distinct root types"
-        }
-        val schema = requireNotNull(catalog.schemas.singleOrNull { it.name == name }) {
-            "Layer row requires a unique Screen root type"
-        }
-        val authored = schema.defaultAuthoredInstance?.let { index ->
-            requireNotNull(catalog.authoredInstances.getOrNull(index)?.takeIf { it.schemaIndex == schema.index }) {
-                "Layer row has an invalid authored default"
-            }.index
-        }
-        return RowSelection(schema.index, authored, name, screen["defaultInstanceId"]?.let(::text))
+    fun screenArtboard(descriptor: JsonObject, screenId: String): String {
+        val render = record(descriptor["render"])
+        val screen = array(render["screens"]).map(::record).single { text(it["id"]) == screenId }
+        return text(screen["artboardName"])
     }
+
+    fun pageRowSelection(descriptor: JsonObject, screenId: String, catalog: NuxieViewModelCatalog,
+        schemaIndex: Int): RowSelection {
+        val schema = catalog.schemas.single { it.index == schemaIndex }
+        val screen = array(record(descriptor["leg"])["screens"]).map(::record).single { text(it["id"]) == screenId }
+        return RowSelection(schema.index, null, schema.name, screen["defaultInstanceId"]?.let(::text))
+    }
+
 }

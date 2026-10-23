@@ -1,23 +1,23 @@
 package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.billing.StoreProduct
-import ai.nuxie.sdk.experiences.ExperienceLayerHostContract
+import ai.nuxie.sdk.experiences.ExperiencePageHostContract
 import ai.nuxie.sdk.experiences.ExperienceViewModelBinding
 import ai.nuxie.sdk.runtime.*
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
 import kotlinx.serialization.json.JsonObject
 
-/** One layer's player. All native work, including detach settlement, stays on its owning lane. */
-internal class ExperienceInteractiveLayer private constructor(
+/** One native page's player. Every native operation stays on its owning lane. */
+internal class ExperienceInteractivePage private constructor(
     private val lane: NuxieRuntimeLane,
     private val runtime: NuxieRuntime,
     private val file: NuxieRuntimeFile,
     private val descriptor: JsonObject,
-    private val contract: ExperienceLayerHostContract.Host,
+    private val contract: ExperiencePageHostContract.Host,
     val artboard: NuxieRuntimeArtboard,
     val player: NuxieRuntimePlayer,
-    private val environment: NuxieRuntimeViewModelState?,
+    internal val environment: NuxieRuntimeViewModelState?,
     private val sharedExperience: NuxieRuntimeViewModelState?,
 ) {
     data class RowStep(val outcome: NuxiePlayerStepOutcome, val snapshot: NuxieViewModelSnapshot,
@@ -28,7 +28,7 @@ internal class ExperienceInteractiveLayer private constructor(
         val unattributedHostCommands: List<NuxieHostCommand> get() = native.hostCommands
     }
     private class Row(
-        val selection: ExperienceLayerHostContract.RowSelection,
+        val selection: ExperiencePageHostContract.RowSelection,
         val values: NuxieRuntimeViewModelState,
         val products: List<StoreProduct>,
         val textInputs: List<ExperienceTextInput>,
@@ -39,6 +39,8 @@ internal class ExperienceInteractiveLayer private constructor(
     }
     private val rows = linkedMapOf<String, Row>()
     private val mounted = mutableListOf<String>()
+    private val collapsed = mutableSetOf<String>()
+    private var liveStep: Pair<String, String?>? = null
     private var closed = false
     private var failure: Throwable? = null
 
@@ -46,16 +48,15 @@ internal class ExperienceInteractiveLayer private constructor(
 
     internal fun mountedScreenIdsOnLane(): List<String> = checked { mounted.toList() }
 
-    suspend fun insertIncoming(screenId: String, style: ExperienceLayerHostContract.Style,
+    suspend fun insertIncoming(screenId: String, style: ExperiencePageHostContract.Style,
         isBack: Boolean, products: List<StoreProduct> = emptyList(),
         routing: JourneyRuntimeEmissionCoordinator? = null) = lane.call { insertIncomingOnLane(screenId, style, isBack, products, routing) }
 
-    internal fun insertIncomingOnLane(screenId: String, style: ExperienceLayerHostContract.Style,
+    internal fun insertIncomingOnLane(screenId: String, style: ExperiencePageHostContract.Style,
         isBack: Boolean, products: List<StoreProduct> = emptyList(),
         routing: JourneyRuntimeEmissionCoordinator? = null) = checked {
-        require(screenId !in mounted && mounted.size < 2) { "Invalid layer row insertion" }
         prepareOnLane(screenId, products, routing)
-        insertOnLane(screenId, incomingIndex(style, isBack, mounted.size))
+        takeIncomingOnLane(screenId)
     }
 
     suspend fun prepare(screenId: String, products: List<StoreProduct> = emptyList(),
@@ -77,28 +78,107 @@ internal class ExperienceInteractiveLayer private constructor(
     }
 
     internal fun insertOnLane(screenId: String, index: Int) = checked {
-        require(screenId !in mounted && mounted.size < 2 && index in 0..mounted.size) { "Invalid layer row insertion" }
+        require(screenId !in mounted && index == mounted.size) { "New page rows must append" }
         artboard.insertDefaultListItem(contract.listPath, index, row(screenId).values)
-        mounted.add(index, screenId)
+        mounted.add(screenId)
+    }
+
+    suspend fun takeIncoming(screenId: String, source: String, isBack: Boolean) =
+        lane.call { takeIncomingOnLane(screenId, source, isBack) }
+
+    internal fun takeIncomingOnLane(screenId: String, source: String? = null, isBack: Boolean = false) = checked {
+        if (screenId !in mounted) insertOnLane(screenId, mounted.size)
+        else {
+            if (source != null && source != screenId) {
+                val from = mounted.indexOf(screenId)
+                val remaining = mounted.filter { it != screenId }
+                val sourceIndex = remaining.indexOf(source)
+                require(sourceIndex >= 0) { "Outgoing row is absent" }
+                val to = sourceIndex + if (isBack) 0 else 1
+                if (from != to) {
+                    artboard.moveDefaultListItem(contract.listPath, from, to)
+                    mounted.removeAt(from)
+                    mounted.add(to, screenId)
+                }
+            }
+            if (screenId in collapsed) setCollapsedOnLane(screenId, false)
+        }
+    }
+
+    internal fun setCollapsedOnLane(screenId: String, value: Boolean) = checked {
+        val index = mounted.indexOf(screenId)
+        require(index >= 0) { "Screen is absent from the page" }
+        player.setRowCollapsed(contract.listPath, index, value)
+        if (value) collapsed.add(screenId) else collapsed.remove(screenId)
+        Unit
+    }
+
+    suspend fun setCollapsed(screenId: String, value: Boolean) = lane.call { setCollapsedOnLane(screenId, value) }
+
+    suspend fun isCollapsed(screenId: String): Boolean = lane.call { screenId in collapsed }
+
+    suspend fun begin(screenId: String, transition: String?) = lane.call { beginOnLane(screenId, transition) }
+    suspend fun end(screenId: String, transition: String?) = lane.call { endOnLane(screenId, transition) }
+    suspend fun retire(reachable: Set<String>, active: String) = lane.call { retireOnLane(reachable, active) }
+
+    internal fun beginOnLane(screenId: String, transition: String?) = checked {
+        check(liveStep == null) { "Page step already active" }
+        check(screenId in mounted && screenId !in collapsed) { "Incoming row must be expanded" }
+        player.stepBegin(ExperiencePageHostContract.screenArtboard(descriptor, screenId), transition)
+        liveStep = screenId to transition
+    }
+
+    internal fun endOnLane(screenId: String, transition: String?) = checked {
+        check(liveStep == screenId to transition) { "Page step does not match" }
+        player.stepEnd(ExperiencePageHostContract.screenArtboard(descriptor, screenId), transition)
+        liveStep = null
+    }
+
+    internal fun cancelStepOnLane(source: String) = checked {
+        liveStep?.let { (target, transition) ->
+            endOnLane(target, transition)
+            takeIncomingOnLane(source)
+            beginOnLane(source, null)
+            endOnLane(source, null)
+        }
+    }
+
+    /** The new history determines all reachable rows, including repeated visits. */
+    internal fun retireOnLane(reachable: Set<String>, active: String) = checked {
+        for (id in mounted.toList()) {
+            if (id !in reachable) removeOnLane(id)
+            else if (id != active && id !in collapsed) setCollapsedOnLane(id, true)
+        }
+    }
+
+    suspend fun mountInitial(screenId: String, entering: Boolean) = lane.call { mountInitialOnLane(screenId, entering) }
+
+    internal fun mountInitialOnLane(screenId: String, entering: Boolean) = checked {
+        takeIncomingOnLane(screenId)
+        if (entering && row(screenId).lifecycle.phase == ExperienceScreenLifecycle.Phase.HIDDEN)
+            setPhasesOnLane(listOf(screenId to ExperienceScreenLifecycle.Phase.ENTERING))
+        else applyLifecycleOnLane(screenId)
     }
 
     internal fun valuesOnLane(screenId: String): NuxieRuntimeViewModelState = checked { row(screenId).values }
 
+    suspend fun applyRuntimeValues(screenId: String, values: Map<String, NuxieViewModelScalarValue>) =
+        lane.call { applyRuntimeValuesOnLane(screenId, values) }
+
     internal fun applyRuntimeValuesOnLane(screenId: String, values: Map<String, NuxieViewModelScalarValue>): Set<String> = checked {
         val row = row(screenId)
         val accepted = mutableSetOf<String>()
-        (values["fontScale"] as? NuxieViewModelScalarValue.NumberValue)?.let { row.lifecycle.updateFontScale(it.value.toFloat()) }
+        (values["env/fontScale"] as? NuxieViewModelScalarValue.NumberValue)?.let { row.lifecycle.updateFontScale(it.value.toFloat()) }
         (values["env/reduceMotion"] as? NuxieViewModelScalarValue.BooleanValue)?.let { row.lifecycle.updateReduceMotion(it.value) }
         ExperienceScreenRuntimeValues(row.values.supportsEnumPath("screen/exitReason")).apply(values, { path, value ->
-            if (path == "fontScale" && !row.values.snapshot().containsValue(path)) return@apply
             val envPath = when (path) {
                 "env/reduceMotion" -> "reduceMotion"
+                "env/fontScale" -> "fontScale"
                 "safeArea/top", "safeArea/bottom", "safeArea/left", "safeArea/right" -> path
                 else -> null
             }
             if (envPath != null) {
                 environment?.setValue(envPath, value)
-                if (path == "env/reduceMotion" && row.values.snapshot().containsValue(path)) row.values.setValue(path, value)
             } else row.values.setValue(path, value)
             accepted += path
         }, { _, error -> throw error })
@@ -133,7 +213,15 @@ internal class ExperienceInteractiveLayer private constructor(
 
     private fun prepareRow(screenId: String, products: List<StoreProduct>, routing: JourneyRuntimeEmissionCoordinator?,
         preparedProjection: NuxieViewModelListProjection?, snapshot: NuxieViewModelSnapshot?, lifecycle: ExperienceScreenLifecycle): Row {
-        val selection = ExperienceLayerHostContract.rowSelection(descriptor, screenId, file.viewModelCatalog())
+        val screenArtboard = checkNotNull(file.newArtboard(ExperiencePageHostContract.screenArtboard(descriptor, screenId))) {
+            "Screen artboard is unavailable"
+        }
+        val schemaIndex = try { screenArtboard.defaultSchemaIndex() } finally { screenArtboard.close() }
+        require(rows.values.none { it.selection.schemaIndex == schemaIndex }) { "Page Screens require distinct root schemas" }
+        val selection = ExperiencePageHostContract.pageRowSelection(descriptor, screenId, file.viewModelCatalog(), schemaIndex)
+        require(snapshot == null || snapshot.retainedGraph.rootSchemaIndex == schemaIndex) {
+            "Cached Screen schema differs from its published artboard"
+        }
         val projection = preparedProjection ?: GooglePlayProductViewModelProjection.prepare(descriptor, products, screenId)
         val values = snapshot?.let { runtime.restoreRowViewModel(file, it.withoutRootProperty("experience")) } ?: runtime.bindRowViewModel(file, selection.schemaIndex, selection.authoredInstanceIndex,
             selection.defaultInstanceId, ExperienceViewModelBinding.instanceBindings(descriptor), projection)
@@ -169,7 +257,6 @@ internal class ExperienceInteractiveLayer private constructor(
     private fun writeLifecycle(row: Row, values: Map<String, NuxieViewModelScalarValue>) {
         for ((path, value) in values) {
             if (path.startsWith("env/")) continue
-            if (path == "fontScale" && !row.values.snapshot().containsValue(path)) continue
             if (path == "screen/exitReason" && !row.values.supportsEnumPath(path)) continue
             row.values.setValue(path, value)
         }
@@ -186,7 +273,7 @@ internal class ExperienceInteractiveLayer private constructor(
     suspend fun updateEnvironment(values: Map<String, NuxieViewModelScalarValue>) = lane.call { updateEnvironmentOnLane(values) }
 
     internal fun updateEnvironmentOnLane(values: Map<String, NuxieViewModelScalarValue>) = checked {
-        for ((path, value) in values) checkNotNull(environment) { "Layer has no env" }.setValue(path, value)
+        for ((path, value) in values) checkNotNull(environment) { "Page has no env" }.setValue(path, value)
     }
 
     suspend fun snapshot(screenId: String): NuxieViewModelSnapshot = lane.call { snapshotOnLane(screenId) }
@@ -209,10 +296,10 @@ internal class ExperienceInteractiveLayer private constructor(
     /** A watchdog retires its waiters explicitly before removing the outgoing row. */
     suspend fun removeCompletion(screenId: String, completion: Deferred<Unit>) = lane.call { removeCompletionOnLane(screenId, completion) }
 
-    internal fun removeCompletionOnLane(screenId: String, completion: Deferred<Unit>) = checked {
-        row(screenId).completions.keys.firstOrNull { it === completion }?.let {
-            row(screenId).completions.remove(it)
-            it.cancel()
+    internal fun removeCompletionOnLane(screenId: String, completion: Deferred<Unit>) {
+        // Cleanup must not replace the original failure after the player has failed or closed.
+        rows[screenId]?.completions?.let { waiters ->
+            waiters.keys.firstOrNull { it === completion }?.let { waiters.remove(it); it.cancel() }
         }
     }
 
@@ -220,13 +307,13 @@ internal class ExperienceInteractiveLayer private constructor(
 
     internal fun removeOnLane(screenId: String, correlationId: ULong = 0uL): Step = checked {
         val index = mounted.indexOf(screenId)
-        require(index >= 0) { "Screen is absent from the layer" }
+        require(index >= 0) { "Screen is absent from the page" }
         check(row(screenId).completions.isEmpty()) { "Screen still awaits completion" }
         artboard.removeDefaultListItem(contract.listPath, index)
-        // https://universe.basis.dev/issue/UNIV-5186 requires settling removal before a timed advance.
-        val settled = stepLocked(0.0, emptyList(), correlationId)
+        // No advance is needed after removal with the UNIV-5186 runtime fix.
         mounted.removeAt(index)
-        settled
+        collapsed.remove(screenId)
+        captureOnLane(NuxiePlayerStepOutcome(false, emptyList(), emptyList(), emptyList(), emptyList()), correlationId)
     }
 
     suspend fun step(elapsedSeconds: Double, pointers: List<NuxiePlayerPointerEvent> = emptyList(),
@@ -298,7 +385,7 @@ internal class ExperienceInteractiveLayer private constructor(
         }
     }
 
-    private fun row(id: String): Row = requireNotNull(rows[id]) { "Unknown layer row" }
+    private fun row(id: String): Row = requireNotNull(rows[id]) { "Unknown page row" }
     internal fun fail(error: Throwable) {
         if (failure == null) failure = error
         rows.values.forEach { row ->
@@ -310,8 +397,8 @@ internal class ExperienceInteractiveLayer private constructor(
     private suspend fun <T> operation(block: () -> T): T = lane.call { checked(block) }
 
     private fun <T> checked(block: () -> T): T {
-        check(!closed) { "Layer is closed" }
-        failure?.let { throw IllegalStateException("Layer player failed", it) }
+        check(!closed) { "Page is closed" }
+        failure?.let { throw IllegalStateException("Page player failed", it) }
         return try { block() } catch (error: NuxieRuntimeCallException) {
             fail(error)
             throw error
@@ -319,32 +406,35 @@ internal class ExperienceInteractiveLayer private constructor(
     }
 
     companion object {
-        /** The caller retains the file and lane until the layer has closed. */
+        /** The caller retains the file and lane until the page has closed. */
         suspend fun open(lane: NuxieRuntimeLane, runtime: NuxieRuntime, file: NuxieRuntimeFile,
-            descriptor: JsonObject, sharedExperience: NuxieRuntimeViewModelState? = null): ExperienceInteractiveLayer = lane.call {
-            openOnLane(lane, runtime, file, descriptor, sharedExperience)
+            descriptor: JsonObject, sharedExperience: NuxieRuntimeViewModelState? = null,
+            host: ExperiencePageHostContract.Host = ExperiencePageHostContract.Host(),
+            initializeFixture: ((NuxieRuntimeArtboard) -> Unit)? = null): ExperienceInteractivePage = lane.call {
+            openOnLane(lane, runtime, file, descriptor, sharedExperience, host, initializeFixture)
         }
 
         internal fun openOnLane(lane: NuxieRuntimeLane, runtime: NuxieRuntime, file: NuxieRuntimeFile,
-            descriptor: JsonObject, sharedExperience: NuxieRuntimeViewModelState? = null): ExperienceInteractiveLayer {
-            val contract = requireNotNull(ExperienceLayerHostContract.host(descriptor.getValue("render") as JsonObject)) {
-                "Release has no layer host"
-            }
-            val artboard = checkNotNull(file.newArtboard(contract.artboardName)) { "Layer host artboard is unavailable" }
+            descriptor: JsonObject, sharedExperience: NuxieRuntimeViewModelState? = null,
+            host: ExperiencePageHostContract.Host = ExperiencePageHostContract.Host(),
+            initializeFixture: ((NuxieRuntimeArtboard) -> Unit)? = null): ExperienceInteractivePage {
+            val contract = host
+            val artboard = checkNotNull(file.newArtboard(contract.artboardName)) { "Page host artboard is unavailable" }
             var player: NuxieRuntimePlayer? = null
             var environment: NuxieRuntimeViewModelState? = null
             try {
-                artboard.bindDefaultViewModel()
+                artboard.bindDefaultViewModel(contract.modelName)
+                initializeFixture?.invoke(artboard)
                 val snapshot = checkNotNull(artboard.captureDefaultSnapshot()).native
                 check(snapshot.values.any { it.ownerInstanceId == snapshot.rootInstanceId && it.name == contract.listPath &&
                     it.kind == NuxieViewModelPropertyKind.LIST.nativeValue && it.listItemIds.isEmpty() }) {
-                    "Layer host requires an empty Screen list"
+                    "Page host requires an empty Screen list"
                 }
-                player = checkNotNull(artboard.newPlayer()) { "Layer host requires a default machine" }
-                player.requireStateMachine()
+                player = checkNotNull(artboard.newPlayer()) { "Page host requires a default machine" }
+                player.requireStateMachine(contract.machineName)
                 environment = file.newGlobalViewModel("env")
                 environment?.let { player.bindGlobalViewModel("env", it) }
-                return ExperienceInteractiveLayer(lane, runtime, file, descriptor, contract, artboard, player, environment, sharedExperience)
+                return ExperienceInteractivePage(lane, runtime, file, descriptor, contract, artboard, player, environment, sharedExperience)
             } catch (error: Throwable) {
                 listOf<() -> Unit>({ player?.close() }, { environment?.close() }, { artboard.close() }).forEach {
                     runCatching(it).exceptionOrNull()?.let(error::addSuppressed)
@@ -352,9 +442,6 @@ internal class ExperienceInteractiveLayer private constructor(
                 throw error
             }
         }
-
-        internal fun incomingIndex(style: ExperienceLayerHostContract.Style, isBack: Boolean, count: Int): Int =
-            if (style == ExperienceLayerHostContract.Style.PUSH && isBack) 0 else count
 
         internal fun journeyValues(values: Map<String, NuxieViewModelScalarValue>): Map<String, NuxieViewModelScalarValue> =
             values.filterKeys { it.substringBefore('/') !in setOf("screen", "env") }

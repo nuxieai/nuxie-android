@@ -1,6 +1,6 @@
 package ai.nuxie.sdk.presentation
 
-import ai.nuxie.sdk.experiences.ExperienceLayerHostContract.Style
+import ai.nuxie.sdk.experiences.ExperiencePageHostContract.Style
 import ai.nuxie.sdk.runtime.*
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
@@ -8,20 +8,111 @@ import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
 
-class ExperienceInteractiveLayerTest {
-    @Test fun `incoming is last except push back and duplicate or third rows are refused`() = runBlocking {
-        for (style in Style.entries) for (back in listOf(false, true)) withLayer { layer, native ->
-            layer.insertIncoming("a", style, false)
-            layer.insertIncoming("b", style, back)
-            val expected = if (style == Style.PUSH && back) listOf("b", "a") else listOf("a", "b")
-            assertEquals(expected, layer.mountedScreenIds())
-            assertEquals(if (style == Style.PUSH && back) 0L else 1L, native.writes.last().second.index)
-            assertTrue(runCatching { layer.insertIncoming("a", style, back) }.isFailure)
-            assertTrue(runCatching { layer.insertIncoming("c", style, back) }.isFailure)
+class ExperienceInteractivePageTest {
+    @Test fun `new rows append on top and kept rows expand in place with the same live instance`() = runBlocking {
+        withLayer { page, native ->
+            page.insertIncoming("a", Style.NONE, false)
+            page.insertIncoming("b", Style.MAGIC_MOVE, false)
+            val identity = page.snapshot("a").nativeRootInstanceId
+            page.setCollapsed("a", true)
+            native.writes.clear()
+            page.insertIncoming("a", Style.MAGIC_MOVE, false)
+            assertEquals(listOf("a", "b"), page.mountedScreenIds())
+            assertEquals(identity, page.snapshot("a").nativeRootInstanceId)
+            assertFalse(page.isCollapsed("a"))
+            assertTrue(native.writes.isEmpty())
+            assertEquals(listOf("collapse:0:true", "collapse:0:false"), native.trace.filter { it.startsWith("collapse:") })
+            assertEquals(2, native.allocated)
             assertEquals(1, native.players)
+        }
+    }
+
+    @Test fun `Back removes unreachable rows after end and remaining indexes follow list removals`() = runBlocking {
+        withLayer { page, native ->
+            page.insertIncoming("a", Style.NONE, false)
+            page.insertIncoming("b", Style.NONE, false)
+            page.setCollapsed("a", true)
+            native.trace.clear()
+            page.insertIncoming("a", Style.NONE, true)
+            page.begin("a", "pair")
+            page.end("a", "pair"); page.retire(setOf("a"), "a")
+            assertEquals(listOf("a"), page.mountedScreenIds())
+            assertEquals(listOf("collapse:0:false", "begin:A:pair", "end:A:pair", "remove"), native.trace)
+            page.insertIncoming("b", Style.NONE, false)
+            page.remove("a")
+            native.trace.clear()
+            page.setCollapsed("b", true)
+            assertEquals(listOf("collapse:0:true"), native.trace)
             assertFalse(native.writes.any { it.second.kind == NuxieViewModelMutationKind.LIST_SET })
         }
     }
+
+    @Test fun `retained rows move above on navigate and below on Back without allocating or removing`() = runBlocking {
+        withLayer { page, native ->
+            page.insertIncoming("a", Style.NONE, false)
+            page.insertIncoming("b", Style.NONE, false)
+            val identity = page.snapshot("a").nativeRootInstanceId
+            page.setCollapsed("a", true)
+            native.writes.clear(); native.trace.clear()
+            page.takeIncoming("a", "b", false)
+            assertEquals(listOf("b", "a"), page.mountedScreenIds())
+            assertEquals(0L to 1L, native.writes.single().second.let { it.index to it.secondIndex })
+            assertEquals(NuxieViewModelMutationKind.LIST_MOVE, native.writes.single().second.kind)
+            assertEquals(listOf("collapse:1:false"), native.trace)
+            page.setCollapsed("a", true)
+            native.writes.clear(); native.trace.clear()
+            page.takeIncoming("a", "b", true)
+            assertEquals(listOf("a", "b"), page.mountedScreenIds())
+            assertEquals(1L to 0L, native.writes.single().second.let { it.index to it.secondIndex })
+            assertEquals(listOf("collapse:0:false"), native.trace)
+            assertEquals(identity, page.snapshot("a").nativeRootInstanceId)
+            assertEquals(2, native.allocated)
+        }
+    }
+
+    @Test fun `step begin refuses a collapsed incoming row before calling native`() = runBlocking {
+        withLayer { page, native ->
+            page.insertIncoming("a", Style.NONE, false)
+            page.setCollapsed("a", true)
+            native.trace.clear()
+            assertTrue(runCatching { page.begin("a", null) }.exceptionOrNull() is IllegalStateException)
+            assertTrue(native.trace.isEmpty())
+            page.insertIncoming("a", Style.NONE, false)
+            page.begin("a", null); page.end("a", null)
+            assertEquals(listOf("collapse:0:false", "begin:A:null", "end:A:null"), native.trace)
+        }
+    }
+
+    @Test fun `takeoff and landing host commands are delivered once in the next whole page step`() = runBlocking {
+        withLayer { page, native ->
+            page.insertIncoming("a", Style.NONE, false)
+            page.insertIncoming("b", Style.NONE, false)
+            page.begin("b", "pair")
+            page.end("b", "pair")
+            assertFalse(native.trace.any { it.startsWith("step:") })
+            val next = page.step(0.0)
+            assertEquals(listOf("takeoff", "landing"), next.native.hostCommands.map { it.name })
+            assertEquals(next.native.hostCommands, next.unattributedHostCommands)
+            assertTrue(next.rows.values.all { it.outcome.hostCommands.isEmpty() })
+            assertTrue(page.step(0.0).native.hostCommands.isEmpty())
+        }
+    }
+
+    @Test fun `new page enters before reveal while a restored covered page stays hidden`() = runBlocking {
+        withLayer { page, _ ->
+            page.prepare("a")
+            page.mountInitial("a", entering = false)
+            assertEquals(NuxieViewModelScalarValue.StringValue("hidden"), page.lifecycle("a")["screen/phase"])
+            assertEquals(NuxieViewModelScalarValue.NumberValue(0.0), page.lifecycle("a")["screen/appearances"])
+        }
+        withLayer { page, _ ->
+            page.prepare("a")
+            page.mountInitial("a", entering = true)
+            assertEquals(NuxieViewModelScalarValue.StringValue("entering"), page.lifecycle("a")["screen/phase"])
+            assertEquals(NuxieViewModelScalarValue.NumberValue(1.0), page.lifecycle("a")["screen/appearances"])
+        }
+    }
+
     @Test fun `phase batches target each row and Journey reserved writes cannot replace them`() = runBlocking {
         withLayer { layer, native ->
             layer.insertIncoming("a", Style.MAGIC_MOVE, false)
@@ -44,7 +135,7 @@ class ExperienceInteractiveLayerTest {
             assertEquals(NuxieViewModelScalarValue.NumberValue(1.0), layer.lifecycle("b")["screen/appearances"])
         }
     }
-    @Test fun `events use unique graph owner and exact names before removal settles and returns effects`() = runBlocking {
+    @Test fun `events use unique graph owner and exact names and removal never advances`() = runBlocking {
         withLayer { layer, native ->
             layer.insertIncoming("a", Style.MAGIC_MOVE, false)
             layer.insertIncoming("b", Style.MAGIC_MOVE, false)
@@ -64,8 +155,8 @@ class ExperienceInteractiveLayerTest {
             native.trace.clear()
             native.events = arrayOf(event("detach", 200))
             val removal = layer.remove("a", 77u)
-            assertEquals(listOf("remove", "step:0.0"), native.trace)
-            assertEquals(listOf("detach"), removal.rows.getValue("a").outcome.events.map { it.name })
+            assertEquals(listOf("remove"), native.trace)
+            assertEquals(setOf("b"), removal.rows.keys)
             assertEquals(77uL, removal.correlationId)
             layer.step(0.5)
             layer.insertIncoming("a", Style.PUSH, true)
@@ -73,7 +164,7 @@ class ExperienceInteractiveLayerTest {
             assertEquals(2, native.allocated)
         }
     }
-    @Test fun `each row routes with its own tables including the removal settlement`() = runBlocking {
+    @Test fun `each row routes with its own tables and removal creates no synthetic effects`() = runBlocking {
         withLayer { layer, native ->
             val batches = mutableListOf<JourneyScreenEmissionBatch>()
             suspend fun routing(id: String): JourneyRuntimeEmissionCoordinator {
@@ -95,8 +186,8 @@ class ExperienceInteractiveLayerTest {
                 assertEquals(listOf("clicked-a", "clicked-b"), batches.flatMap { it.emissions }.map { it.name })
                 native.events = arrayOf(event("tap", 200))
                 assertTrue(layer.deliver(layer.remove("a")))
-                assertEquals("clicked-a", batches.last().emissions.single().name)
-                assertEquals("a", batches.last().source.screenId)
+                assertEquals(2, batches.size)
+                assertEquals("b", batches.last().source.screenId)
             } finally { a.close(); b.close() }
         }
     }
@@ -124,6 +215,10 @@ class ExperienceInteractiveLayerTest {
             }.map { it.first to it.second.relatedViewModel })
             layer.updateEnvironment(mapOf("reduceMotion" to NuxieViewModelScalarValue.BooleanValue(true)))
             assertEquals(500L, native.writes.last().first)
+            native.writes.clear()
+            layer.applyRuntimeValues("a", mapOf("env/fontScale" to NuxieViewModelScalarValue.NumberValue(1.4)))
+            assertEquals(500L, native.writes.single().first)
+            assertEquals("fontScale", native.writes.single().second.path)
         }
     }
     @Test fun `static host is refused before rows mount`() = runBlocking {
@@ -137,15 +232,15 @@ class ExperienceInteractiveLayerTest {
             "fontScale" to NuxieViewModelScalarValue.NumberValue(1.5))
         val reserved = mapOf("screen" to string("hidden"), "screen/phase" to string("hidden"),
             "env" to string("data"), "env/reduceMotion" to NuxieViewModelScalarValue.BooleanValue(true))
-        assertEquals(ordinary, ExperienceInteractiveLayer.journeyValues(ordinary + reserved))
+        assertEquals(ordinary, ExperienceInteractivePage.journeyValues(ordinary + reserved))
     }
 
     @Test fun `completion resolution never uses prefixes`() {
         val completion = CompletableDeferred<Unit>()
         val waiters = mutableMapOf(completion to "complete")
-        ExperienceInteractiveLayer.resolveCompletions(waiters, listOf(NuxieRuntimeEvent(0, 0, "complete.reverse", "", "", 0f, emptyList(), 1)))
+        ExperienceInteractivePage.resolveCompletions(waiters, listOf(NuxieRuntimeEvent(0, 0, "complete.reverse", "", "", 0f, emptyList(), 1)))
         assertFalse(completion.isCompleted)
-        ExperienceInteractiveLayer.resolveCompletions(waiters, listOf(NuxieRuntimeEvent(0, 0, "complete", "", "", 0f, emptyList(), 1)))
+        ExperienceInteractivePage.resolveCompletions(waiters, listOf(NuxieRuntimeEvent(0, 0, "complete", "", "", 0f, emptyList(), 1)))
         assertTrue(completion.isCompleted); assertTrue(waiters.isEmpty())
     }
 
@@ -198,17 +293,17 @@ class ExperienceInteractiveLayerTest {
         }
     }
 
-    private suspend fun withLayer(native: RecordingNative = RecordingNative(), body: suspend (ExperienceInteractiveLayer, RecordingNative) -> Unit) {
+    private suspend fun withLayer(native: RecordingNative = RecordingNative(), body: suspend (ExperienceInteractivePage, RecordingNative) -> Unit) {
         val lane = NuxieRuntimeLane()
         val file = NuxieRuntimeFile(1, native)
         val descriptor = Json.parseToJsonElement("""{"leg":{"screens":[
             {"id":"a","defaultViewModelName":"A","defaultInstanceId":"alias-a"},
             {"id":"b","defaultViewModelName":"B","defaultInstanceId":"alias-b"}]},
-            "render":{"layerHost":{"artboardName":"LayerList","list":"screens"},"textInputs":[]}}""").jsonObject
+            "render":{"screens":[{"id":"a","artboardName":"A"},{"id":"b","artboardName":"B"}],"layerHost":{"artboardName":"LayerList","list":"screens"},"textInputs":[]}}""").jsonObject
         try {
             val shared = if (native.globals) lane.call { file.newAuthoredViewModel("Experience", 0) } else null
             try {
-                val layer = ExperienceInteractiveLayer.open(lane, NuxieRuntime(native), file, descriptor, shared)
+                val layer = ExperienceInteractivePage.open(lane, NuxieRuntime(native), file, descriptor, shared)
                 try { body(layer, native) } finally { layer.close() }
             } finally { lane.call { shared?.close() } }
         } finally { lane.call { file.close() }; lane.shutdown(); assertTrue(lane.awaitQuiescence(5000)) }
@@ -220,6 +315,7 @@ class ExperienceInteractiveLayerTest {
         val writes = mutableListOf<Pair<Long, NativeViewModelWrite>>()
         val trace = mutableListOf<String>()
         var events = emptyArray<NativeRuntimeEvent>()
+        private val pendingCommands = mutableListOf<NativeHostCommand>()
         var players = 0
         var kind = 1
         var failStep = false
@@ -235,26 +331,45 @@ class ExperienceInteractiveLayerTest {
         var catalogQueries = 0
         private val schemas = mutableMapOf(100L to 0)
         private val catalog get() = NativeViewModelCatalog(arrayOf(
-            NativeViewModelSchema(0,"Host",0,1,0,0,-1,false),
+            NativeViewModelSchema(0,"\$nuxie.Page",0,1,0,0,-1,false),
             NativeViewModelSchema(1,"A",1,4,0,0,-1,false),
             NativeViewModelSchema(2,"B",5,4,0,0,-1,false),
             NativeViewModelSchema(3,"Screen",9,4,0,0,-1,false),
-            NativeViewModelSchema(4,"env",13,1,0,0,-1,globals),
+            NativeViewModelSchema(4,"env",13,2,0,0,-1,globals),
             NativeViewModelSchema(5,"Experience",14,0,0,0,-1,false)), arrayOf(
             prop(0,0,"screens",8), prop(1,0,"screen",9,3), prop(1,1,"fontScale",2), prop(1,2,"keptValue",2), prop(1,3,"experience",9,5),
             prop(2,0,"screen",9,3), prop(2,1,"fontScale",2), prop(2,2,"keptValue",2), prop(2,3,"experience",9,5),
             prop(3,0,"phase",5,labels=arrayOf("hidden","entering","active","exiting")), prop(3,1,"appearances",2),
             prop(3,2,"transition",1), prop(3,3,"exitReason",5,labels=arrayOf("none","dismissed","navigation")),
-            prop(4,0,"reduceMotion",3)), emptyArray())
+            prop(4,0,"reduceMotion",3), prop(4,1,"fontScale",2)), emptyArray())
         override fun viewModelCatalog(fileHandle: Long): NativeCallResult<NativeViewModelCatalog> {
             catalogQueries++
             return NativeCallResult(0, catalog)
         }
-        override fun newNamedArtboard(fileHandle: Long, name: String) = 2L
-        override fun newDefaultViewModel(artboardHandle: Long) = NativeCallResult(0,100L)
+        override fun newNamedArtboard(fileHandle: Long, name: String) = when (name) { "A" -> 21L; "B" -> 22L; else -> 2L }
+        override fun newDefaultViewModel(artboardHandle: Long): NativeCallResult<Long> {
+            val schema = when (artboardHandle) { 21L -> 1; 22L -> 2; else -> 0 }
+            val id = if (schema == 0) 100L else 1000L + schema
+            schemas[id] = schema
+            return NativeCallResult(0, id)
+        }
+        override fun playerStepBegin(playerHandle: Long, incoming: ByteArray, step: ByteArray?): Int {
+            trace += "begin:${incoming.decodeToString()}:${step?.decodeToString()}"
+            pendingCommands += NativeHostCommand("takeoff", NativeHostValue(0, false, 0.0, "", emptyArray(), emptyArray()))
+            return 0
+        }
+        override fun playerStepEnd(playerHandle: Long, incoming: ByteArray, step: ByteArray?): Int {
+            trace += "end:${incoming.decodeToString()}:${step?.decodeToString()}"
+            pendingCommands += NativeHostCommand("landing", NativeHostValue(0, false, 0.0, "", emptyArray(), emptyArray()))
+            return 0
+        }
+        override fun setPlayerRowCollapsed(playerHandle: Long, list: ByteArray, index: Int, collapsed: Boolean): Int {
+            trace += "collapse:$index:$collapsed"; return 0
+        }
         override fun viewModelRootSchemaIndex(viewModelHandle: Long) = NativeCallResult(0,schemas.getValue(viewModelHandle).toLong())
         override fun bindViewModel(artboardHandle: Long, viewModelHandle: Long) = 0
         override fun newDefaultPlayer(artboardHandle: Long): Long { players++; return 10L }
+        override fun playerStateMachineName(playerHandle: Long) = NativeCallResult(0, "\$nuxie.page")
         override fun playerKind(playerHandle: Long) = NativeCallResult(0,kind)
         override fun playerFocusState(playerHandle: Long) = NativeCallResult(0,NuxieFocusState(false,false))
         override fun newViewModel(fileHandle: Long, schemaIndex: Int, authoredInstanceIndex: Int?): NativeCallResult<Long> {
@@ -279,7 +394,8 @@ class ExperienceInteractiveLayerTest {
             trace += "step:$elapsedSeconds"
             onStep()
             if (failStep) return NativeCallResult(11, null)
-            return NativeCallResult(0,NativePlayerStepOutcome(true,IntArray(pointers.size),events,emptyArray(),emptyArray()))
+            val commands = pendingCommands.toTypedArray(); pendingCommands.clear()
+            return NativeCallResult(0,NativePlayerStepOutcome(true,IntArray(pointers.size),events,commands,emptyArray()))
         }
         override fun setPlayerGlobalViewModel(playerHandle: Long, name: ByteArray, viewModelHandle: Long): Int {
             globalBindings += name.decodeToString() to viewModelHandle
@@ -292,7 +408,7 @@ class ExperienceInteractiveLayerTest {
         override fun releaseWindow(handle: Long) { freed += "window" }
         override fun freeRenderer(handle: Long) { freed += "renderer" }
         override fun freePlayer(handle: Long) { freed += "player" }
-        override fun freeArtboard(handle: Long) { freed += "artboard" }
+        override fun freeArtboard(handle: Long) { freed += if (handle == 2L) "artboard" else "schema-artboard" }
         override fun freeFile(handle: Long) {}
         override fun freeViewModel(handle: Long): Int { freed += "values:$handle"; return 0 }
         private fun prop(schema: Long,index: Long,name: String,kind: Int,ref: Long = -1,labels: Array<String> = emptyArray()) =

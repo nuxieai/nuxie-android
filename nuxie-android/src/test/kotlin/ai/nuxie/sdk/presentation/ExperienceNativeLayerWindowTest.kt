@@ -16,6 +16,34 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28], qualifiers = "w393dp-h852dp-mdpi")
 class ExperienceNativeLayerWindowTest {
+    @Test fun `native page presentation completion runs once after the fullscreen window is shown`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val window = ExperienceNativeLayerWindow(activity, FrameLayout(activity), PresentationShell.FullScreen()) {}
+        var completions = 0
+        try {
+            window.whenPresented { completions++ }
+            assertEquals(0, completions)
+            window.show()
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(1, completions)
+            window.show()
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(1, completions)
+        } finally { window.retire(); activity.finish() }
+    }
+
+    @Test fun `retiring a native page cancels its pending presentation completion`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val window = ExperienceNativeLayerWindow(activity, FrameLayout(activity), PresentationShell.FullScreen()) {}
+        var completed = false
+        window.whenPresented { completed = true }
+        window.show()
+        window.retire()
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        assertFalse(completed)
+        activity.finish()
+    }
+
     @Test fun `fullscreen closes only when the current layer permits it`() {
         for (allowed in listOf(false, true)) {
             for (shell in listOf(PresentationShell.FullScreen(allowed))) {
