@@ -2558,6 +2558,17 @@ Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerLayoutSize(
   return output;
 }
 
+JNIEXPORT jfloat JNICALL
+Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerContentHeight(
+    JNIEnv *env, jobject self, jlong player, jintArray status_out) {
+  (void)self;
+  float height = 0.0f;
+  NuxStatus status = nux_player_content_height(
+      (const struct NuxPlayer *)from_handle(player), &height);
+  if (!set_status_out(env, status_out, status)) return 0.0f;
+  return height;
+}
+
 JNIEXPORT jobject JNICALL
 Java_ai_nuxie_sdk_runtime_NuxieRuntimeBridge_nativePlayerTextInputGeometry(
     JNIEnv *env, jobject self, jlong player, jlong snapshot, jlong node_id,

@@ -485,6 +485,9 @@ internal interface NuxieTypedRuntimeNative : NuxieSemanticNative {
     fun playerLayoutSize(playerHandle: Long): NativeCallResult<FloatArray> =
         error("playerLayoutSize is not implemented")
 
+    fun playerContentHeight(playerHandle: Long): NativeCallResult<Float> =
+        error("playerContentHeight is not implemented")
+
     fun freePlayer(handle: Long): Unit = error("freePlayer is not implemented")
 
     fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int): Long =
@@ -813,6 +816,12 @@ internal object JniNuxieTypedRuntimeNative : NuxieTypedRuntimeNative {
         val status = intArrayOf(NUX_STATUS_RUNTIME_ERROR)
         val size = NuxieRuntimeBridge.nativePlayerLayoutSize(playerHandle, status)
         return NativeCallResult(status.single(), size)
+    }
+
+    override fun playerContentHeight(playerHandle: Long): NativeCallResult<Float> {
+        val status = intArrayOf(NUX_STATUS_RUNTIME_ERROR)
+        val height = NuxieRuntimeBridge.nativePlayerContentHeight(playerHandle, status)
+        return NativeCallResult(status.single(), height.takeIf { status.single() == NUX_STATUS_OK })
     }
 
     override fun freePlayer(handle: Long) {
