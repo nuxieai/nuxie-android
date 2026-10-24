@@ -353,6 +353,69 @@ class ExperienceLayerSurfaceFailureTest {
         }
     }
 
+    @Test fun `late page text overlay uses delivered bounds without another layout delivery`() = runBlocking {
+        for (deliverBeforeNavigation in listOf(true, false)) withSurface { surface, page, _, _ ->
+            val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
+            val scene = java.io.File.createTempFile("page-overlay-bounds", ".riv").apply { writeBytes(byteArrayOf(1)) }
+            val baseline = field(page, "descriptor") as JsonObject
+            val render = baseline.getValue("render").jsonObject
+            val input = textInputDescriptor().getValue("render").jsonObject.getValue("textInputs").jsonArray.single().jsonObject
+            val descriptor = JsonObject(baseline + ("render" to JsonObject(render + ("textInputs" to
+                JsonArray(listOf(JsonObject(input + ("screenId" to JsonPrimitive("b")))))))))
+            val source = PreparedPresentation(scene, "A", 0, PresentationShell.FullScreen(), "a", descriptor,
+                artboardSize = ExperienceArtboardSize(200f, 100f), pageHistory = listOf("a"))
+            val target = source.copy(screenId = "b", artboardName = "B", pageHistory = listOf("a", "b"))
+            val delivered = mutableListOf<ExperienceArtboardSize>()
+            val listener = object : ExperienceSurfaceHost.Listener {
+                override fun onFirstFrame() = Unit
+                override fun onFailure(error: ExperiencePresentationException) { throw AssertionError(error) }
+                override fun onLayoutBounds(bounds: ExperienceArtboardSize) { delivered += bounds }
+            }
+            val mounted = ExperienceMountedScreen(activity.get(), source, listener, { throw AssertionError(it) })
+            val ownedLane = field(mounted, "lane") as NuxieRuntimeLane
+            val pageListener = field(mounted.surface, "listener") as ExperienceSurfaceHost.Listener
+            set(mounted, "surface", surface)
+            set(surface, "listener", pageListener)
+            set(mounted, "content", android.widget.FrameLayout(activity.get()))
+            val bounds = ExperienceArtboardSize(400f, 300f, -30f, -50f)
+            try {
+                assertTrue(ExperienceTextInput.forScreen(descriptor, "a").isEmpty())
+                assertNull(field(mounted, "textOverlay"))
+                if (deliverBeforeNavigation) pageListener.onLayoutBounds(bounds)
+                mounted.prepareRow(target, listener)
+                mounted.navigateLayer(target, false)
+                val overlay = field(mounted, "textOverlay") as ExperienceTextInputOverlay
+                overlay.layout(0, 0, 400, 300)
+                val transform = NuxieTextRunGeometry.Transform(1f, 0f, 0f, 1f, 0f, 0f)
+                val fieldBounds = NuxieTextRunGeometry.Bounds(0f, 0f, 100f, 40f)
+                pageListener.onNativeTextFields(listOf(ExperienceNativeTextField(
+                    ExperienceTextFieldTarget("name", 10), 10, 1,
+                    NativeSemanticNode(10, -1, 0, NativeSemanticRole.TEXT_FIELD, 0, 0, 0, 0,
+                        0f, 0f, 100f, 40f, "Name", "", ""),
+                    NuxieTextInputGeometry(1u, transform, fieldBounds, NuxieTextRunGeometry.Layout(transform, fieldBounds),
+                        20f, false, false), "",
+                    NuxieViewModelSnapshot.fromNative(NativeViewModelSnapshot(10,
+                        arrayOf(NativeViewModelSnapshotInstance(10, 0)), emptyArray())))))
+                val editor = overlay.semanticViews().getValue(10)
+                val container = editor.parent as android.view.View
+                val density = activity.get().resources.displayMetrics.density
+                if (!deliverBeforeNavigation) {
+                    assertEquals(0f, container.x, 0.001f)
+                    assertEquals(0f, container.y, 0.001f)
+                    pageListener.onLayoutBounds(bounds)
+                }
+                assertEquals(30f * density, container.x, 0.001f)
+                assertEquals(50f * density, container.y, 0.001f)
+                assertEquals(listOf(bounds), delivered)
+                assertTrue(editor.isEnabled)
+            } finally {
+                mounted.close(false) {}
+                assertTrue(ownedLane.awaitQuiescence(5_000))
+                activity.pause().stop().destroy(); scene.delete()
+            }
+        }
+    }
+
     @Test fun `covered skipping Back stays hidden until one reveal and ordinary pop enters once`() = runBlocking {
         for (skip in listOf(false, true)) withSurface { surface, page, native, lane ->
             val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
