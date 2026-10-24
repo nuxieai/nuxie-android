@@ -341,6 +341,34 @@ class ExperienceInteractivePageTest {
         }
     }
 
+    @Test fun `covered same Screen Back removes B and reveal only writes retained A`() = runBlocking {
+        withLayer { page, native ->
+            page.insertIncoming("a", Style.NONE, false)
+            page.insertIncoming("b", Style.NONE, false)
+            page.applyValues("b", mapOf("keptValue" to NuxieViewModelScalarValue.NumberValue(42.0)))
+            val removedRoot = page.snapshot("b").nativeRootInstanceId
+            val retainedRoot = page.snapshot("a").nativeRootInstanceId
+            page.takeIncoming("a", "b", false)
+            page.setCollapsed("b", true)
+            page.setPhases(listOf("a" to ExperienceScreenLifecycle.Phase.HIDDEN,
+                "b" to ExperienceScreenLifecycle.Phase.HIDDEN))
+            native.trace.clear(); native.writes.clear()
+            page.retire(setOf("a"), "a")
+            assertEquals(listOf("a"), page.mountedScreenIds())
+            assertEquals(listOf("remove"), native.trace)
+            assertEquals(listOf(NuxieViewModelMutationKind.LIST_REMOVE), native.writes.map { it.second.kind })
+            assertTrue(native.freed.contains("values:$removedRoot"))
+            assertEquals(NuxieViewModelScalarValue.StringValue("hidden"), page.lifecycle("a")["screen/phase"])
+            native.writes.clear()
+            page.setPhases(listOf("a" to ExperienceScreenLifecycle.Phase.ENTERING))
+            page.step(0.016)
+            page.setPhases(listOf("a" to ExperienceScreenLifecycle.Phase.ACTIVE))
+            assertTrue(native.writes.isNotEmpty())
+            assertTrue(native.writes.all { it.first == retainedRoot })
+            assertEquals(removedRoot, page.snapshot("b").nativeRootInstanceId)
+        }
+    }
+
     @Test fun `removed B rejects native writes and revisits from retained values with a fresh default`() = runBlocking {
         withLayer { page, native ->
             page.insertIncoming("a", Style.NONE, false)
