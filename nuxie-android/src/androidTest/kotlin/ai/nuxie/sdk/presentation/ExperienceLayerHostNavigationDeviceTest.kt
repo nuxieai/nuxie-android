@@ -531,6 +531,7 @@ class ExperienceLayerHostNavigationDeviceTest {
     }
 
     @Test fun activeRowEditorsWithdrawAndRevisitKeepsNativeEditingValues() = runBlocking {
+        assertTrue(NuxieRuntime.shared.isAvailable)
         val directory = directory()
         val run = ExperienceRunValues()
         try {

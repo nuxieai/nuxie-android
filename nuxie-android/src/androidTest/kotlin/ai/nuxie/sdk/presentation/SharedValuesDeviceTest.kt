@@ -16,6 +16,13 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SharedValuesDeviceTest {
+    private fun sharedValuesDescriptor(): JsonObject {
+        val source = InstrumentationRegistry.getInstrumentation().context.assets
+            .open("runtime/shared-values/scene-declarations.json").bufferedReader()
+            .use { Json.parseToJsonElement(it.readText()).jsonObject }
+        return JsonObject(source.getValue("valuePolicy").jsonObject + ("render" to source.getValue("render")))
+    }
+
     @Test fun groupInstallationKeepsUnconstrainedAnswers() = runBlocking {
         checkUnconstrainedGroup(requiredEmail = true)
     }
@@ -528,11 +535,11 @@ class SharedValuesDeviceTest {
         val other = ExperienceRunValues()
         try {
             run.lane.call {
-                val native = run.prepare(bytes, null, emptyMap())
+                val native = run.prepare(bytes, sharedValuesDescriptor(), emptyMap())
                 val values = checkNotNull(native.values)
                 val first = checkNotNull(native.file.newArtboard("first"))
                 try {
-                    first.bindDefaultViewModel("Runtime first scr_screens_sfirst")
+                    first.bindDefaultViewModel()
                     assertTrue(first.linkDefaultViewModel("experience", values))
                     first.setDefaultViewModelValue("experience/trip_days", NuxieViewModelScalarValue.NumberValue(30.0))
                     val retained = checkNotNull(first.defaultViewModelSnapshot()).withoutRootProperty("experience")
@@ -546,15 +553,15 @@ class SharedValuesDeviceTest {
                         } finally { restored.close() }
                     } finally { later.close() }
                 } finally { first.close() }
-                val later = checkNotNull(run.prepare(bytes.copyOf(), null, emptyMap()).file.newArtboard("short"))
+                val later = checkNotNull(run.prepare(bytes.copyOf(), sharedValuesDescriptor(), emptyMap()).file.newArtboard("short"))
                 try {
-                    later.bindDefaultViewModel("Runtime short scr_screens_sshort")
+                    later.bindDefaultViewModel()
                     assertTrue(later.linkDefaultViewModel("experience", values))
                     assertEquals(NuxieViewModelScalarValue.NumberValue(30.0), checkNotNull(later.defaultViewModelSnapshot()).resolveScalar(listOf("experience", "trip_days")))
                 } finally { later.close() }
             }
             other.lane.call {
-                val values = checkNotNull(other.prepare(bytes, null, emptyMap()).values)
+                val values = checkNotNull(other.prepare(bytes, sharedValuesDescriptor(), emptyMap()).values)
                 assertEquals(NuxieViewModelScalarValue.NumberValue(23.0), values.snapshot().resolveScalar(listOf("trip_days")))
             }
         } finally { run.retire(); other.retire() }
@@ -568,16 +575,16 @@ class SharedValuesDeviceTest {
         var root: ai.nuxie.sdk.runtime.NuxieRuntimeArtboard? = null
         try {
             val native = run.lane.call {
-                run.prepare(bytes, null, emptyMap()).also { prepared ->
+                run.prepare(bytes, sharedValuesDescriptor(), emptyMap()).also { prepared ->
                     root = checkNotNull(prepared.file.newArtboard("first"))
-                    checkNotNull(root).bindDefaultViewModel("Runtime first scr_screens_sfirst")
+                    checkNotNull(root).bindDefaultViewModel()
                     assertTrue(checkNotNull(root).linkDefaultViewModel("experience", checkNotNull(prepared.values)))
                 }
             }
             run.retire()
             run.lane.call {
                 assertThrows(IllegalStateException::class.java) { checkNotNull(native.values).snapshot() }
-                assertThrows(IllegalStateException::class.java) { run.prepare(bytes, null, emptyMap()) }
+                assertThrows(IllegalStateException::class.java) { run.prepare(bytes, sharedValuesDescriptor(), emptyMap()) }
                 assertEquals(NuxieViewModelScalarValue.NumberValue(23.0), checkNotNull(checkNotNull(root).defaultViewModelSnapshot()).resolveScalar(listOf("experience", "trip_days")))
             }
         } finally {
@@ -628,7 +635,7 @@ class SharedValuesDeviceTest {
                 val native = run.prepare(bytes, descriptor, emptyMap())
                 val board = checkNotNull(native.file.newArtboard(expected.getValue("screen").jsonPrimitive.content))
                 try {
-                    board.bindDefaultViewModel("Runtime long scr_screens_slong")
+                    board.bindDefaultViewModel()
                     assertTrue(board.linkDefaultViewModel("experience", checkNotNull(native.values)))
                     val player = native.file.newExperiencePlayer(board, "long")
                     try {
@@ -691,7 +698,7 @@ class SharedValuesDeviceTest {
                         var previous = pixels(player)
                         val otherBoard = checkNotNull(native.file.newArtboard("long"))
                         try {
-                            otherBoard.bindDefaultViewModel("Runtime long scr_screens_slong")
+                            otherBoard.bindDefaultViewModel()
                             assertTrue(otherBoard.linkDefaultViewModel("experience", checkNotNull(native.values)))
                             val other = native.file.newExperiencePlayer(otherBoard, "long")
                             try {
@@ -727,14 +734,7 @@ class SharedValuesDeviceTest {
         val assets = InstrumentationRegistry.getInstrumentation().context.assets
         val bytes = assets.open("runtime/shared-values/screen.riv").use { it.readBytes() }
         val expected = Json.parseToJsonElement(assets.open("runtime/shared-values/expectations.json").bufferedReader().use { it.readText() }).jsonObject
-        val provenance = Json.parseToJsonElement(assets.open("runtime/shared-values/provenance.json").bufferedReader().use { it.readText() }).jsonObject
-        val descriptor = buildJsonObject {
-            putJsonObject("render") {
-                put("assets", JsonArray(provenance.getValue("fonts").jsonArray.map {
-                    JsonObject(it.jsonObject + ("kind" to JsonPrimitive("font")))
-                }))
-            }
-        }
+        val descriptor = sharedValuesDescriptor()
         val run = ExperienceRunValues()
         try {
             run.lane.call {
@@ -748,8 +748,8 @@ class SharedValuesDeviceTest {
                 val first = checkNotNull(native.file.newArtboard("first"))
                 val second = checkNotNull(native.file.newArtboard("long"))
                 try {
-                    first.bindDefaultViewModel("Runtime first scr_screens_sfirst")
-                    second.bindDefaultViewModel("Runtime long scr_screens_slong")
+                    first.bindDefaultViewModel()
+                    second.bindDefaultViewModel()
                     first.linkDefaultViewModel("experience", values)
                     second.linkDefaultViewModel("experience", values)
                     val firstPlayer = checkNotNull(first.newPlayer())

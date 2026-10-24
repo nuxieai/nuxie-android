@@ -360,7 +360,7 @@ class NuxiePublicStartupDeviceTest {
                     assertEquals(recoveryContract.getValue("expectedOutcome"), completed.properties.getValue("outcome"))
                     assertEquals(saved.getValue("journeyId"), completed.properties.getValue("journey_id"))
                     assertEquals("pro", completed.properties.getValue("outputs").jsonObject
-                        .getValue("responses").jsonObject.getValue("selection").jsonPrimitive.content)
+                        .getValue("responses").jsonObject.getValue("plan/selection").jsonPrimitive.content)
                     for ((name, key) in listOf("startup_probe" to "eventId", "script_control_activated" to "controlEventId",
                         JourneyEventNames.LEG_STARTED to "startedEventId")) {
                         assertEquals(saved.getValue(key).jsonPrimitive.content, events.single { it.name == name }.id)
@@ -415,7 +415,7 @@ class NuxiePublicStartupDeviceTest {
                     ProfileDeliveryAuthority(locator.getValue("appId").jsonPrimitive.content, "test"),
                 ))
                 assertEquals("pro", journal.runs().single().context.getValue("responses").jsonObject
-                    .getValue("selection").jsonPrimitive.content)
+                    .getValue("plan/selection").jsonPrimitive.content)
                 if (processPhase == "recover" && processBoundary == "parked") {
                     val saved = checkNotNull(previous)
                     assertEquals(saved.getValue("runId").jsonPrimitive.content, journal.runs().single().id)
@@ -468,7 +468,7 @@ class NuxiePublicStartupDeviceTest {
                     val completed = persisted.single { it.name == JourneyEventNames.LEG_COMPLETED }
                     assertEquals(checkNotNull(previous).getValue("completedEventId").jsonPrimitive.content, completed.id)
                     assertEquals("pro", completed.properties.getValue("outputs").jsonObject
-                        .getValue("responses").jsonObject.getValue("selection").jsonPrimitive.content)
+                        .getValue("responses").jsonObject.getValue("plan/selection").jsonPrimitive.content)
                 }
             }
         } finally { runBlocking { reopened.close() } }

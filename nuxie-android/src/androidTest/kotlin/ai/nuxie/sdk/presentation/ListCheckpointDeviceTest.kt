@@ -61,7 +61,7 @@ class ListCheckpointDeviceTest {
                 for (name in listOf("goals", "quiet")) {
                     val screen = checkNotNull(native.file.newArtboard(name))
                     try {
-                        screen.bindDefaultViewModel("Runtime $name scr_screens_s$name")
+                        screen.bindDefaultViewModel()
                         assertTrue(screen.linkDefaultViewModel("experience", root))
                         val snapshot = checkNotNull(screen.defaultViewModelSnapshot())
                         assertTrue(snapshot.containsInstance(root.nativeSnapshot().rootInstanceId))

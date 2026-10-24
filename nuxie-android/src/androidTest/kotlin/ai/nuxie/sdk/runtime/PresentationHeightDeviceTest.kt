@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.runtime
 
+import ai.nuxie.sdk.presentation.*
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
@@ -7,6 +8,25 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PresentationHeightDeviceTest {
+    private fun publishedDescriptor(): JsonObject {
+        val assets = InstrumentationRegistry.getInstrumentation().context.assets
+        val snapshot = assets.open("runtime/published-fit-content/published/snapshot.json")
+            .bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject }
+        val screens = snapshot.getValue("document").jsonObject.getValue("nodes").jsonArray
+            .map { it.jsonObject }.filter { it["kind"] == JsonPrimitive("artboard") }
+        return buildJsonObject {
+            put("state", buildJsonObject {}); put("responses", buildJsonObject {}); put("ruleGroups", buildJsonArray {})
+            put("leg", buildJsonObject { put("screens", JsonArray(screens.map { buildJsonObject { put("id", it.getValue("id")) } })) })
+            put("render", buildJsonObject {
+                put("assets", buildJsonArray {}); put("transitions", buildJsonArray {}); put("textInputs", buildJsonArray {})
+                put("screens", JsonArray(screens.map { screen -> buildJsonObject {
+                    put("id", screen.getValue("id")); put("artboardName", screen.getValue("name"))
+                    put("width", 300); put("height", 700)
+                } }))
+            })
+        }
+    }
+
     @Test fun compilerPublishedHeightMatrixUsesSourceOracle() = runBlocking {
         val assets = InstrumentationRegistry.getInstrumentation().context.assets
         val prefix = "runtime/published-fit-content/"
@@ -62,6 +82,73 @@ class PresentationHeightDeviceTest {
                 }
             } finally { renderer.close() }
         } } finally { lane.shutdown(); assertTrue(lane.awaitQuiescence(2000)) }
+    }
+
+    @Test fun publishedPageInNativeFitContentSheetUses152DpAndResizesOnLaterScreen() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val directory = java.io.File(instrumentation.targetContext.cacheDir, "published-height-${java.util.UUID.randomUUID()}").apply { mkdirs() }
+        val scene = java.io.File(directory, "screen.riv").apply {
+            writeBytes(instrumentation.context.assets.open("runtime/published-fit-content/published/screen.riv").use { it.readBytes() })
+        }
+        val oracle = instrumentation.context.assets.open("runtime/published-fit-content/expectations.json")
+            .bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject }
+        val initial = PreparedPresentation(scene, "sheet", 0xff000000.toInt(),
+            PresentationShell.Sheet(PresentationShell.Sheet.Detent.FIT_CONTENT, true), "scr_screens_ssheet",
+            publishedDescriptor(), artboardSize = ExperienceArtboardSize(300f, 700f))
+        val monitor = android.app.Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
+        val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+        val id = java.util.UUID.randomUUID().toString()
+        var activeId = id
+        var activity: android.app.Activity? = null
+        fun register(key: String, prepared: PreparedPresentation): java.util.concurrent.CountDownLatch {
+            val ready = java.util.concurrent.CountDownLatch(1)
+            PresentationRegistry.register(key, prepared, onFirstFrame = {
+                runBlocking { PresentationRegistry.reveal(key) }; ready.countDown()
+            }, onFailure = { failure.set(it); ready.countDown() }, onDismissed = {}, onOutcome = {})
+            return ready
+        }
+        fun awaitHeight(expected: Float) {
+            val deadline = android.os.SystemClock.uptimeMillis() + 15_000
+            var measured = Float.NaN
+            while (android.os.SystemClock.uptimeMillis() < deadline) {
+                failure.get()?.let { throw AssertionError("Published height failed", it) }
+                instrumentation.runOnMainSync {
+                    val host = checkNotNull(activity)
+                    val window = host.javaClass.getDeclaredField("baseWindow").apply { isAccessible = true }.get(host) as ExperienceNativeLayerWindow
+                    val sheet = window.dialog.findViewById<android.view.View>(com.google.android.material.R.id.design_bottom_sheet)
+                    measured = sheet.height / host.resources.displayMetrics.density
+                }
+                if (kotlin.math.abs(measured - expected) <= 1f) break
+                android.os.SystemClock.sleep(16)
+            }
+            assertEquals("The runtime content-height query must resize the native sheet", expected, measured, 1f)
+        }
+        instrumentation.addMonitor(monitor)
+        try {
+            val ready = register(id, initial)
+            instrumentation.targetContext.startActivity(android.content.Intent(instrumentation.targetContext, NuxieExperienceActivity::class.java)
+                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK).putExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID, id))
+            activity = checkNotNull(monitor.waitForActivityWithTimeout(15_000))
+            assertTrue("Published sheet first frame: ${failure.get()}", ready.await(30, java.util.concurrent.TimeUnit.SECONDS))
+            awaitHeight(oracle.getValue("sheetHugHeight").jsonPrimitive.float)
+            // This fixture has fixed children, but its later fill-child Screen has an independent 32 dp oracle.
+            val next = initial.copy(screenId = "scr_screens_sfill-child", artboardName = "fill-child",
+                retainedViewModel = java.util.concurrent.atomic.AtomicReference(), screenLifecycle = ExperienceScreenLifecycle())
+            val nextId = java.util.UUID.randomUUID().toString()
+            val navigation = runBlocking { kotlinx.coroutines.withTimeout(15_000) {
+                checkNotNull(PresentationRegistry.currentScreen(id)).prepareNavigation(nextId, next)
+            } }
+            val nextReady = register(nextId, next)
+            runBlocking { checkNotNull(navigation).awaitExit() }
+            PresentationRegistry.dismiss(id, CloseReason.JourneyNavigation)
+            activeId = nextId
+            checkNotNull(navigation).activate()
+            assertTrue(nextReady.await(15, java.util.concurrent.TimeUnit.SECONDS))
+            awaitHeight(oracle.getValue("upstreamEdgeObservations").jsonObject.getValue("fill-child").jsonPrimitive.float)
+        } finally {
+            instrumentation.runOnMainSync { PresentationRegistry.dismiss(activeId, CloseReason.HostDismissed); activity?.finish() }
+            instrumentation.removeMonitor(monitor); directory.deleteRecursively()
+        }
     }
 
     @Test fun boundHeightRestoresFixedAndControlNeverHugs() = runBlocking {

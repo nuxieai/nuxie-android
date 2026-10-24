@@ -518,9 +518,9 @@ class SharedValuesJourneyDeviceTest {
                     while (hit == null) {
                         hit = lane.call {
                             if (pendingFrame.getBoolean(host)) return@call null
-                            val artboard = ExperienceSurfaceHost::class.java.getDeclaredField("artboard").apply { isAccessible = true }.get(host) as NuxieRuntimeArtboard
+                            val row = host.fixtureActivePageRowOnLane()
                             val player = ExperienceSurfaceHost::class.java.getDeclaredField("player").apply { isAccessible = true }.get(host) as NuxieRuntimePlayer
-                            assertTrue(artboard.setDefaultViewModelValue("state/days", NuxieViewModelScalarValue.NumberValue(days)))
+                            row.setValue("state/days", NuxieViewModelScalarValue.NumberValue(days))
                             val size = player.layoutSize()
                             val x = size.first / 2f
                             var found: Pair<Float, Float>? = null
@@ -666,11 +666,11 @@ class SharedValuesJourneyDeviceTest {
             }
             val activity = checkNotNull(monitor.waitForActivityWithTimeout(10_000))
             assertEquals(if (published) "tap" else "first", revealed.poll(20, TimeUnit.SECONDS))
-            fun surface(previous: ExperienceSurfaceHost? = null): ExperienceSurfaceHost? {
+            fun surface(): ExperienceSurfaceHost? {
                 var result: ExperienceSurfaceHost? = null
                 instrumentation.runOnMainSync {
                     fun find(view: View): ExperienceSurfaceHost? = when (view) {
-                        is ExperienceSurfaceHost -> view.takeIf { it !== previous && it.isShown }
+                        is ExperienceSurfaceHost -> view.takeIf { it.isShown }
                         is ViewGroup -> (0 until view.childCount).firstNotNullOfOrNull { find(view.getChildAt(it)) }
                         else -> null
                     }
@@ -679,15 +679,15 @@ class SharedValuesJourneyDeviceTest {
                 return result
             }
             fun lane(host: ExperienceSurfaceHost) = ExperienceSurfaceHost::class.java.getDeclaredField("lane").apply { isAccessible = true }.get(host) as NuxieRuntimeLane
-            fun artboard(host: ExperienceSurfaceHost) = ExperienceSurfaceHost::class.java.getDeclaredField("artboard").apply { isAccessible = true }.get(host) as NuxieRuntimeArtboard
+            fun row(host: ExperienceSurfaceHost) = host.fixtureActivePageRowOnLane()
             val first = checkNotNull(surface())
             val firstId = lane(first).call {
-                val root = artboard(first)
+                val root = row(first)
                 if (published) assertEquals(NuxieViewModelScalarValue.NumberValue(PublishedRunValuesFixture.expectations
                     .getValue("tap").jsonObject.getValue("before").jsonPrimitive.double),
-                    checkNotNull(root.defaultViewModelSnapshot()).resolveScalar(listOf("experience", "trip_days")))
-                else assertTrue(root.setDefaultViewModelValue("experience/trip_days", NuxieViewModelScalarValue.NumberValue(days)))
-                checkNotNull(root.defaultViewModelSnapshot()).nativeRootInstanceId
+                    root.snapshot().resolveScalar(listOf("experience", "trip_days")))
+                else root.setValue("experience/trip_days", NuxieViewModelScalarValue.NumberValue(days))
+                root.snapshot().nativeRootInstanceId
             }
             if (published) {
                 val point = lane(first).call {
@@ -714,7 +714,7 @@ class SharedValuesJourneyDeviceTest {
                     }
                     assertEquals(NuxieViewModelScalarValue.NumberValue(PublishedRunValuesFixture.expectations
                         .getValue("tap").jsonObject.getValue("before").jsonPrimitive.double),
-                        checkNotNull(artboard(first).defaultViewModelSnapshot()).resolveScalar(listOf("experience", "trip_days")))
+                        row(first).snapshot().resolveScalar(listOf("experience", "trip_days")))
                     checkNotNull(hit) { "The published Continue button has a native pointer hit" }
                 }
                 assertFalse(captured.contains("continue"))
@@ -742,9 +742,9 @@ class SharedValuesJourneyDeviceTest {
             var next: ExperienceSurfaceHost? = null
             val deadline = SystemClock.uptimeMillis() + 20_000
             while (next == null && SystemClock.uptimeMillis() < deadline) {
-                val candidate = surface(first)
+                val candidate = surface()
                 val presented = candidate != null && ExperienceSurfaceHost::class.java.getDeclaredField("firstFramePresented").apply { isAccessible = true }.getBoolean(candidate)
-                if (presented) next = candidate else delay(20)
+                if (presented && candidate != null && lane(candidate).call { candidate.fixtureActivePageScreenIdOnLane() == destination }) next = candidate else delay(20)
             }
             val shown = checkNotNull(next) {
                 val states = mutableListOf<String>()
@@ -761,13 +761,14 @@ class SharedValuesJourneyDeviceTest {
                 }
                 "The next screen did not present a native frame: $states"
             }
+            assertSame("In-page navigation retains its surface", first, shown)
             if (published) {
                 assertEquals("The released Journey admits one native continue without a publisher action id",
                     1, captured.count { it == "continue" })
                 assertFalse(captured.contains(JourneyEventNames.LEG_COMPLETED))
             }
             lane(shown).call {
-                val snapshot = checkNotNull(artboard(shown).defaultViewModelSnapshot())
+                val snapshot = row(shown).snapshot()
                 assertNotEquals(firstId, snapshot.nativeRootInstanceId)
                 assertEquals(NuxieViewModelScalarValue.NumberValue(days), snapshot.resolveScalar(listOf("experience", "trip_days")))
             }
@@ -1138,6 +1139,25 @@ class SharedValuesJourneyDeviceTest {
                 }.jsonObject.getValue("id")
                 descriptor = JsonObject(descriptor + ("leg" to JsonObject(descriptor.getValue("leg").jsonObject + mapOf(
                     "steps" to publishedLeg.getValue("steps"), "routes" to publishedLeg.getValue("routes"), "entryStepId" to entryStep))))
+            }
+        }
+        if (folder in setOf("shared-values", "emit-values", "await-values", "run-values", "forms-saves/goals")) {
+            val structure = Json.parseToJsonElement(read("runtime/$folder/page-structure.json").decodeToString()).jsonObject
+            val publishedScreens = structure.getValue("screens").jsonArray.map { it.jsonObject }.associateBy { it.getValue("artboardName").jsonPrimitive.content }
+            val oldLeg = descriptor.getValue("leg").jsonObject
+            descriptor = JsonObject(descriptor + ("leg" to JsonObject(oldLeg + ("screens" to JsonArray(oldLeg.getValue("screens").jsonArray.map {
+                val screen = it.jsonObject
+                JsonObject((screen - "defaultInstanceId") + ("defaultViewModelName" to publishedScreens.getValue(screen.getValue("id").jsonPrimitive.content).getValue("rootTypeName")))
+            })))))
+            if (folder in setOf("shared-values", "emit-values", "await-values")) {
+                val declarations = Json.parseToJsonElement(read("runtime/$folder/scene-declarations.json").decodeToString()).jsonObject
+                descriptor = JsonObject(descriptor + declarations.getValue("valuePolicy").jsonObject +
+                    ("render" to declarations.getValue("render")))
+            } else if (published) {
+                val actual = PublishedRunValuesFixture.descriptor.getValue("render").jsonObject
+                val render = descriptor.getValue("render").jsonObject
+                descriptor = JsonObject(descriptor + ("render" to JsonObject(render +
+                    ("screens" to JsonArray(actual.getValue("screens").jsonArray.map { JsonObject(it.jsonObject + ("id" to it.jsonObject.getValue("artboardName"))) })))))
             }
         }
         val bytes = descriptor.toString().encodeToByteArray()
