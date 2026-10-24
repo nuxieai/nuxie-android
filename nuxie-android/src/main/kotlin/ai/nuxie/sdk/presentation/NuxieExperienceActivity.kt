@@ -867,7 +867,11 @@ internal class NuxieExperienceActivity : Activity() {
         val screen = currentScreen
         if (!dismissible && layers.lastOrNull()?.pushed != true) return
         if (screen?.mounted?.isLayer == true && layers.size > 1) {
-            registryScope.launch { closeLayer(layers.last(), authored = true, method = "native_back") }
+            registryScope.launch {
+                closeLayer(layers.last(), authored = true, method = "native_back")
+                // Back presses queued during navigation run in order, one per completed pop (S1).
+                if (!isFinishing && !isDestroyed) drainQueuedBack() else queuedBack.clear()
+            }
             return
         }
         if (layers.size > 1) layers.last().sheet?.closeFromUser()
