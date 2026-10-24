@@ -27,9 +27,8 @@ internal class ExperienceMountedScreen(
     // Validate synchronous inputs before allocating a native lane or observers.
     private val sceneBytes = prepared.sceneFile.readBytes()
     private val inputs = ExperienceTextInput.forScreen(prepared.descriptor, prepared.screenId)
-    private val pageInputs = if (isLayer) ExperienceTextInput.forPage(prepared.descriptor) else inputs
     private val pageTextInputState = if (isLayer) ExperienceTextInputState() else prepared.textInputState
-    private val inputSize = if (pageInputs.isEmpty()) null else requireNotNull(prepared.artboardSize) {
+    private val inputSize = if (inputs.isEmpty()) null else requireNotNull(prepared.artboardSize) {
         "Editable Experience has no authored artboard extent"
     }
     private val fonts = ((prepared.descriptor?.get("render") as? JsonObject)?.get("assets") as? JsonArray)
@@ -146,7 +145,7 @@ internal class ExperienceMountedScreen(
                 addView(it, FrameLayout.LayoutParams(-1, -1))
             }
             inputSize?.let { size ->
-                val overlay = ExperienceTextInputOverlay(activity, size, pageInputs, fonts,
+                val overlay = ExperienceTextInputOverlay(activity, size, inputs, fonts,
                     pageTextInputState,
                     surface::writeNativeText, surface::notifyNativeText, surface::nativeTextEvent, surface::beginNativeEditing)
                 textOverlay = overlay
@@ -328,8 +327,8 @@ internal class ExperienceMountedScreen(
                     }
                     override suspend fun takeIncoming() { mutations += { surface.takePageIncomingOnLane(it, targetId, sourceId, isBack) } }
                     override suspend fun phases(values: List<Pair<String, ExperienceScreenLifecycle.Phase>>, transition: String) {
-                        mutations += { page -> page.setPhasesOnLane(if (covered) values.map { (id, phase) ->
-                            id to if (phase == ExperienceScreenLifecycle.Phase.ACTIVE) ExperienceScreenLifecycle.Phase.HIDDEN else phase
+                        mutations += { page -> page.setPhasesOnLane(if (covered) values.map { (id, _) ->
+                            id to ExperienceScreenLifecycle.Phase.HIDDEN
                         } else values, transition) }
                     }
                     override suspend fun begin(transition: String?) { mutations += { it.beginOnLane(targetId, transition) } }
@@ -351,8 +350,8 @@ internal class ExperienceMountedScreen(
                     override suspend fun active() {
                         prepared = target
                         activeListener = checkNotNull(rows[targetId]).listener
-                        surface.selectLayerRow(targetId)
                         bindTextOverlay()
+                        surface.selectLayerRow(targetId)
                     }
                 })
         } finally {
@@ -372,17 +371,19 @@ internal class ExperienceMountedScreen(
         surface.restoreLayerRow(sourceId, targetId, keepTarget = targetId in source.pageHistory)
         prepared = source
         activeListener = checkNotNull(rows[sourceId]).listener
-        surface.selectLayerRow(sourceId)
         bindTextOverlay()
+        surface.selectLayerRow(sourceId)
     }
 
     private fun bindTextOverlay() {
         val root = content as? FrameLayout ?: return
-        if (isLayer && textOverlay != null) return
+        val inputs = ExperienceTextInput.forScreen(prepared.descriptor, prepared.screenId)
+        if (isLayer && textOverlay != null) {
+            textOverlay?.updateDeclarations(inputs)
+            return
+        }
         textOverlay?.let { it.close(); root.removeView(it) }
         textOverlay = null
-        val inputs = if (isLayer) ExperienceTextInput.forPage(prepared.descriptor)
-            else ExperienceTextInput.forScreen(prepared.descriptor, prepared.screenId)
         if (inputs.isEmpty()) return
         val size = checkNotNull(prepared.artboardSize) { "Editable Experience has no authored artboard extent" }
         textOverlay = ExperienceTextInputOverlay(activity, size, inputs, fonts, pageTextInputState,
