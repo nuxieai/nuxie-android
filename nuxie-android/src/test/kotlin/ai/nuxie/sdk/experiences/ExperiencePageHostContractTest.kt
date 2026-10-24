@@ -46,23 +46,22 @@ class ExperiencePageHostContractTest {
                 JsonObject(it.jsonObject + ("reverse" to JsonObject(reverse +
                     if (duration == null) emptyMap() else mapOf("durationMs" to duration))))
             })))
-        for (duration in listOf(null, JsonNull, JsonPrimitive("900"), JsonPrimitive(1.5),
-            JsonPrimitive(-1), JsonPrimitive(60_001))) {
+        val outcomes = cases.getValue("reverseDurations").jsonArray.map { vector ->
+            val case = vector.jsonObject
+            val duration = if (case["omit"] == JsonPrimitive(true)) null else case.getValue("value")
             val changed = withDuration(duration)
-            assertThrows("duration=$duration", JourneyReleaseAuthenticationException::class.java) {
-                JourneyRenderSchema.validate(changed)
+            val accepted = runCatching { JourneyRenderSchema.validate(changed) }.isSuccess
+            if (accepted) {
+                val declaration = ExperiencePageHostContract.transitions(changed).first()
+                assertEquals(case.getValue("value").jsonPrimitive.long, checkNotNull(declaration.reverse).durationMs)
+                assertEquals(baseline.getValue("transitions").jsonArray.first().jsonObject
+                    .getValue("durationMs").jsonPrimitive.long, declaration.forward.durationMs)
             }
+            case.getValue("accept").jsonPrimitive.boolean to accepted
         }
+        assertEquals("Every imported reverseDurations vector must be exercised", outcomes.map { it.first }, outcomes.map { it.second })
         assertThrows(JourneyReleaseAuthenticationException::class.java) {
             ExperiencePageHostContract.transitions(withDuration(null))
-        }
-        for (duration in listOf(0L, 900L, 60_000L)) {
-            val changed = withDuration(JsonPrimitive(duration))
-            JourneyRenderSchema.validate(changed)
-            val declaration = ExperiencePageHostContract.transitions(changed).first()
-            assertEquals(duration, checkNotNull(declaration.reverse).durationMs)
-            assertEquals(baseline.getValue("transitions").jsonArray.first().jsonObject
-                .getValue("durationMs").jsonPrimitive.long, declaration.forward.durationMs)
         }
     }
 
