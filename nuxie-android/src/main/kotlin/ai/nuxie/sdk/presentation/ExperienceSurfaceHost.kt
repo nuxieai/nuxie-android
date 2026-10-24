@@ -888,6 +888,20 @@ internal class ExperienceSurfaceHost(
                         videoPlayback?.setVisible(running)
                     }
                     initialPresentationSize?.let { size -> layer.player.setLayoutSize(size.width, size.height) }
+                    if (layerScreen.fitsContentHeight) {
+                        // Pages have no content measurement yet. Release the native sheet's
+                        // show gate before a surface/frame exists, including covered restores.
+                        val bounds = initialPresentationSize
+                        if (bounds != null) {
+                            layoutBounds = bounds
+                            pointerInput.updateBounds(bounds)
+                            postLayoutBounds(bounds, contentHeight = null, notifyHeight = true)
+                        } else {
+                            mainHandler.post {
+                                if (!released.get()) listener?.onPresentationHeight(null)
+                            }
+                        }
+                    }
                     onLoaded?.invoke(true)
                 } catch (error: Throwable) {
                     reportFailure(ExperiencePresentationException.Reason.PREPARATION_FAILED, "Experience layer preparation failed", error)
