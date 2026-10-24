@@ -218,16 +218,18 @@ internal class ExperienceSurfaceHost(
 
     internal suspend fun restoreLayerRow(sourceId: String, targetId: String, keepTarget: Boolean = false) = layerOperation { layer ->
         if (sourceId != targetId) {
-            layer.cancelStepOnLane(sourceId)
+            layer.cancelStepOnLane(sourceId, targetId, nextCorrelationId++) { step ->
+                captureLayerStep(step)
+                publishSteps()
+            }
             val targetMounted = targetId in layer.mountedScreenIdsOnLane()
+            // Cancelled preparation may not have created the target row.
+            layer.setPhasesOnLane(listOfNotNull((targetId to ExperienceScreenLifecycle.Phase.HIDDEN).takeIf { targetMounted },
+                sourceId to ExperienceScreenLifecycle.Phase.ACTIVE))
             if (targetMounted) {
                 if (keepTarget) layer.setCollapsedOnLane(targetId, true)
                 else layer.removeOnLane(targetId)
             }
-            layer.takeIncomingOnLane(sourceId)
-            // Cancelled preparation may not have created the target row.
-            layer.setPhasesOnLane(listOfNotNull((targetId to ExperienceScreenLifecycle.Phase.HIDDEN).takeIf { targetMounted },
-                sourceId to ExperienceScreenLifecycle.Phase.ACTIVE))
         }
         publishSteps()
     }
