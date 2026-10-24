@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stage the prebuilt Nuxie engine (nux_capi) from a built nuxie-runtime
-# checkout into runtime/prebuilt/ for local development. Normal builds fetch
-# the pinned release in runtime/artifact.json instead.
+# checkout into runtime/prebuilt/ for the default local development builds.
+# NUXIE_RUNTIME_USE_LOCAL=0 selects the pinned release in runtime/artifact.json.
 set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"

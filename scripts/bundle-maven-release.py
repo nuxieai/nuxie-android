@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -12,6 +13,8 @@ import zipfile
 
 
 def bundle(repository, version, public_key, fingerprint, output):
+    if os.environ.get('NUXIE_RUNTIME_USE_LOCAL') != '0':
+        raise ValueError('Release bundles require NUXIE_RUNTIME_USE_LOCAL=0 for the public pinned runtime')
     if not re.fullmatch(r'\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?', version):
         raise ValueError('Expected a release version, such as 0.1.0 or 0.1.0-alpha.1')
     if version.endswith('-SNAPSHOT'):

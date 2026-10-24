@@ -51,9 +51,9 @@ def save(path, value, exclusive=False):
 
 
 def prepare(version, public_key, fingerprint, directory):
+    if os.environ.get('NUXIE_RUNTIME_USE_LOCAL') != '0':
+        raise ValueError('Release preparation requires NUXIE_RUNTIME_USE_LOCAL=0 for the public pinned runtime')
     head = tagged_source(version)
-    if os.environ.get('NUXIE_RUNTIME_USE_LOCAL'):
-        raise ValueError('Release preparation must use the public pinned runtime')
     if not os.environ.get('NUXIE_SIGNING_KEY'):
         raise ValueError('NUXIE_SIGNING_KEY is required for release preparation')
     directory.mkdir(parents=True, exist_ok=False)
