@@ -16,11 +16,7 @@ class ExperiencePageHostContractTest {
         val bytes = Base64.getDecoder().decode(entry.getValue("envelope").jsonObject
             .getValue("descriptorBytesBase64").jsonPrimitive.content)
         val old = Json.parseToJsonElement(bytes.decodeToString()).jsonObject.getValue("render").jsonObject
-        return JsonObject(old + ("transitions" to JsonArray(old.getValue("transitions").jsonArray.map {
-            val value = it.jsonObject
-            JsonObject((value - "incomingOnTop") + ("kind" to JsonPrimitive("page")) +
-                ("reverse" to JsonObject(value.getValue("reverse").jsonObject - "incomingOnTop")))
-        })))
+        return ai.nuxie.sdk.fixtures.pageDescriptorFixture(old)
     }
     @Test fun `page declarations validate and retired host and transition fields are refused`() {
         val render = render()
@@ -40,6 +36,34 @@ class ExperiencePageHostContractTest {
             JsonObject(it.jsonObject + ("incomingOnTop" to JsonPrimitive(true)))
         })))
         assertThrows(JourneyReleaseAuthenticationException::class.java) { JourneyRenderSchema.validate(changed) }
+    }
+
+    @Test fun `reverse requires its own integer duration within the published bounds`() {
+        val baseline = render()
+        fun withDuration(duration: JsonElement?): JsonObject = JsonObject(baseline + ("transitions" to
+            JsonArray(baseline.getValue("transitions").jsonArray.map {
+                val reverse = it.jsonObject.getValue("reverse").jsonObject - "durationMs"
+                JsonObject(it.jsonObject + ("reverse" to JsonObject(reverse +
+                    if (duration == null) emptyMap() else mapOf("durationMs" to duration))))
+            })))
+        for (duration in listOf(null, JsonNull, JsonPrimitive("900"), JsonPrimitive(1.5),
+            JsonPrimitive(-1), JsonPrimitive(60_001))) {
+            val changed = withDuration(duration)
+            assertThrows("duration=$duration", JourneyReleaseAuthenticationException::class.java) {
+                JourneyRenderSchema.validate(changed)
+            }
+        }
+        assertThrows(JourneyReleaseAuthenticationException::class.java) {
+            ExperiencePageHostContract.transitions(withDuration(null))
+        }
+        for (duration in listOf(0L, 900L, 60_000L)) {
+            val changed = withDuration(JsonPrimitive(duration))
+            JourneyRenderSchema.validate(changed)
+            val declaration = ExperiencePageHostContract.transitions(changed).first()
+            assertEquals(duration, checkNotNull(declaration.reverse).durationMs)
+            assertEquals(baseline.getValue("transitions").jsonArray.first().jsonObject
+                .getValue("durationMs").jsonPrimitive.long, declaration.forward.durationMs)
+        }
     }
 
     @Test fun `published route references select by source and missing source cuts`() {

@@ -10,6 +10,8 @@ internal fun pageDescriptorFixture(value: JsonObject): JsonObject {
             when {
                 key == "kind" && child is JsonPrimitive && child.content in setOf("layer", "choreographed") -> JsonPrimitive("page")
                 key == "type" && child == JsonPrimitive("custom") -> JsonPrimitive("magic-move")
+                key == "reverse" && child is JsonObject && "durationMs" !in child ->
+                    migrate(JsonObject(child + ("durationMs" to value.getValue("durationMs"))))
                 else -> migrate(child)
             }
         })

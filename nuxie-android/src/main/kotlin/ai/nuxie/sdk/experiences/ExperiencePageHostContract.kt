@@ -84,7 +84,7 @@ internal object ExperiencePageHostContract {
     fun transitions(render: JsonObject): List<Transition> = array(render["transitions"]).map { input ->
         val value = record(input)
         fun endpoints(edge: JsonObject): Endpoints = Endpoints(
-            integer(edge["durationMs"] ?: value["durationMs"]),
+            integer(edge["durationMs"]),
             (edge["incomingOnTop"] ?: value["incomingOnTop"])?.let(::boolean) ?: true,
             JourneyReleaseSchema.releaseId(record(edge["source"])["completeEventName"]),
             JourneyReleaseSchema.releaseId(record(edge["destination"])["completeEventName"]))
