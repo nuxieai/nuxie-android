@@ -65,7 +65,7 @@ class ExperienceLayerSurfaceFailureTest {
     }
 
     @Test fun `page commands share active B snapshot saves and row effects exactly once`() = runBlocking {
-        withSurface { surface, page, _, lane ->
+        for (removed in listOf(false, true)) withSurface { surface, page, native, lane ->
             lane.call {
                 page.insertOnLane("b", 1)
                 set(surface, "activeRowId", "b")
@@ -88,8 +88,14 @@ class ExperienceLayerSurfaceFailureTest {
                 val change = NuxieViewModelChange(NuxieViewModelChangeOrigin.RUNTIME, 42u, 300u, 2,
                     NuxieViewModelValue.Number(4f))
                 val outcome = NuxiePlayerStepOutcome(false, emptyList(), listOf(event), commands, listOf(change))
+                if (removed) {
+                    native.snapshotOverrides[300] = snapshot
+                    page.removeOnLane("b")
+                }
                 val step = page.captureOnLane(outcome, 42u)
-                val captured = step.copy(rows = step.rows + ("b" to step.rows.getValue("b").copy(nativeSnapshot = snapshot)))
+                val captured = if (removed) step else step.copy(rows = step.rows +
+                    ("b" to step.rows.getValue("b").copy(nativeSnapshot = snapshot)))
+                val expectedSnapshot = if (removed) page.snapshotOnLane("b") else captured.rows.getValue("b").snapshot
                 var calls = 0
                 set(surface, "listener", object : ExperienceSurfaceHost.Listener {
                     override fun onFirstFrame() = Unit
@@ -103,10 +109,10 @@ class ExperienceLayerSurfaceFailureTest {
                         calls++
                         assertEquals("b", screenId)
                         assertEquals(42uL, correlationId)
-                        assertSame(captured.rows.getValue("b").snapshot, snapshot)
+                        assertSame(expectedSnapshot, snapshot)
                         assertEquals(commands, outcome.hostCommands)
-                        assertEquals(listOf(event), outcome.events)
-                        assertEquals(listOf(change), outcome.viewModelChanges)
+                        assertEquals(if (removed) emptyList<NuxieRuntimeEvent>() else listOf(event), outcome.events)
+                        assertEquals(if (removed) emptyList<NuxieViewModelChange>() else listOf(change), outcome.viewModelChanges)
                         val request = saves.single()
                         assertEquals("state/continue", request.awaitTrigger)
                         assertEquals(4.0, request.answers.getValue("keptValue").jsonPrimitive.double, 0.0)

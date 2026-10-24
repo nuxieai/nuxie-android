@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.logging.NuxieLog as Log
 import ai.nuxie.sdk.billing.StoreProduct
 import ai.nuxie.sdk.experiences.ExperiencePageHostContract
 import ai.nuxie.sdk.experiences.ExperienceViewModelBinding
@@ -35,10 +36,13 @@ internal class ExperienceInteractivePage private constructor(
         val routing: JourneyRuntimeEmissionCoordinator?,
         var lifecycle: ExperienceScreenLifecycle,
     ) {
+        var retained: NuxieCapturedViewModelSnapshot? = null
         val completions = linkedMapOf<CompletableDeferred<Unit>, String>()
     }
     private val rows = linkedMapOf<String, Row>()
     private val mounted = mutableListOf<String>()
+    private val removedNativeOwners = mutableMapOf<Long, String>()
+    private val loggedRemovedWrites = mutableSetOf<String>()
     private val collapsed = mutableSetOf<String>()
     private var liveStep: Pair<String, String?>? = null
     private var rowsNeedReconciliation = false
@@ -72,6 +76,10 @@ internal class ExperienceInteractivePage private constructor(
                 it.restoreRetainedState(row.lifecycle)
                 row.lifecycle = it
             }
+            if (row.retained != null) {
+                rows[screenId] = prepareRow(screenId, row.products, routing ?: row.routing, null,
+                    checkNotNull(row.retained).values, row.lifecycle)
+            }
             return@checked false
         }
         rows[screenId] = prepareRow(screenId, products, routing, projection, snapshot, lifecycle ?: ExperienceScreenLifecycle())
@@ -80,7 +88,7 @@ internal class ExperienceInteractivePage private constructor(
 
     internal fun insertOnLane(screenId: String, index: Int) = checked {
         require(screenId !in mounted && index == mounted.size) { "New page rows must append" }
-        artboard.insertDefaultListItem(contract.listPath, index, row(screenId).values)
+        artboard.insertDefaultListItem(contract.listPath, index, valuesOnLane(screenId))
         mounted.add(screenId)
         rowsNeedReconciliation = true
     }
@@ -168,13 +176,13 @@ internal class ExperienceInteractivePage private constructor(
         else applyLifecycleOnLane(screenId)
     }
 
-    internal fun valuesOnLane(screenId: String): NuxieRuntimeViewModelState = checked { row(screenId).values }
+    internal fun valuesOnLane(screenId: String): NuxieRuntimeViewModelState = checked { requireNotNull(writableRow(screenId)) { "Unknown page row" }.values }
 
     suspend fun applyRuntimeValues(screenId: String, values: Map<String, NuxieViewModelScalarValue>) =
         lane.call { applyRuntimeValuesOnLane(screenId, values) }
 
     internal fun applyRuntimeValuesOnLane(screenId: String, values: Map<String, NuxieViewModelScalarValue>): Set<String> = checked {
-        val row = row(screenId)
+        val row = writableRow(screenId) ?: return@checked emptySet()
         val accepted = mutableSetOf<String>()
         (values["env/fontScale"] as? NuxieViewModelScalarValue.NumberValue)?.let { row.lifecycle.updateFontScale(it.value.toFloat()) }
         (values["env/reduceMotion"] as? NuxieViewModelScalarValue.BooleanValue)?.let { row.lifecycle.updateReduceMotion(it.value) }
@@ -197,7 +205,8 @@ internal class ExperienceInteractivePage private constructor(
     internal fun commandOnLane(screenId: String?, viewModelName: String? = null,
         write: (NuxieRuntimeViewModelState) -> Unit) = checked {
         for ((id, row) in rows) if ((screenId == null || screenId == id) &&
-            (viewModelName == null || viewModelName == row.selection.rootName)) write(row.values)
+            (viewModelName == null || viewModelName == row.selection.rootName))
+            writableRow(id)?.let { write(it.values) }
     }
 
     suspend fun applyValues(screenId: String?, values: Map<String, NuxieViewModelScalarValue>, viewModelName: String? = null) = operation {
@@ -225,7 +234,7 @@ internal class ExperienceInteractivePage private constructor(
             "Screen artboard is unavailable"
         }
         val schemaIndex = try { screenArtboard.defaultSchemaIndex() } finally { screenArtboard.close() }
-        require(rows.values.none { it.selection.schemaIndex == schemaIndex }) { "Page Screens require distinct root schemas" }
+        require(rows.values.none { it.selection.schemaIndex == schemaIndex && it !== rows[screenId] }) { "Page Screens require distinct root schemas" }
         val selection = ExperiencePageHostContract.pageRowSelection(descriptor, screenId, file.viewModelCatalog(), schemaIndex)
         require(snapshot == null || snapshot.retainedGraph.rootSchemaIndex == schemaIndex) {
             "Cached Screen schema differs from its published artboard"
@@ -252,13 +261,14 @@ internal class ExperienceInteractivePage private constructor(
         phases.forEach { row(it.first) }
         for ((id, phase) in phases) {
             val row = row(id)
-            writeLifecycle(row, row.lifecycle.move(phase, transition, exitReason))
+            val values = row.lifecycle.move(phase, transition, exitReason)
+            if (writableRow(id) != null) writeLifecycle(row, values)
         }
     }
 
     /** Recreated rows restore their current phase without counting another appearance. */
     internal fun applyLifecycleOnLane(screenId: String) = checked {
-        val row = row(screenId)
+        val row = writableRow(screenId) ?: return@checked
         writeLifecycle(row, row.lifecycle.snapshot())
     }
 
@@ -274,7 +284,7 @@ internal class ExperienceInteractivePage private constructor(
     suspend fun applyJourneyValues(screenId: String, values: Map<String, NuxieViewModelScalarValue>) = lane.call { applyJourneyValuesOnLane(screenId, values) }
 
     internal fun applyJourneyValuesOnLane(screenId: String, values: Map<String, NuxieViewModelScalarValue>) = checked {
-        val row = row(screenId)
+        val row = writableRow(screenId) ?: return@checked
         for ((path, value) in journeyValues(values)) row.values.setValue(path, value)
     }
 
@@ -286,7 +296,12 @@ internal class ExperienceInteractivePage private constructor(
 
     suspend fun snapshot(screenId: String): NuxieViewModelSnapshot = lane.call { snapshotOnLane(screenId) }
 
-    internal fun snapshotOnLane(screenId: String): NuxieViewModelSnapshot = checked { row(screenId).values.snapshot() }
+    internal fun snapshotOnLane(screenId: String): NuxieViewModelSnapshot = captureRowOnLane(screenId).values
+
+    internal fun captureRowOnLane(screenId: String): NuxieCapturedViewModelSnapshot = checked {
+        val row = row(screenId)
+        row.retained ?: row.values.captureSnapshot()
+    }
     suspend fun lifecycle(screenId: String): Map<String, NuxieViewModelScalarValue> = lane.call { lifecycleOnLane(screenId) }
 
     internal fun lifecycleOnLane(screenId: String): Map<String, NuxieViewModelScalarValue> = checked { row(screenId).lifecycle.snapshot() }
@@ -318,7 +333,14 @@ internal class ExperienceInteractivePage private constructor(
         val index = mounted.indexOf(screenId)
         require(index >= 0) { "Screen is absent from the page" }
         check(row(screenId).completions.isEmpty()) { "Screen still awaits completion" }
+        val removed = row(screenId)
+        val retained = removed.values.captureSnapshot()
         artboard.removeDefaultListItem(contract.listPath, index)
+        removed.retained = retained
+        val sharedIds = sharedExperience?.nativeSnapshot()?.instances?.map { it.id }.orEmpty().toSet()
+        retained.native.instances.filter { it.id !in sharedIds }
+            .forEach { removedNativeOwners[it.id] = screenId }
+        removed.values.close()
         // Removal reconciles on the next ordinary step; do not add a settlement advance.
         mounted.removeAt(index)
         collapsed.remove(screenId)
@@ -392,8 +414,26 @@ internal class ExperienceInteractivePage private constructor(
             }
             rows.clear()
             mounted.clear()
+            removedNativeOwners.clear()
+            loggedRemovedWrites.clear()
             failure?.let { throw it }
         }
+    }
+
+    internal fun canWriteNativeOwnerOnLane(ownerId: Long): Boolean = checked {
+        val removed = removedNativeOwners[ownerId]
+        if (removed == null) true else { logRemovedWrite(removed); false }
+    }
+
+    private fun writableRow(id: String): Row? {
+        val row = row(id)
+        if (row.retained == null) return row
+        logRemovedWrite(id)
+        return null
+    }
+
+    private fun logRemovedWrite(id: String) {
+        if (loggedRemovedWrites.add(id)) Log.d("NuxiePage", "Skipped write to removed Screen row")
     }
 
     private fun row(id: String): Row = requireNotNull(rows[id]) { "Unknown page row" }
