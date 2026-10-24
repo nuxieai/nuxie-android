@@ -100,6 +100,8 @@ internal object ExperiencePageHostContract {
         return text(screen["artboardName"])
     }
 
+    // A null authored index takes the schema's first authored instance. The artboard default is the
+    // same one (the runtime's ViewModel default is its first instance); defaultInstanceId only names it.
     fun pageRowSelection(descriptor: JsonObject, screenId: String, catalog: NuxieViewModelCatalog,
         schemaIndex: Int): RowSelection {
         val schema = catalog.schemas.single { it.index == schemaIndex }
