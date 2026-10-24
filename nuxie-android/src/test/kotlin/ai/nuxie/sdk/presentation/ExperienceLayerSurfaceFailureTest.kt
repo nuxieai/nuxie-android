@@ -559,6 +559,80 @@ class ExperienceLayerSurfaceFailureTest {
         cancelledBackCut(skipping = true)
     }
 
+    @Test fun `together cancellation after stepEnd cuts back before retiring target`() = runBlocking {
+        cancelledEndedStep(reducedMotion = false)
+    }
+
+    @Test fun `reduced motion cancellation after stepEnd cuts back before retiring target`() = runBlocking {
+        cancelledEndedStep(reducedMotion = true)
+    }
+
+    private suspend fun CoroutineScope.cancelledEndedStep(reducedMotion: Boolean) {
+        for (keepTarget in listOf(false, true)) withSurface { surface, page, native, lane ->
+            native.traceListMutations = true
+            var activated = false
+            var batches = 0
+            val navigation = launch {
+                try {
+                    ExperiencePageStep.perform("a", "b", ai.nuxie.sdk.experiences.ExperiencePageHostContract.Style.MAGIC_MOVE,
+                        false, ExperienceScreenTransitionPlan.Custom("pair", 100, true, "leave", "arrive"),
+                        ExperiencePageStep.Exit(null, null), reducedMotion, object : ExperiencePageStep.Operations {
+                            val mutations = mutableListOf<(ExperienceInteractivePage) -> Unit>()
+                            var ended = false
+                            override fun input(enabled: Boolean) = Unit
+                            override suspend fun prepare() = Unit
+                            override suspend fun register(screenId: String, event: String): Deferred<Unit> = CompletableDeferred(Unit)
+                            override suspend fun batch(present: Boolean, watchdogMs: Long, writes: suspend () -> Unit) {
+                                writes()
+                                surface.layerOperation { layer -> mutations.forEach { it(layer) }; mutations.clear() }
+                                batches++
+                                if (ended) currentCoroutineContext().cancel()
+                            }
+                            override suspend fun takeIncoming() { mutations += { surface.takePageIncomingOnLane(it, "b", "a", false) } }
+                            override suspend fun phases(values: List<Pair<String, ExperienceScreenLifecycle.Phase>>, transition: String) {
+                                mutations += { it.setPhasesOnLane(values, transition) }
+                            }
+                            override suspend fun begin(transition: String?) { mutations += { it.beginOnLane("b", transition) } }
+                            override suspend fun end(transition: String?) { mutations += { it.endOnLane("b", transition) }; ended = true }
+                            // Exercise both a retained source and one removed by the completed batch.
+                            override suspend fun retire() { mutations += { it.retireOnLane(if (keepTarget) setOf("b") else setOf("a", "b"), "b") } }
+                            override suspend fun present() = Unit
+                            override suspend fun hidden() = Unit
+                            override suspend fun active() { activated = true }
+                        })
+                } finally {
+                    withContext(NonCancellable) {
+                        lane.call { assertNull(field(page, "liveStep")); native.trace.clear() }
+                        surface.restoreLayerRow("a", "b", keepTarget)
+                    }
+                }
+            }
+            navigation.join()
+            assertTrue(navigation.isCancelled)
+            assertFalse(activated)
+            assertEquals(if (reducedMotion) 1 else 2, batches)
+            assertEquals(listOf("begin:A:null", "end:A:null"), native.trace.filter { it.startsWith("begin:") || it.startsWith("end:") })
+            val end = native.trace.indexOf("end:A:null")
+            assertTrue(native.trace.indexOf(if (keepTarget) "collapse:1:true" else "remove") > end)
+            assertEquals(if (keepTarget) listOf("a", "b") else listOf("a"), page.mountedScreenIds())
+            assertFalse(page.isCollapsed("a"))
+            assertEquals(NuxieViewModelScalarValue.StringValue("active"), page.lifecycle("a")["screen/phase"])
+            if (keepTarget) {
+                assertTrue(page.isCollapsed("b"))
+                assertEquals(NuxieViewModelScalarValue.StringValue("hidden"), page.lifecycle("b")["screen/phase"])
+                assertTrue(native.trace.indexOf("move:1:0") < native.trace.indexOf("step:0.0"))
+            }
+            surface.layerOperation {
+                it.prepareOnLane("b")
+                surface.takePageIncomingOnLane(it, "b", "a", false)
+                it.beginOnLane("b", null); it.endOnLane("b", null)
+                it.retireOnLane(setOf("a", "b"), "b")
+                it.setPhasesOnLane(listOf("a" to ExperienceScreenLifecycle.Phase.HIDDEN, "b" to ExperienceScreenLifecycle.Phase.ACTIVE))
+            }
+            assertEquals(NuxieViewModelScalarValue.StringValue("active"), page.lifecycle("b")["screen/phase"])
+        }
+    }
+
     private suspend fun CoroutineScope.cancelledBackCut(skipping: Boolean) {
         withSurface { surface, page, native, lane ->
             val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
@@ -612,7 +686,7 @@ class ExperienceLayerSurfaceFailureTest {
                 navigation.cancelAndJoin()
                 val fresh = page.snapshot(sourceId).nativeRootInstanceId
                 assertNotEquals(oldSource, fresh)
-                assertEquals(listOf("a", sourceId), page.mountedScreenIds())
+                assertEquals(listOf(sourceId, "a"), page.mountedScreenIds())
                 assertTrue(page.isCollapsed("a"))
                 assertEquals(NuxieViewModelScalarValue.StringValue("active"), page.lifecycle(sourceId)["screen/phase"])
                 assertEquals(if (skipping) 73.0 else 42.0,
@@ -630,8 +704,8 @@ class ExperienceLayerSurfaceFailureTest {
                     native.traceListMutations = true
                     native.trace.clear()
                     mounted.navigateLayer(b, true)
-                    assertTrue(native.trace.indexOf("move:2:1") in 0 until native.trace.indexOf("begin:B:null"))
-                    assertEquals(listOf("a", "b"), page.mountedScreenIds())
+                    assertTrue(native.trace.indexOf("move:2:0") in 0 until native.trace.indexOf("begin:B:null"))
+                    assertEquals(listOf("b", "a"), page.mountedScreenIds())
                 } else {
                     mounted.prepareRow(initial, listener)
                     mounted.navigateLayer(initial, true)
