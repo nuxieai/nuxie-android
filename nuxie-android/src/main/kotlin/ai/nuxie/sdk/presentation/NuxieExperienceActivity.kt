@@ -221,12 +221,16 @@ internal class NuxieExperienceActivity : Activity() {
             val layer = layers.lastOrNull()?.takeIf { it.screen === this@Screen } ?: return@withContext false
             closeLayer(layer, authored = true, pageCount = count)
         }
-        override suspend fun cutCoveredPage(screenId: String, history: List<String>): PreparedPresentation? =
+        override suspend fun cutCoveredPage(target: PreparedPresentation): PreparedPresentation? =
             withContext(Dispatchers.Main.immediate) {
                 val layer = layers.firstOrNull { it.screen === this@Screen } ?: return@withContext null
                 check(layer !== layers.last()) { "Hidden cut requires a covered page" }
-                checkNotNull(mounted).cutCoveredPage(screenId, history, this@Screen).also { prepared = it }
+                checkNotNull(mounted).cutCoveredPage(target, this@Screen).also { prepared = it }
             }
+        override suspend fun updatePageHistory(history: List<String>) = withContext(Dispatchers.Main.immediate) {
+            checkNotNull(mounted).updatePageHistory(history)
+            prepared = prepared.copy(pageHistory = history)
+        }
         override suspend fun prepareNavigation(id: String, content: PreparedPresentation): PreparedScreenNavigation =
             prepareScreenNavigation(this, id, content)
 

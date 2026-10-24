@@ -82,9 +82,6 @@ internal data class JourneyPresentationRequest(
     val onLinkOpened: suspend (JourneyOpenedLink) -> Unit = {},
     val onEmissionBatch: suspend (JourneyScreenEmissionBatch, JourneyRuntimeEmissionSources?) -> JourneyEmissionBatchResult = { _, _ -> JourneyEmissionBatchResult.ACCEPTED },
     val onPresentationRevealed: suspend (String) -> Unit = {},
-    val withPresentationCallbacks: suspend (suspend () -> Unit) -> Unit = ::directPresentationCallbacks,
-    /** False means Journey followed an offer alternative or withdrew the revisit. */
-    val onBackNavigation: suspend (String) -> Boolean = { true },
     val onOutcome: suspend (JourneySurfaceOutcome) -> Unit,
     val transition: JsonObject? = null,
     val runValues: ExperienceRunValues? = null,
@@ -176,5 +173,3 @@ internal interface JourneyPresenting {
 
     suspend fun shutdownOwnedBy(ownerDistinctId: String)
 }
-
-internal suspend fun directPresentationCallbacks(work: suspend () -> Unit) = work()
