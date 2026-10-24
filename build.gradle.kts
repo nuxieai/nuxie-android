@@ -76,6 +76,17 @@ val runtimeDirectory = layout.projectDirectory.dir("runtime").asFile
 val runtimeArtifactPin = runtimeDirectory.resolve("artifact.json")
 val runtimeSizeBudget = runtimeDirectory.resolve("size-budget.json")
 val runtimePrebuilt = runtimeDirectory.resolve("prebuilt")
+val runtimeArtifactTests by tasks.registering(Exec::class) {
+  group = "verification"
+  description = "Checks runtime selection, provenance and release publishing boundaries."
+  commandLine(
+    "python3", "-m", "unittest", "scripts/tests/test_runtime_artifacts.py",
+    "scripts/tests/test_publish_maven_release.py", "scripts/tests/test_bazel_sdk.py",
+  )
+}
+project(":nuxie-android").tasks.withType<Test>().configureEach {
+  dependsOn(runtimeArtifactTests)
+}
 val requiredRuntimeArtifacts = setOf(
   "include/nux_capi.generated.h",
   "jniLibs/arm64-v8a/libc++_shared.so",
@@ -264,7 +275,7 @@ fun cachedRuntimeValidationFailure(
 
 val runtimeFetch by tasks.registering {
   group = "runtime"
-  description = "Fetches and verifies the pinned Nuxie runtime artifact."
+  description = "Verifies the staged local runtime, or fetches the pinned release when explicitly selected."
   inputs.file(runtimeArtifactPin)
   inputs.file(runtimeSizeBudget)
   // Deliberately do not declare prebuilt/ as a Gradle output: Gradle creates
@@ -277,26 +288,18 @@ val runtimeFetch by tasks.registering {
     val maximumBytes = (budget["maximumBytes"] as? Number)?.toLong()?.takeIf { it > 0L }
       ?: throw GradleException("runtime/size-budget.json must contain a positive 'maximumBytes' number.")
 
-    when (val localSelection = providers.environmentVariable("NUXIE_RUNTIME_USE_LOCAL").orNull) {
-      "1" -> {
-        recoverRuntimeInstall { candidate ->
-          runCatching { verifyArtifactSet(candidate, maximumBytes) }
-            .exceptionOrNull()
-            ?.let { error -> error.message ?: "the runtime artifact set is invalid" }
-        }
-        runCatching { verifyArtifactSet(runtimePrebuilt.toPath(), maximumBytes) }
-          .getOrElse { error ->
-            throw GradleException(
-              "NUXIE_RUNTIME_USE_LOCAL=1 requires a complete runtime/prebuilt/ artifact set. " +
-                "Run scripts/stage-runtime.sh <path-to-nuxie-runtime-checkout> first. ${error.message}",
-              error,
-            )
-          }
-        logger.lifecycle("Using locally staged Nuxie runtime from runtime/prebuilt/.")
-        return@doLast
-      }
-      null -> Unit
-      else -> throw GradleException("NUXIE_RUNTIME_USE_LOCAL must be unset or 1 (was '$localSelection').")
+    val selection = providers.exec {
+      commandLine(
+        "python3", "scripts/bazel/runtime_artifacts.py", "select",
+        "--tree", runtimePrebuilt, "--provenance", runtimeDirectory.resolve("local-artifact.json"),
+        "--budget", runtimeSizeBudget,
+      )
+      isIgnoreExitValue = true
+    }
+    if (selection.result.get().exitValue != 0) throw GradleException(selection.standardError.asText.get().trim())
+    if (selection.standardOutput.asText.get().trim() == "local") {
+      logger.lifecycle("Using locally staged Nuxie runtime from runtime/prebuilt/.")
+      return@doLast
     }
 
     val pin = readJsonObject(runtimeArtifactPin)
@@ -622,7 +625,7 @@ val runtimeBoundary by tasks.registering {
 project(":runtime") {
   tasks.register("fetch") {
     group = "runtime"
-    description = "Fetches and verifies the pinned Nuxie runtime artifact."
+    description = "Verifies the staged local runtime, or fetches the explicitly selected pinned release."
     dependsOn(runtimeFetch)
   }
   tasks.register("boundary") {

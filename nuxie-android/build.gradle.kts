@@ -1,6 +1,8 @@
 import groovy.json.JsonSlurper
 import kotlinx.validation.KotlinApiBuildTask
 import kotlinx.validation.KotlinApiCompareTask
+import org.gradle.api.publish.maven.tasks.AbstractPublishToMaven
+import org.gradle.plugins.signing.Sign
 
 plugins {
   alias(libs.plugins.android.library)
@@ -67,9 +69,8 @@ android {
     unitTests.all { it.maxHeapSize = "1g" }
   }
 
-  // The engine (.so) is fetched and verified from runtime/artifact.json by
-  // the root runtimeFetch task. scripts/stage-runtime.sh remains the explicit
-  // NUXIE_RUNTIME_USE_LOCAL=1 escape for local runtime development.
+  // runtimeFetch verifies the staged engine in runtime/prebuilt by default.
+  // Set NUXIE_RUNTIME_USE_LOCAL=0 to fetch the pin in runtime/artifact.json.
   val runtimePrebuilt = rootProject.file("runtime/prebuilt")
   externalNativeBuild {
     cmake {
@@ -134,6 +135,17 @@ publishing {
 }
 
 val releaseSigningKey = providers.environmentVariable("NUXIE_SIGNING_KEY")
+fun requirePublishedRuntime() {
+  check(providers.environmentVariable("NUXIE_RUNTIME_USE_LOCAL").orNull == "0") {
+    "Release publishing requires NUXIE_RUNTIME_USE_LOCAL=0 for the pinned runtime."
+  }
+}
+tasks.withType<AbstractPublishToMaven>().configureEach {
+  doFirst { requirePublishedRuntime() }
+}
+tasks.withType<Sign>().configureEach {
+  doFirst { requirePublishedRuntime() }
+}
 if (releaseSigningKey.isPresent) {
   signing {
     useInMemoryPgpKeys(releaseSigningKey.get(), providers.environmentVariable("NUXIE_SIGNING_PASSWORD").orNull)

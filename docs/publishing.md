@@ -38,6 +38,7 @@ environment present, Bazel preparation signs the publication with an isolated
 temporary GnuPG home:
 
 ```sh
+export NUXIE_RUNTIME_USE_LOCAL=0
 scripts/bazel/sdk.sh prepare --output build/maven-repository --sign
 python3 scripts/bundle-maven-release.py --version 1.0.0 \
   --public-key /absolute/path/to/release-public-key.asc \
@@ -65,14 +66,14 @@ After the SDK change passes native readiness and merges, create and push the
 must match. With the release signing environment present, run:
 
 ```sh
-python3 scripts/publish-maven-release.py prepare --version 1.0.0 \
+NUXIE_RUNTIME_USE_LOCAL=0 python3 scripts/publish-maven-release.py prepare --version 1.0.0 \
   --public-key /absolute/path/to/release-public-key.asc \
   --fingerprint FULL_RELEASE_KEY_FINGERPRINT \
   --output-directory build/releases/1.0.0
 ```
 
 Preparation checks the remote tag and main ancestry, rejects a dirty checkout or
-local runtime override, runs Bazel tests and the independent Gradle native/API/lint/example checks,
+local runtime selection, runs Bazel tests and the independent Gradle native/API/lint/example checks,
 stages the signed publication, runs the independent consumer and verifies the
 bundle. It records the source commit and bundle digest in `release.json`. Use a
 new output directory for a new preparation attempt; retain failed logs.

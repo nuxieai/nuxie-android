@@ -348,6 +348,8 @@ def publish_directory(staging, destination):
 def prepare(args):
     if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?", args.maven_version):
         raise ValueError("Expected a Maven version without path characters")
+    if (args.sign or re.search(r"-[0-9a-f]{40}$", args.maven_version)) and os.environ.get("NUXIE_RUNTIME_USE_LOCAL") != "0":
+        raise ValueError("Signed or source-addressed Maven preparation requires NUXIE_RUNTIME_USE_LOCAL=0 for the published pinned runtime")
     revision, dirty = source_identity(args.maven_version, args.sign)
     _, ndk = toolchain()
     bazel("build", *TARGETS.values())

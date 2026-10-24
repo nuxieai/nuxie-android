@@ -55,9 +55,15 @@ adb -s "$ANDROID_SERIAL" shell am instrument -w -r \
 
 ## Runtime artifact
 
-Bazel imports and SHA-256 verifies the published Android runtime pinned
-in `runtime/artifact.json`. It contains the native surface-presentation APIs used
-by this SDK. Ordinary builds and tests use that artifact automatically:
+Bazel and Gradle default to the local runtime in `runtime/prebuilt`, verifying
+its header and both ABI libraries against `runtime/local-artifact.json`.
+First build the Android distribution in a `nuxie-runtime` checkout and stage it:
+
+```bash
+scripts/stage-runtime.sh /absolute/path/to/nuxie-runtime
+```
+
+Then build and test normally:
 
 ```bash
 scripts/bazel/sdk.sh build
@@ -66,17 +72,11 @@ scripts/bazel/sdk.sh example
 ./gradlew :nuxie-android:test :nuxie-android:apiCheck :nuxie-android:lint :example-app:assembleDebug
 ```
 
-For development of runtime changes, build the Android distribution in a
-`nuxie-runtime` checkout and optionally stage its verified outputs:
-
-```bash
-scripts/stage-runtime.sh /absolute/path/to/nuxie-runtime
-NUXIE_RUNTIME_USE_LOCAL=1 scripts/bazel/sdk.sh build
-```
-
 The staging script verifies the build's source revision and pinned NDK.
-Without `NUXIE_RUNTIME_USE_LOCAL=1`, builds restore the public pinned artifact;
-restage your runtime build before resuming local runtime development if needed.
+Unset or `NUXIE_RUNTIME_USE_LOCAL=1` uses this staged runtime; missing or invalid
+staging stops the build without downloading. `NUXIE_RUNTIME_USE_LOCAL=0` restores
+the pinned release in `runtime/artifact.json` and is required for release publishing.
+Restage after using the pinned release to resume local runtime development.
 
 See the [Bazel build guide](docs/bazel-build.md) for Maven preparation, direct JVM
 tests, instrumentation, and the retained API/lint/release qualification drivers.
@@ -85,7 +85,7 @@ tests, instrumentation, and the retained API/lint/release qualification drivers.
 
 The [example app guide](example-app/README.md) covers setup, identity, authored
 triggers, Feature access, restore, a local analytics sink and the development
-Test Store using the pinned runtime artifact.
+Test Store using the selected runtime artifact.
 
 The separate [RevenueCat adapter example](example-revenuecat/README.md) compiles
 against a pinned provider SDK and preserves exact subscription checkout terms.
