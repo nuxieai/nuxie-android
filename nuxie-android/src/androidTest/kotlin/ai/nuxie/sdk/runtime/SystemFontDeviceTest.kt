@@ -78,9 +78,7 @@ class SystemFontDeviceTest {
         val bytes = asset("mixed.nux")
         val catalog = checkNotNull(runtime.inspectFileAssets(bytes))
         assertEquals(2, catalog.size)
-        val scenes = JSONObject(String(asset("provenance.json"))).getJSONArray("scenes")
-        val mixed = (0 until scenes.length()).map(scenes::getJSONObject).single { it.getString("name") == "mixed" }
-        val fonts = mixed.getJSONArray("fonts")
+        val fonts = JSONObject(String(asset("provenance.json"))).getJSONArray("fonts")
         val systemID = (0 until fonts.length()).map(fonts::getJSONObject)
             .single { it.getString("location") == "system" }.getLong("authoredAssetId")
         val device = SystemFontProvider.prepare(SystemFontRequirement("system", 400, "normal"))

@@ -132,13 +132,9 @@ class PublishedScriptTapDeviceTest {
                 found = find(activity.window.decorView)
             }
             val surface = checkNotNull(found)
-            val lane = ExperienceSurfaceHost::class.java.getDeclaredField("lane")
-                .apply { isAccessible = true }.get(surface) as NuxieRuntimeLane
-            // Read the mounted native artboard, never a separately constructed value instance.
-            suspend fun count() = lane.call {
-                val artboard = ExperienceSurfaceHost::class.java.getDeclaredField("artboard")
-                    .apply { isAccessible = true }.get(surface) as NuxieRuntimeArtboard
-                checkNotNull(artboard.defaultViewModelSnapshot()).resolveScalar(listOf("state", "count"))
+            // Read the mounted Screen row inside the shared page player.
+            suspend fun count() = surface.layerOperation {
+                it.snapshotOnLane("scr_screens_stap").resolveScalar(listOf("state", "count"))
             }
             var previousLabelPixels: IntArray? = null
             fun captureCount(expected: Int) {
