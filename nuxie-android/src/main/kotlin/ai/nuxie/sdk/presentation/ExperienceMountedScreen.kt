@@ -277,11 +277,13 @@ internal class ExperienceMountedScreen(
     }
 
     /** The step controls rows; the Activity only transfers the presentation lease afterward. */
-    suspend fun cutCoveredPage(screenId: String, history: List<String>, listener: ExperienceSurfaceHost.Listener): PreparedPresentation {
-        val retained = checkNotNull(rows[screenId]).prepared
-        val target = retained.copy(transition = null, pageHistory = history, isBack = true,
-            isPushPage = prepared.isPushPage, opensLayer = prepared.opensLayer,
-            layerAncestors = prepared.layerAncestors, closeLayer = prepared.closeLayer)
+    suspend fun updatePageHistory(history: List<String>) {
+        surface.layerOperation { it.retireOnLane(history.toSet(), checkNotNull(prepared.screenId)) }
+        rows.keys.retainAll(history.toSet())
+        prepared = prepared.copy(pageHistory = history)
+    }
+
+    suspend fun cutCoveredPage(target: PreparedPresentation, listener: ExperienceSurfaceHost.Listener): PreparedPresentation {
         prepareRow(target, listener)
         navigateLayer(target, isBack = true, covered = true)
         return target

@@ -326,6 +326,21 @@ class ExperienceInteractivePageTest {
         }
     }
 
+    @Test fun `same Screen Back retires unreachable rows without a step or phase writes`() = runBlocking {
+        withLayer { page, native ->
+            page.insertIncoming("a", Style.NONE, false)
+            page.insertIncoming("b", Style.NONE, false)
+            page.setCollapsed("a", true)
+            page.takeIncoming("a", "b", false)
+            page.setCollapsed("b", true)
+            native.trace.clear(); native.writes.clear()
+            page.retire(setOf("a"), "a")
+            assertEquals(listOf("a"), page.mountedScreenIds())
+            assertEquals(listOf("remove"), native.trace)
+            assertEquals(listOf(NuxieViewModelMutationKind.LIST_REMOVE), native.writes.map { it.second.kind })
+        }
+    }
+
     private suspend fun withLayer(native: RecordingNative = RecordingNative(), body: suspend (ExperienceInteractivePage, RecordingNative) -> Unit) {
         val lane = NuxieRuntimeLane()
         val file = NuxieRuntimeFile(1, native)
