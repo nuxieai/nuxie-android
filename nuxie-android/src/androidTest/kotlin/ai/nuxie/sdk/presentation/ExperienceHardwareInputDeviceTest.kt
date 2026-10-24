@@ -136,6 +136,19 @@ class ExperienceHardwareInputDeviceTest {
         step(KeyEvent.KEYCODE_X, modifiers = KeyEvent.META_SHIFT_ON)
         val expected = oracle.getJSONObject("keyboard").getJSONArray("checks")
         assertEquals((0 until expected.length()).map(expected::getInt), actual)
+        // B increments on release; hiding must silently retire its held press.
+        val beforeHiding = count()
+        screen.advance { screen.key(KeyEvent.KEYCODE_B) }
+        instrumentation.runOnMainSync { screen.host.setPresentationVisible(false) }
+        drain(screen.lane)
+        instrumentation.runOnMainSync { screen.host.setPresentationVisible(true) }
+        screen.advance {
+            screen.key(KeyEvent.KEYCODE_B, repeat = 1)
+            screen.key(KeyEvent.KEYCODE_B, down = false)
+        }
+        assertEquals(beforeHiding, count())
+        screen.advance { screen.key(KeyEvent.KEYCODE_B); screen.key(KeyEvent.KEYCODE_B, down = false) }
+        assertEquals(beforeHiding + 1, count())
     }
 
     @Test fun typingTransportExperiment() {

@@ -1735,26 +1735,67 @@ class ExperienceSurfaceHostPointerTest {
         }
     }
 
-    @Test fun `step and cover release delivered pointers and keys before another frame`() {
-        for (cover in listOf(false, true)) withFocusHost { host, native, lane, _ ->
-            val down = motion(MotionEvent.ACTION_DOWN, 10, 20f, 20f)
-            try { assertTrue(host.onTouchEvent(down)) } finally { down.recycle() }
-            assertTrue(host.receiveFocusInput(NuxieFocusInput.Key(66, 1, true, false)))
-            host.doFrame(1_000_000_000L)
-            drain(lane)
-            assertTrue(native.focusSteps.flatten().any { it.code == 66 && it.pressed })
-            native.pointerSteps.clear()
-            native.focusSteps.clear()
-            if (cover) host.setPresentationVisible(false) else host.setInputEnabled(false)
-            drain(lane)
-            assertEquals(listOf(3), native.pointerSteps.flatten().map { it.kind })
-            val released = native.focusSteps.flatten().single()
-            assertEquals(66, released.code)
-            assertFalse(released.pressed)
-            assertFalse(released.repeated)
-            if (cover) host.setPresentationVisible(false) else host.setInputEnabled(false)
-            drain(lane)
-            assertEquals(1, native.focusSteps.flatten().size)
+    @Test fun `step cover and native editing retire held keys silently and cancel pointers`() {
+        for (path in listOf("step", "cover", "editor")) {
+            val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
+            try {
+                withFocusHost(context = activity.get()) { host, native, lane, _ ->
+                    val container = android.widget.FrameLayout(activity.get())
+                    val editor = android.widget.EditText(activity.get())
+                    container.addView(host)
+                    container.addView(editor)
+                    activity.get().setContentView(container)
+                    host.isFocusableInTouchMode = true
+                    assertTrue(host.requestFocus())
+                    native.focusState = NuxieFocusState(true, true)
+                    host.doFrame(1_000_000_000L)
+                    drain(lane)
+                    native.focusSteps.clear()
+                    fun key(action: Int, repeat: Int = 0) = host.dispatchExperienceKeyEvent(
+                        android.view.KeyEvent(1, 2, action, android.view.KeyEvent.KEYCODE_B, repeat))
+                    val down = motion(MotionEvent.ACTION_DOWN, 10, 20f, 20f)
+                    try { assertTrue(host.onTouchEvent(down)) } finally { down.recycle() }
+                    assertTrue(key(android.view.KeyEvent.ACTION_DOWN))
+                    host.doFrame(1_016_000_000L)
+                    drain(lane)
+                    assertTrue(native.focusSteps.flatten().single().pressed)
+                    native.pointerSteps.clear()
+                    native.focusSteps.clear()
+                    fun withdraw() {
+                        when (path) {
+                            "step" -> host.setInputEnabled(false)
+                            "cover" -> host.setPresentationVisible(false)
+                            else -> {
+                                assertTrue(editor.requestFocus())
+                                assertFalse(key(android.view.KeyEvent.ACTION_DOWN, 1))
+                            }
+                        }
+                    }
+                    withdraw()
+                    drain(lane)
+                    assertEquals(listOf(3), native.pointerSteps.flatten().map { it.kind })
+                    assertTrue(native.focusSteps.flatten().isEmpty())
+                    withdraw()
+                    drain(lane)
+                    assertEquals(listOf(3), native.pointerSteps.flatten().map { it.kind })
+                    assertFalse(key(android.view.KeyEvent.ACTION_UP))
+                    assertFalse(key(android.view.KeyEvent.ACTION_DOWN, 1))
+                    host.setInputEnabled(true)
+                    host.setPresentationVisible(true)
+                    editor.clearFocus()
+                    assertTrue(host.requestFocus())
+                    assertFalse(key(android.view.KeyEvent.ACTION_DOWN, 1))
+                    assertFalse(key(android.view.KeyEvent.ACTION_UP))
+                    host.doFrame(1_032_000_000L)
+                    drain(lane)
+                    assertTrue(native.focusSteps.flatten().isEmpty())
+                    assertTrue(key(android.view.KeyEvent.ACTION_DOWN))
+                    assertTrue(key(android.view.KeyEvent.ACTION_UP))
+                    host.doFrame(1_048_000_000L)
+                    drain(lane)
+                    assertEquals(listOf(true, false), native.focusSteps.flatten().map { it.pressed })
+                }
+            } finally { activity.pause().stop().destroy() }
         }
     }
 
