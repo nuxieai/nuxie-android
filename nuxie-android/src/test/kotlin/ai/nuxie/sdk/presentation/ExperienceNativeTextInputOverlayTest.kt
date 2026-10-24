@@ -4,6 +4,7 @@ import ai.nuxie.sdk.runtime.*
 import android.app.Activity
 import android.view.View
 import android.widget.EditText
+import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -98,6 +99,46 @@ class ExperienceNativeTextInputOverlayTest {
         assertSame(original, editor(overlay, 10))
         original.setText("after landing")
         assertEquals("after landing", writes.single().write.text)
+    }
+
+    @Test fun `Screen declarations change and restore without replacing the focused native field`() = withOverlay { overlay, _, _ ->
+        val baseline = textInputDescriptor()
+        val render = baseline.getValue("render").jsonObject
+        val record = render.getValue("textInputs").jsonArray.single().jsonObject
+        fun record(screen: String, limit: Int, keyboard: String, secure: Boolean, placeholder: String) =
+            JsonObject(record + mapOf("screenId" to JsonPrimitive(screen), "maxLength" to JsonPrimitive(limit),
+                "keyboardType" to JsonPrimitive(keyboard), "secureTextEntry" to JsonPrimitive(secure),
+                "placeholder" to JsonPrimitive(placeholder), "responseFieldKey" to JsonPrimitive(screen),
+                "actionEvent" to JsonPrimitive(if (secure) "return" else "editing-ended")))
+        val descriptor = JsonObject(baseline + ("render" to JsonObject(render + ("textInputs" to JsonArray(listOf(
+            record("first", 20, "email", false, "First"), record("second", 4, "number", true, "Second")))))))
+        val first = ExperienceTextInput.forScreen(descriptor, "first").single()
+        val second = ExperienceTextInput.forScreen(descriptor, "second").single()
+        assertEquals("second", second.responseField)
+        assertEquals(ExperienceSemanticTextDraft.EventKind.RETURN, second.actionEvent)
+        overlay.updateDeclarations(listOf(first))
+        overlay.updateNativeFields(listOf(field(10, "abc")))
+        val original = editor(overlay, 10)
+        assertTrue(original.requestFocus())
+        fun navigate(input: ExperienceTextInput, capture: Long) {
+            overlay.setInputEnabled(false, preserveFocus = true)
+            overlay.updateDeclarations(listOf(input))
+            overlay.updateNativeFields(listOf(field(10, "abc", captureId = capture, obscured = input.secure)))
+            overlay.setInputEnabled(true, preserveFocus = true)
+            assertSame(original, editor(overlay, 10))
+            assertTrue(original.hasFocus())
+            assertEquals(input.placeholder, original.hint.toString())
+        }
+        navigate(second, 2)
+        assertEquals(android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD,
+            original.inputType)
+        assertFalse(original.performAccessibilityAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT,
+            android.os.Bundle().apply { putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "12345") }))
+        navigate(first, 3)
+        assertEquals(android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS,
+            original.inputType)
+        assertTrue(original.performAccessibilityAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT,
+            android.os.Bundle().apply { putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "12345") }))
     }
 
     private fun withOverlay(block: (ExperienceTextInputOverlay, MutableList<Pending>, MutableList<Pair<Long, String>>) -> Unit) {
