@@ -47,8 +47,9 @@ class ExperienceLayerSurfaceFailureTest {
                 set(surface, "listener", object : ExperienceSurfaceHost.Listener {
                     override fun onFirstFrame() = Unit
                     override fun onFailure(error: ExperiencePresentationException) { throw error }
-                    override fun onRuntimeStep(outcome: NuxiePlayerStepOutcome, correlationId: ULong,
-                        viewModelSnapshot: NuxieViewModelSnapshot?, saves: List<ExperienceResponseSaveRequest>) {
+                    override fun onLayerRuntimeStep(screenId: String, outcome: NuxiePlayerStepOutcome, correlationId: ULong,
+                        snapshot: NuxieViewModelSnapshot, saves: List<ExperienceResponseSaveRequest>) {
+                        assertEquals("a", screenId)
                         commands += outcome.hostCommands.map { it.name }
                     }
                 })
@@ -61,6 +62,101 @@ class ExperienceLayerSurfaceFailureTest {
                 assertEquals(listOf("takeoff", "landing"), commands)
             }
         }
+    }
+
+    @Test fun `page commands share active B snapshot saves and row effects exactly once`() = runBlocking {
+        withSurface { surface, page, _, lane ->
+            lane.call {
+                page.insertOnLane("b", 1)
+                set(surface, "activeRowId", "b")
+                set(surface, "saveDescriptor", Json.parseToJsonElement("""{"responses":{"feedback":{"model":"B",
+                    "fields":[{"key":"keptValue","type":"number"}]}}}""").jsonObject)
+                val snapshot = NativeViewModelSnapshot(300, arrayOf(
+                    NativeViewModelSnapshotInstance(300, 2), NativeViewModelSnapshotInstance(400, 2),
+                    NativeViewModelSnapshotInstance(500, 3)), arrayOf(
+                    NativeViewModelSnapshotValue(300, 0, "responses:feedback", 9, byteArrayOf(), 400),
+                    NativeViewModelSnapshotValue(300, 1, "state", 9, byteArrayOf(), 500),
+                    NativeViewModelSnapshotValue(400, 2, "keptValue", 2, byteArrayOf(), 0, numberValue = 4f),
+                    NativeViewModelSnapshotValue(400, 3, "isset:keptValue", 3, byteArrayOf(), 0, boolValue = true),
+                    NativeViewModelSnapshotValue(500, 0, "held", 2, byteArrayOf(), 0, numberValue = 7f)))
+                val save = NuxieHostCommand(ExperienceResponseSaveRequest.EVENT, NuxieHostValue.Object(listOf(
+                    NuxieHostValue.Object.Field("form", NuxieHostValue.String("feedback")),
+                    NuxieHostValue.Object.Field("awaitTrigger", NuxieHostValue.String("state/continue")),
+                    NuxieHostValue.Object.Field("keep:held", NuxieHostValue.String("state/held")))))
+                val commands = listOf(save.copy(name = "before"), save, save.copy(name = "after"))
+                val event = NuxieRuntimeEvent(0, 0, "owned", "", "", 0f, emptyList(), 300)
+                val change = NuxieViewModelChange(NuxieViewModelChangeOrigin.RUNTIME, 42u, 300u, 2,
+                    NuxieViewModelValue.Number(4f))
+                val outcome = NuxiePlayerStepOutcome(false, emptyList(), listOf(event), commands, listOf(change))
+                val step = page.captureOnLane(outcome, 42u)
+                val captured = step.copy(rows = step.rows + ("b" to step.rows.getValue("b").copy(nativeSnapshot = snapshot)))
+                var calls = 0
+                set(surface, "listener", object : ExperienceSurfaceHost.Listener {
+                    override fun onFirstFrame() = Unit
+                    override fun onFailure(error: ExperiencePresentationException) { throw error }
+                    override fun onRuntimeStep(outcome: NuxiePlayerStepOutcome, correlationId: ULong,
+                        viewModelSnapshot: NuxieViewModelSnapshot?, saves: List<ExperienceResponseSaveRequest>) {
+                        fail("Page commands must use the row listener")
+                    }
+                    override fun onLayerRuntimeStep(screenId: String, outcome: NuxiePlayerStepOutcome, correlationId: ULong,
+                        snapshot: NuxieViewModelSnapshot, saves: List<ExperienceResponseSaveRequest>) {
+                        calls++
+                        assertEquals("b", screenId)
+                        assertEquals(42uL, correlationId)
+                        assertSame(captured.rows.getValue("b").snapshot, snapshot)
+                        assertEquals(commands, outcome.hostCommands)
+                        assertEquals(listOf(event), outcome.events)
+                        assertEquals(listOf(change), outcome.viewModelChanges)
+                        val request = saves.single()
+                        assertEquals("state/continue", request.awaitTrigger)
+                        assertEquals(4.0, request.answers.getValue("keptValue").jsonPrimitive.double, 0.0)
+                        assertEquals("state/held", request.kept.single().jsonObject.getValue("path").jsonPrimitive.content)
+                        assertEquals(7.0, request.kept.single().jsonObject.getValue("value").jsonPrimitive.double, 0.0)
+                    }
+                })
+                captureAndPublish(surface, captured)
+                assertEquals(1, calls)
+            }
+        }
+    }
+
+    @Test fun `late step from removed A delivers commands once to active B`() = assertLateCommands("b")
+
+    @Test fun `removed active row keeps its snapshot for late commands`() = assertLateCommands("a")
+
+    private fun assertLateCommands(activeId: String) = runBlocking {
+        withSurface { surface, page, _, lane ->
+            lane.call {
+                page.insertOnLane("b", 1)
+                page.beginOnLane("b", "pair"); page.endOnLane("b", "pair")
+                page.removeOnLane("a")
+                set(surface, "activeRowId", activeId)
+            }
+            val late = page.stepFromRow("a")
+            lane.call {
+                val received = mutableListOf<String>()
+                set(surface, "listener", object : ExperienceSurfaceHost.Listener {
+                    override fun onFirstFrame() = Unit
+                    override fun onFailure(error: ExperiencePresentationException) { throw error }
+                    override fun onLayerRuntimeStep(screenId: String, outcome: NuxiePlayerStepOutcome, correlationId: ULong,
+                        snapshot: NuxieViewModelSnapshot, saves: List<ExperienceResponseSaveRequest>) {
+                        assertEquals(activeId, screenId)
+                        assertEquals(if (activeId == "a") 200L else 300L, snapshot.nativeRootInstanceId)
+                        received += outcome.hostCommands.map { it.name }
+                    }
+                })
+                captureAndPublish(surface, late)
+                captureAndPublish(surface, page.stepOnLane(0.0))
+                assertEquals(listOf("takeoff", "landing"), received)
+            }
+        }
+    }
+
+    private fun captureAndPublish(surface: ExperienceSurfaceHost, step: ExperienceInteractivePage.Step) {
+        surface.javaClass.getDeclaredMethod("captureLayerStep", ExperienceInteractivePage.Step::class.java)
+            .apply { isAccessible = true }.invoke(surface, step)
+        set(surface, "firstFrameComposed", true)
+        repeat(2) { surface.javaClass.getDeclaredMethod("publishSteps").apply { isAccessible = true }.invoke(surface) }
     }
 
     @Test fun `ordinary layer frames avoid catalog queries and save frames still capture answers`() = runBlocking {
