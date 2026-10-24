@@ -983,7 +983,20 @@ internal class ExperiencePresentationService(
                 PresentationRegistry.replaceCoveredContent(lower.id, content)
             } else {
                 journey.emissions.close()
-                lower.journey.layerHistory = back.history
+                val historyChanged = synchronized(stateLock) {
+                    check(current === top && lower in coveredLayers && fences.isCurrent())
+                    lower.journey.layerHistory != back.history
+                }
+                if (historyChanged) {
+                    PresentationRegistry.currentScreen(lower.id)?.updatePageHistory(back.history.screens)
+                    synchronized(stateLock) {
+                        check(current === top && lower in coveredLayers && fences.isCurrent())
+                        lower.journey.layerHistory = back.history
+                        PresentationRegistry.resolve(lower.id)?.let {
+                            PresentationRegistry.replaceCoveredContent(lower.id, it.copy(pageHistory = back.history.screens))
+                        }
+                    }
+                }
             }
             check(PresentationRegistry.currentScreen(checkNotNull(top).id)?.dismissPagesFromJourney(back.pagesToClose) == true) {
                 "Native page pop was rejected"
