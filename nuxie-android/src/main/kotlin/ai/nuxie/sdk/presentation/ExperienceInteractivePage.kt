@@ -151,17 +151,16 @@ internal class ExperienceInteractivePage private constructor(
         liveStep = null
     }
 
-    internal fun cancelStepOnLane(source: String) = checked {
-        // A cut may have removed its source before waiting for arrival. Restore a
-        // fresh schema default from the retained snapshot, even if step_end ran
-        // before cancellation was observed. Never reinsert the closed instance.
+    internal fun cancelStepOnLane(source: String, target: String, correlationId: ULong = 0uL,
+        capture: (Step) -> Unit = {}) = checked {
+        liveStep?.let { (incoming, transition) -> endOnLane(incoming, transition) }
+        // Retirement may have removed the source, even when step_end already ran.
+        // Restore its retained values into a fresh instance before taking it back.
         prepareOnLane(source)
-        liveStep?.let { (target, transition) ->
-            endOnLane(target, transition)
-            takeIncomingOnLane(source)
-            beginOnLane(source, null)
-            endOnLane(source, null)
-        }
+        takeIncomingOnLane(source, target.takeIf { it in mounted }, isBack = true,
+            correlationId = correlationId, capture = capture)
+        beginOnLane(source, null)
+        endOnLane(source, null)
     }
 
     /** The new history determines all reachable rows, including repeated visits. */
