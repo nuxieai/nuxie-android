@@ -213,6 +213,77 @@ class ExperienceLayerHostNavigationDeviceTest {
         } finally { directory.deleteRecursively() }
     }
 
+    @Test fun twoNativeBacksDuringForwardStepPopBothPagesAndLeaveNoBackForRootNavigation() = runBlocking {
+        val directory = directory()
+        try {
+            val a = intermediate(directory).copy(pageHistory = listOf("screen_1"))
+            Harness(a).use { harness ->
+                val rootId = harness.id
+                val root = harness.mounted().surface
+                val pops = CopyOnWriteArrayList<String>()
+                suspend fun push(name: String, ancestors: List<String>): PreparedPresentation {
+                    val lowerId = harness.id
+                    val page = a.copy(opensLayer = true, isPushPage = true,
+                        transition = Json.parseToJsonElement("""{"type":"push"}""").jsonObject,
+                        layerAncestors = ancestors, retainedViewModel = AtomicReference(),
+                        screenLifecycle = ExperienceScreenLifecycle(), closeLayer = { reveal ->
+                            assertEquals("native_back", reveal.method)
+                            assertEquals(1, reveal.pagesToClose)
+                            PresentationRegistry.dismiss(harness.id, CloseReason.JourneyNavigation)
+                            reveal.prepare()
+                            harness.id = lowerId
+                            reveal.activate()
+                            pops += name
+                            true
+                        })
+                    harness.navigate(page)
+                    return page
+                }
+                push("middle", listOf(rootId))
+                val middleId = harness.id
+                val top = push("top", listOf(rootId, middleId))
+                val surface = harness.mounted().surface
+                val forward = async(Dispatchers.Default) {
+                    harness.navigate(top.copy(opensLayer = false, isPushPage = false,
+                        screenId = "screen_2", artboardName = "Upsell", transition = pair,
+                        pageHistory = listOf("screen_1", "screen_2"),
+                        retainedViewModel = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle()))
+                }
+                eventually {
+                    var blocked = false
+                    instrumentation.runOnMainSync { blocked = !surface.isEnabled }
+                    blocked
+                }
+                instrumentation.runOnMainSync {
+                    @Suppress("DEPRECATION")
+                    harness.activity.onBackPressed()
+                    @Suppress("DEPRECATION")
+                    harness.activity.onBackPressed()
+                    assertTrue("Both Back presses wait for the forward step", pops.isEmpty())
+                    assertFalse(harness.activity.isFinishing)
+                }
+                forward.await()
+                eventually { pops.size == 2 }
+                instrumentation.waitForIdleSync()
+                assertEquals(listOf("top", "middle"), pops.toList())
+                assertEquals(rootId, harness.id)
+                assertSame(root, harness.mounted().surface)
+                assertFalse(harness.activity.isFinishing)
+                assertEquals(listOf("screen_1"), root.layerOperation { it.mountedScreenIdsOnLane() })
+
+                assertSame(root, harness.navigate(a.copy(screenId = "screen_2", artboardName = "Upsell",
+                    transition = pair, pageHistory = listOf("screen_1", "screen_2"),
+                    retainedViewModel = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle())))
+                instrumentation.waitForIdleSync()
+                assertEquals(listOf("top", "middle"), pops.toList())
+                assertFalse("No stale Back closes the root after later navigation", harness.activity.isFinishing)
+                assertSame(root, harness.mounted().surface)
+                assertNotNull(PresentationRegistry.currentScreen(harness.id))
+                harness.checkFailure()
+            }
+        } finally { directory.deleteRecursively() }
+    }
+
     @Test fun acquisitionSheetBackDispatcherClosesDismissibleRootAndKeepsLockedRootOnB() = acquisitionSheetBack(platform = false)
 
     @Test fun acquisitionSheetPlatformBackClosesDismissibleRootAndKeepsLockedRootOnB() {
