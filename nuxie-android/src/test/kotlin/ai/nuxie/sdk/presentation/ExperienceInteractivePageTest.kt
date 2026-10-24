@@ -27,15 +27,15 @@ class ExperienceInteractivePageTest {
         }
     }
 
-    @Test fun `new forward rows append on top and new Back rows move below source before reconciliation`() = runBlocking {
+    @Test fun `new forward rows append on top and new Back rows move below source without advancing`() = runBlocking {
         for (isBack in listOf(false, true)) withLayer { page, native ->
             page.insertIncoming("a", Style.NONE, false)
             native.traceListMutations = true
             native.trace.clear()
             page.insertIncoming("b", Style.MAGIC_MOVE, isBack, source = "a")
             assertEquals(if (isBack) listOf("b", "a") else listOf("a", "b"), page.mountedScreenIds())
-            assertEquals(if (isBack) listOf("insert:1", "move:1:0", "step:0.0")
-                else listOf("insert:1", "step:0.0"), native.trace)
+            assertEquals(if (isBack) listOf("insert:1", "move:1:0")
+                else listOf("insert:1"), native.trace)
         }
     }
 
@@ -52,10 +52,10 @@ class ExperienceInteractivePageTest {
             assertEquals(listOf("collapse:0:false", "begin:A:pair", "end:A:pair", "remove"), native.trace)
             page.insertIncoming("b", Style.NONE, false)
             page.remove("a")
-            page.step(0.0)
             native.trace.clear()
             page.setCollapsed("b", true)
             assertEquals(listOf("collapse:0:true"), native.trace)
+            assertTrue(page.snapshot("b").nativeRootInstanceId in native.collapsedOwners)
             assertFalse(native.writes.any { it.second.kind == NuxieViewModelMutationKind.LIST_SET })
         }
     }
@@ -71,26 +71,26 @@ class ExperienceInteractivePageTest {
             assertEquals(listOf("b", "a"), page.mountedScreenIds())
             assertEquals(0L to 1L, native.writes.single().second.let { it.index to it.secondIndex })
             assertEquals(NuxieViewModelMutationKind.LIST_MOVE, native.writes.single().second.kind)
-            assertEquals(listOf("step:0.0", "collapse:1:false"), native.trace)
+            assertEquals(listOf("collapse:1:false"), native.trace)
             page.setCollapsed("a", true)
             native.writes.clear(); native.trace.clear()
             page.takeIncoming("a", "b", true)
             assertEquals(listOf("a", "b"), page.mountedScreenIds())
             assertEquals(1L to 0L, native.writes.single().second.let { it.index to it.secondIndex })
-            assertEquals(listOf("step:0.0", "collapse:0:false"), native.trace)
+            assertEquals(listOf("collapse:0:false"), native.trace)
             assertEquals(identity, page.snapshot("a").nativeRootInstanceId)
             assertEquals(2, native.allocated)
         }
     }
 
-    @Test fun `three rows revisit and skipping Back reconcile before collapse at the new index`() = runBlocking {
+    @Test fun `three rows revisit and skipping Back collapse at the new index`() = runBlocking {
         withLayer { page, native ->
             for (id in listOf("a", "b", "c")) page.insertIncoming(id, Style.NONE, false)
             page.setCollapsed("a", true); page.setCollapsed("b", true)
             native.trace.clear()
             page.takeIncoming("a", "c", false)
             assertEquals(listOf("b", "c", "a"), page.mountedScreenIds())
-            assertEquals(listOf("step:0.0", "collapse:2:false"), native.trace)
+            assertEquals(listOf("collapse:2:false"), native.trace)
             page.setCollapsed("c", true)
             native.trace.clear()
             page.takeIncoming("c", "a", true)
@@ -99,7 +99,7 @@ class ExperienceInteractivePageTest {
             native.trace.clear()
             page.takeIncoming("b", "a", true)
             assertEquals(listOf("c", "b", "a"), page.mountedScreenIds())
-            assertEquals(listOf("step:0.0", "collapse:1:false"), native.trace)
+            assertEquals(listOf("collapse:1:false"), native.trace)
             page.retire(setOf("b", "c"), "b")
             assertEquals(listOf("c", "b"), page.mountedScreenIds())
             assertEquals(listOf("collapse:0:true", "remove"), native.trace.takeLast(2))
@@ -140,6 +140,32 @@ class ExperienceInteractivePageTest {
             assertEquals(next.native.hostCommands, next.unattributedHostCommands)
             assertTrue(next.rows.values.all { it.outcome.hostCommands.isEmpty() })
             assertTrue(page.step(0.0).native.hostCommands.isEmpty())
+        }
+    }
+
+    @Test fun `pending events and commands survive insertion and expansion until first ordinary frame`() = runBlocking {
+        withLayer { page, native ->
+            page.insertIncoming("a", Style.NONE, false)
+            page.insertIncoming("b", Style.NONE, false)
+            page.setCollapsed("a", true)
+            native.events = arrayOf(event("pending", 200))
+            native.tracePhases = true
+            native.traceListMutations = true
+            native.trace.clear()
+            page.takeIncoming("a", "b", false)
+            page.setPhases(listOf("b" to ExperienceScreenLifecycle.Phase.EXITING,
+                "a" to ExperienceScreenLifecycle.Phase.ENTERING), "pair")
+            page.begin("a", "pair")
+            assertEquals(listOf("move:0:1", "collapse:1:false", "phase:300:3", "phase:200:1", "begin:A:pair"), native.trace)
+            val first = page.step(0.016)
+            assertEquals(listOf("pending"), first.rows.getValue("a").outcome.events.map { it.name })
+            assertEquals(listOf("takeoff"), first.native.hostCommands.map { it.name })
+            val second = page.step(0.016)
+            assertTrue(second.native.events.isEmpty())
+            assertTrue(second.native.hostCommands.isEmpty())
+            page.end("a", "pair")
+            assertEquals(listOf("landing"), page.step(0.016).native.hostCommands.map { it.name })
+            assertTrue(page.step(0.016).native.hostCommands.isEmpty())
         }
     }
 
@@ -451,6 +477,15 @@ class ExperienceInteractivePageTest {
         val writes = mutableListOf<Pair<Long, NativeViewModelWrite>>()
         val trace = mutableListOf<String>()
         var events = emptyArray<NativeRuntimeEvent>()
+        private val listRows = mutableListOf<Long>()
+        private var hostedRows = emptyList<Long>()
+        val collapsedOwners = mutableSetOf<Long>()
+        private fun applyPendingRows() { hostedRows = listRows.toList() }
+        private fun requireIncoming(incoming: ByteArray) {
+            applyPendingRows()
+            val schema = when (incoming.decodeToString()) { "A" -> 1; "B" -> 2; "C" -> 6; else -> error("Unknown incoming") }
+            check(hostedRows.any { schemas[it] == schema && it !in collapsedOwners }) { "Incoming must be hosted and expanded" }
+        }
         private val pendingCommands = mutableListOf<NativeHostCommand>()
         var players = 0
         var pageAvailable = true
@@ -496,16 +531,21 @@ class ExperienceInteractivePageTest {
             return NativeCallResult(0, id)
         }
         override fun playerStepBegin(playerHandle: Long, incoming: ByteArray, step: ByteArray?): Int {
+            requireIncoming(incoming)
             trace += "begin:${incoming.decodeToString()}:${step?.decodeToString()}"
             pendingCommands += NativeHostCommand("takeoff", NativeHostValue(0, false, 0.0, "", emptyArray(), emptyArray()))
             return 0
         }
         override fun playerStepEnd(playerHandle: Long, incoming: ByteArray, step: ByteArray?): Int {
+            applyPendingRows()
             trace += "end:${incoming.decodeToString()}:${step?.decodeToString()}"
             pendingCommands += NativeHostCommand("landing", NativeHostValue(0, false, 0.0, "", emptyArray(), emptyArray()))
             return 0
         }
         override fun setPlayerRowCollapsed(playerHandle: Long, list: ByteArray, index: Int, collapsed: Boolean): Int {
+            applyPendingRows()
+            val owner = hostedRows[index]
+            if (collapsed) collapsedOwners.add(owner) else collapsedOwners.remove(owner)
             trace += "collapse:$index:$collapsed"; return 0
         }
         override fun viewModelRootSchemaIndex(viewModelHandle: Long) = NativeCallResult(0,schemas.getValue(viewModelHandle).toLong())
@@ -533,9 +573,17 @@ class ExperienceInteractivePageTest {
                 NativeViewModelSnapshotInstance(viewModelHandle,schema),NativeViewModelSnapshotInstance(viewModelHandle+1,3),NativeViewModelSnapshotInstance(999,3))
             return NativeCallResult(0,NativeViewModelSnapshot(viewModelHandle,instances,values))
         }
+        var tracePhases = false
         var traceListMutations = false
         override fun mutateViewModel(viewModelHandle: Long, write: NativeViewModelWrite): Int {
             if (failWrites) return 11
+            if (viewModelHandle == 100L && write.path == "screens") when (write.kind) {
+                NuxieViewModelMutationKind.LIST_INSERT -> listRows.add(write.index.toInt(), write.relatedViewModel)
+                NuxieViewModelMutationKind.LIST_MOVE -> listRows.add(write.secondIndex.toInt(), listRows.removeAt(write.index.toInt()))
+                NuxieViewModelMutationKind.LIST_REMOVE -> listRows.removeAt(write.index.toInt())
+                else -> Unit
+            }
+            if (tracePhases && write.path == "screen/phase") trace += "phase:$viewModelHandle:${write.integerValue}"
             writes += viewModelHandle to write
             if (write.path == "keptValue" && write.kind == NuxieViewModelMutationKind.SET_NUMBER) kept[viewModelHandle] = write.numberValue
             if (traceListMutations) when (write.kind) {
@@ -548,10 +596,12 @@ class ExperienceInteractivePageTest {
         }
         override fun stepPlayer(playerHandle: Long, inputs: List<NativePlayerInput>, pointers: List<NativePlayerPointer>, elapsedSeconds: Float, correlationId: Long, textRunNames: List<String>, focusInputs: List<NativeFocusInput>): NativeCallResult<NativePlayerStepOutcome> {
             trace += "step:$elapsedSeconds"
+            applyPendingRows()
             onStep()
             if (failStep) return NativeCallResult(11, null)
             val commands = pendingCommands.toTypedArray(); pendingCommands.clear()
-            return NativeCallResult(0,NativePlayerStepOutcome(true,IntArray(pointers.size),events,commands,emptyArray()))
+            val deliveredEvents = events; events = emptyArray()
+            return NativeCallResult(0,NativePlayerStepOutcome(true,IntArray(pointers.size),deliveredEvents,commands,emptyArray()))
         }
         override fun setPlayerGlobalViewModel(playerHandle: Long, name: ByteArray, viewModelHandle: Long): Int {
             globalBindings += name.decodeToString() to viewModelHandle

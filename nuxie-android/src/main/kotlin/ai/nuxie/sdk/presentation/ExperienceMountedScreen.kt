@@ -327,7 +327,7 @@ internal class ExperienceMountedScreen(
                             logPresentationTimeout(watchdogMs)
                         }
                     }
-                    override suspend fun takeIncoming() { mutations += { surface.takePageIncomingOnLane(it, targetId, sourceId, isBack) } }
+                    override suspend fun takeIncoming() { mutations += { it.takeIncomingOnLane(targetId, sourceId, isBack) } }
                     override suspend fun phases(values: List<Pair<String, ExperienceScreenLifecycle.Phase>>, transition: String) {
                         mutations += { page -> page.setPhasesOnLane(if (covered) values.map { (id, _) ->
                             id to ExperienceScreenLifecycle.Phase.HIDDEN
