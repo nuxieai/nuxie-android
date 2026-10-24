@@ -55,13 +55,14 @@ internal class ExperienceInteractivePage private constructor(
 
     suspend fun insertIncoming(screenId: String, style: ExperiencePageHostContract.Style,
         isBack: Boolean, products: List<StoreProduct> = emptyList(),
-        routing: JourneyRuntimeEmissionCoordinator? = null) = lane.call { insertIncomingOnLane(screenId, style, isBack, products, routing) }
+        routing: JourneyRuntimeEmissionCoordinator? = null, source: String? = null) =
+        lane.call { insertIncomingOnLane(screenId, style, isBack, products, routing, source) }
 
     internal fun insertIncomingOnLane(screenId: String, style: ExperiencePageHostContract.Style,
         isBack: Boolean, products: List<StoreProduct> = emptyList(),
-        routing: JourneyRuntimeEmissionCoordinator? = null) = checked {
+        routing: JourneyRuntimeEmissionCoordinator? = null, source: String? = null) = checked {
         prepareOnLane(screenId, products, routing)
-        takeIncomingOnLane(screenId)
+        takeIncomingOnLane(screenId, source, isBack)
     }
 
     suspend fun prepare(screenId: String, products: List<StoreProduct> = emptyList(),
@@ -98,20 +99,20 @@ internal class ExperienceInteractivePage private constructor(
 
     internal fun takeIncomingOnLane(screenId: String, source: String? = null, isBack: Boolean = false,
         correlationId: ULong = 0uL, capture: (Step) -> Unit = {}) = checked {
-        if (screenId !in mounted) insertOnLane(screenId, mounted.size)
-        else {
-            if (source != null && source != screenId) {
-                val from = mounted.indexOf(screenId)
-                val remaining = mounted.filter { it != screenId }
-                val sourceIndex = remaining.indexOf(source)
-                require(sourceIndex >= 0) { "Outgoing row is absent" }
-                val to = sourceIndex + if (isBack) 0 else 1
-                if (from != to) {
-                    artboard.moveDefaultListItem(contract.listPath, from, to)
-                    mounted.removeAt(from)
-                    mounted.add(to, screenId)
-                    rowsNeedReconciliation = true
-                }
+        val isNew = screenId !in mounted
+        if (isNew) insertOnLane(screenId, mounted.size)
+        // New forward rows stay on top; every Back uses the outgoing row's position.
+        if ((!isNew || isBack) && source != null && source != screenId) {
+            val from = mounted.indexOf(screenId)
+            val remaining = mounted.filter { it != screenId }
+            val sourceIndex = remaining.indexOf(source)
+            require(sourceIndex >= 0) { "Outgoing row is absent" }
+            val to = sourceIndex + if (isBack) 0 else 1
+            if (from != to) {
+                artboard.moveDefaultListItem(contract.listPath, from, to)
+                mounted.removeAt(from)
+                mounted.add(to, screenId)
+                rowsNeedReconciliation = true
             }
         }
         // Bindings rebuild hosted rows on step, not on the list notification.
