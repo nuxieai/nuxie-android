@@ -43,6 +43,7 @@ internal class ExperienceMountedScreen(
     private val lane = runValues?.lane ?: NuxieRuntimeLane()
     private var captionOverlay: ExperienceVideoCaptionOverlay? = null
     private var textOverlay: ExperienceTextInputOverlay? = null
+    private var layoutBounds: ExperienceArtboardSize? = null
     private var captionInsets: ExperienceWindowInsets? = null
     private var windowInsets: ExperienceWindowInsets? = null
     private val lifecycle get() = prepared.screenLifecycle
@@ -68,6 +69,7 @@ internal class ExperienceMountedScreen(
         },
         listener = object : ExperienceSurfaceHost.Listener by listener {
             override fun onLayoutBounds(bounds: ExperienceArtboardSize) {
+                layoutBounds = bounds
                 textOverlay?.updateLayoutBounds(bounds)
                 activeListener.onLayoutBounds(bounds)
             }
@@ -145,7 +147,7 @@ internal class ExperienceMountedScreen(
                 addView(it, FrameLayout.LayoutParams(-1, -1))
             }
             inputSize?.let { size ->
-                val overlay = ExperienceTextInputOverlay(activity, size, inputs, fonts,
+                val overlay = ExperienceTextInputOverlay(activity, layoutBounds ?: size, inputs, fonts,
                     pageTextInputState,
                     surface::writeNativeText, surface::notifyNativeText, surface::nativeTextEvent, surface::beginNativeEditing)
                 textOverlay = overlay
@@ -386,7 +388,8 @@ internal class ExperienceMountedScreen(
         textOverlay = null
         if (inputs.isEmpty()) return
         val size = checkNotNull(prepared.artboardSize) { "Editable Experience has no authored artboard extent" }
-        textOverlay = ExperienceTextInputOverlay(activity, size, inputs, fonts, pageTextInputState,
+        // The page surface may have delivered these bounds before any Screen needed an overlay.
+        textOverlay = ExperienceTextInputOverlay(activity, layoutBounds ?: size, inputs, fonts, pageTextInputState,
             surface::writeNativeText, surface::notifyNativeText, surface::nativeTextEvent, surface::beginNativeEditing).also {
             root.addView(it, FrameLayout.LayoutParams(-1, -1))
         }
