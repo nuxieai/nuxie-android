@@ -253,7 +253,7 @@ internal class NuxieExperienceActivity : Activity() {
             if (prepared.fitsContentHeight) prepared.layerContentHeight.set(height)
             measuredContentHeight = prepared.layerContentHeight.get()
             contentHeightReady = true
-            layers.firstOrNull { it.screen === this }?.sheet?.updateContentHeight(measuredContentHeight)
+            layers.firstOrNull { it.screen === this }?.let(::publishPageHeight)
         }
 
         override fun onFirstFrame() {
@@ -845,10 +845,22 @@ internal class NuxieExperienceActivity : Activity() {
 
     private fun currentPageWindow(): ExperienceNativeLayerWindow? = layers.asReversed().firstNotNullOfOrNull { it.sheet }
 
+    /** Pushes share the nearest window below them, but keep their own measured height. */
+    private fun publishPageHeight(page: Layer) {
+        if (page !== layers.lastOrNull() && page.screen !== returningPage) return
+        if (!page.screen.prepared.fitsContentHeight) return
+        val index = layers.indexOf(page)
+        if (index < 0) return
+        layers.subList(0, index + 1).asReversed().firstNotNullOfOrNull { it.sheet }
+            ?.updateContentHeight(page.screen.prepared.layerContentHeight.get())
+    }
+
     private fun installPushedPage(page: Layer, lower: Layer) {
         val parent = checkNotNull(lower.root.parent as? android.view.ViewGroup)
         parent.addView(page.root, parent.indexOfChild(lower.root) + 1, FrameLayout.LayoutParams(-1, -1))
         lower.root.visibility = View.INVISIBLE
+        // Its first frame may have measured before this page joined the stack.
+        publishPageHeight(page)
     }
 
     private fun installLayerWindow(layer: Layer, onPresented: (() -> Unit)? = null) {
@@ -935,6 +947,8 @@ internal class NuxieExperienceActivity : Activity() {
                     lower.root.translationX = 0f
                     currentScreen = lower.screen
                     contentRoot = lower.root
+                    // Unchanged heights are not delivered again by the surface on reveal.
+                    publishPageHeight(lower)
                     intent.putExtra(EXTRA_PRESENTATION_ID, lower.screen.id)
                     observePresentation(lower.screen.id, checkNotNull(PresentationRegistry.observe(lower.screen.id)))
                     Unit
