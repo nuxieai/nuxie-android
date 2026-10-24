@@ -114,6 +114,49 @@ class ExperiencePageStepTest {
         assertEquals(650L, testScheduler.currentTime)
         assertTrue(trace.enabled); assertTrue("active" in trace.events)
     }
+    @Test fun `Back watchdog uses reverse duration through the resolved page plan`() = runTest {
+        val descriptor = kotlinx.serialization.json.Json.parseToJsonElement("""
+            {"render":{"transitions":[{"id":"pair","kind":"page","sourceScreenId":"a",
+            "destinationScreenId":"b","durationMs":300,
+            "source":{"completeEventName":"nx_exit_done:pair"},
+            "destination":{"completeEventName":"nx_enter_done:pair"},
+            "reverse":{"durationMs":900,"source":{"completeEventName":"nx_exit_done:pair.reverse"},
+            "destination":{"completeEventName":"nx_enter_done:pair.reverse"}}}]}}
+        """) as kotlinx.serialization.json.JsonObject
+        for (style in listOf(Style.MAGIC_MOVE, Style.FADE, Style.NONE)) {
+            val intent = kotlinx.serialization.json.Json.parseToJsonElement(
+                """{"type":"${if (style == Style.MAGIC_MOVE) "magic-move" else style.name.lowercase()}","transitionId":"pair"}"""
+            ) as kotlinx.serialization.json.JsonObject
+            val forward = checkNotNull(ExperienceScreenTransitionPlan.resolveLayer(intent, descriptor, "a", "b"))
+            val reverse = checkNotNull(ExperienceScreenTransitionPlan.resolveLayer(intent, descriptor, "b", "a"))
+            assertEquals(550L, forward.watchdogMs)
+            assertEquals(900L, reverse.durationMs)
+            val trace = Trace()
+            var waits = 0
+            val start = testScheduler.currentTime
+            val operations = object : ExperiencePageStep.Operations by trace {
+                override suspend fun batch(present: Boolean, watchdogMs: Long, writes: suspend () -> Unit) {
+                    if (present) assertEquals(1150L, watchdogMs)
+                    trace.batch(present, watchdogMs, writes)
+                }
+                override suspend fun wait(completions: List<Deferred<Unit>>, milliseconds: Long) {
+                    assertEquals(1150L, milliseconds)
+                    val waitingSince = testScheduler.currentTime
+                    super<ExperiencePageStep.Operations>.wait(listOf(CompletableDeferred()), milliseconds)
+                    assertEquals(1150L, testScheduler.currentTime - waitingSince)
+                    waits++
+                }
+            }
+            ExperiencePageStep.perform("b", "a", style, true, reverse,
+                ExperiencePageStep.Exit(null, null), false, operations)
+            assertEquals(if (style == Style.NONE) 2 else 1, waits)
+            assertEquals(waits * 1150L, testScheduler.currentTime - start)
+            assertTrue("end:pair.reverse" in trace.events)
+            assertTrue("register:b:nx_exit_done:pair.reverse" in trace.events)
+            assertTrue("register:a:nx_enter_done:pair.reverse" in trace.events)
+        }
+    }
+
     @Test fun `reverse id is shared by lifecycle phases and both live step calls`() = runBlocking {
         val trace = Trace(); perform(trace, Style.MAGIC_MOVE, plan.copy(id = "pair.reverse"))
         assertTrue("a:exiting,b:entering:pair.reverse" in trace.events)
@@ -127,7 +170,7 @@ class ExperiencePageStepTest {
             """{"render":{"transitions":[{"id":"pair","kind":"page","sourceScreenId":"$source",
                 "destinationScreenId":"$destination","durationMs":100,"defaultPair":$marked,
                 "source":{"completeEventName":"leave"},"destination":{"completeEventName":"enter"},
-                "reverse":{"source":{"completeEventName":"leave.reverse"},"destination":{"completeEventName":"enter.reverse"}}}]}}""") as kotlinx.serialization.json.JsonObject
+                "reverse":{"durationMs":100,"source":{"completeEventName":"leave.reverse"},"destination":{"completeEventName":"enter.reverse"}}}]}}""") as kotlinx.serialization.json.JsonObject
         assertNull(history.backTransition(2, "a", descriptor("a", "c", true)))
         assertNull(history.backTransition(2, "a", descriptor("c", "a", false)))
         assertEquals(kotlinx.serialization.json.Json.parseToJsonElement("""{"type":"magic-move","transitionId":"pair"}"""),
