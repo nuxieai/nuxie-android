@@ -478,8 +478,9 @@ internal class ExperienceSurfaceHost(
                     try {
                         val writes = ExperienceRunSnapshot(kept).writes() +
                             NativeViewModelWrite(NuxieViewModelMutationKind.FIRE_TRIGGER, trigger)
-                        val row = screenId?.let { interactiveLayer?.valuesOnLane(it) } ?: viewModelState
-                        row?.restoreWrites(writes) ?: checkNotNull(artboard).confirmDefaultSave(writes)
+                        val layer = interactiveLayer
+                        if (layer != null) layer.commandOnLane(screenId ?: activeRowId) { it.restoreWrites(writes) }
+                        else viewModelState?.restoreWrites(writes) ?: checkNotNull(artboard).confirmDefaultSave(writes)
                         val correlationId = nextCorrelationId
                         nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
                         val outcome = stepAndRefreshFocus {
@@ -1141,6 +1142,7 @@ internal class ExperienceSurfaceHost(
     }
 
     private fun focusNativeField(field: ExperienceNativeTextField, point: Pair<Float, Float>? = null): Boolean {
+        if (interactiveLayer?.canWriteNativeOwnerOnLane(field.ownerId) == false) return false
         nativeEditingTarget = null
         val geometry = field.geometry
         val x = (geometry.textBounds.minX + geometry.textBounds.maxX) / 2f
@@ -1201,6 +1203,7 @@ internal class ExperienceSurfaceHost(
                 if (released.get() || !running || !sceneInputEnabled.get() || generation != frameGeneration.get() ||
                     epoch != semanticEpoch.get() || semanticSnapshotEpoch != epoch || write.captureId != nativeTextCaptureId ||
                     capture == null || active == null || field == null || input == null ||
+                    interactiveLayer?.canWriteNativeOwnerOnLane(field.ownerId) == false ||
                     capture.validate(active.requireHandle()) != 0) {
                     complete(ExperienceSemanticTextDraft.Outcome.STALE_CAPTURE)
                     return@addLast
@@ -1263,7 +1266,7 @@ internal class ExperienceSurfaceHost(
         lane.enqueue {
             pendingTextWrites.addLast {
                 if (released.get() || !running || !sceneInputEnabled.get() || generation != frameGeneration.get() ||
-                    epoch != semanticEpoch.get()) return@addLast
+                    epoch != semanticEpoch.get() || interactiveLayer?.canWriteNativeOwnerOnLane(ownerId) == false) return@addLast
                 if (event.kind == ExperienceSemanticTextDraft.EventKind.EDITING_ENDED && nativeEditingTarget == target && nativeEditingOwnerId == ownerId) {
                     nativeEditingTarget = null
                     nativeEditingStep(inputs = listOf(NuxieFocusInput.Clear))
@@ -1814,7 +1817,8 @@ internal class ExperienceSurfaceHost(
             }.exceptionOrNull()
             // Capture on the original lane after input/exit writes and before releasing handles.
             val snapshotFailure = retainedViewModel?.let { retained -> runCatching {
-                (viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot())?.let(::retainScreenValues)
+                (interactiveLayer?.let { layer -> activeRowId?.let { layer.snapshotOnLane(it) } }
+                    ?: viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot())?.let(::retainScreenValues)
             }.exceptionOrNull() }
             snapshotFailure?.let { if (firstFailure == null) firstFailure = it else firstFailure?.addSuppressed(it) }
             attached = false
@@ -1917,8 +1921,7 @@ internal class ExperienceSurfaceHost(
             val active = rows[id] ?: run {
                 // S7: a removed row can still request an advance. Its retained
                 // values remain available even when it is no longer mounted.
-                val captured = checkNotNull(interactiveLayer).valuesOnLane(id)
-                    .captureSnapshot(step.native.viewModelChanges)
+                val captured = checkNotNull(interactiveLayer).captureRowOnLane(id)
                 ExperienceInteractivePage.RowStep(step.native.copy(events = emptyList(), hostCommands = emptyList(),
                     viewModelChanges = emptyList()), captured.values, captured.native)
             }
