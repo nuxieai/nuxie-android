@@ -1909,7 +1909,22 @@ internal class ExperienceSurfaceHost(
 
     /** Keep the complete step, even when a removed row requested the advance. */
     private fun captureLayerStep(step: ExperienceInteractivePage.Step) {
-        for ((id, row) in step.rows) {
+        // Native steps and row selection share the lane, so this is the row active
+        // when the step began. The ABI attributes events, but not host commands.
+        val rows = step.rows.toMutableMap()
+        if (step.unattributedHostCommands.isNotEmpty()) {
+            val id = checkNotNull(activeRowId)
+            val active = rows[id] ?: run {
+                // S7: a removed row can still request an advance. Its retained
+                // values remain available even when it is no longer mounted.
+                val captured = checkNotNull(interactiveLayer).valuesOnLane(id)
+                    .captureSnapshot(step.native.viewModelChanges)
+                ExperienceInteractivePage.RowStep(step.native.copy(events = emptyList(), hostCommands = emptyList(),
+                    viewModelChanges = emptyList()), captured.values, captured.native)
+            }
+            rows[id] = active.copy(outcome = active.outcome.copy(hostCommands = step.unattributedHostCommands))
+        }
+        for ((id, row) in rows) {
             layerRetainedValues[id]?.set(row.snapshot.withoutRootProperty("experience"))
             val saves = saveDescriptor?.takeIf {
                 row.outcome.events.any { it.name == ExperienceResponseSaveRequest.EVENT } ||
@@ -1921,13 +1936,7 @@ internal class ExperienceSurfaceHost(
             if (row.outcome.hasPublishableEffects()) unpublishedSteps.addLast(PublishedStep(step.correlationId,
                 row.outcome, row.snapshot, saves, id))
         }
-        if (step.unattributedHostCommands.isNotEmpty()) {
-            // Commands have no instance accessor in the ABI. Deliver once through the page owner,
-            // retaining their published payload rather than guessing a row from its model graph.
-            unpublishedSteps.addLast(PublishedStep(step.correlationId,
-                step.native.copy(events = emptyList(), viewModelChanges = emptyList()), null, emptyList()))
-        }
-        if (step.unattributedEvents.isNotEmpty() || step.unattributedHostCommands.isNotEmpty()) {
+        if (step.unattributedEvents.isNotEmpty()) {
             Log.w(LOG_TAG, "Experience layer effects have no unique Screen owner")
         }
     }
