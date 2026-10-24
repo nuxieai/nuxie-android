@@ -2,7 +2,7 @@
 
 Bazel compiles the SDK's Kotlin/Java sources, both JNI adapters, Android resources,
 lint library, JVM tests, example APK, and instrumentation APK. It packages the
-release AAR with the unchanged runtime publication in `runtime/artifact.json`.
+release AAR with the verified local runtime staged in `runtime/prebuilt` by default.
 The runtime remains an imported artifact; SDK builds do not compile runtime Rust.
 
 Use Python 3.11+, JDK 21, and the Android SDK with platform 36, build-tools
@@ -59,7 +59,7 @@ It replaces only the requested Maven version and preserves unchanged artifacts'
 modification times. Downstream SDKs use this stable interface:
 
 ```sh
-scripts/bazel/sdk.sh prepare --output /absolute/maven/repository \
+NUXIE_RUNTIME_USE_LOCAL=0 scripts/bazel/sdk.sh prepare --output /absolute/maven/repository \
   --maven-version 0.2.0-ANDROID_SOURCE_REVISION
 ```
 
@@ -67,8 +67,9 @@ The 40-character revision suffix must equal the Android checkout's HEAD, and
 source-addressed or signed preparation requires a clean committed SDK checkout.
 Ignored generated/build outputs are exempt. Consumers of exact source pins must
 reject `sourceDirty: true`; ordinary local development preparation records it.
-`--sign` uses the existing release signing environment and requires the public
-pinned runtime. The version defaults to the canonical root Gradle build version.
+`--sign` uses the existing release signing environment and requires
+`NUXIE_RUNTIME_USE_LOCAL=0` for the public pinned runtime, as does source-addressed
+preparation. The version defaults to the canonical root Gradle build version.
 Publication scopes retain billing and coroutines as API dependencies.
 
 Preparation also runs the existing binary compatibility validator directly on
@@ -78,8 +79,10 @@ must pass the two-ABI ELF alignment and portable JNI dependency-name checks.
 
 For local runtime development, first build its Android distribution and run
 `scripts/stage-runtime.sh /absolute/runtime/checkout`. Then use
-`NUXIE_RUNTIME_USE_LOCAL=1 scripts/bazel/sdk.sh build`. The import verifies both
-ABI libraries and the generated header against the staged source/NDK provenance.
+`scripts/bazel/sdk.sh build`. Unset or `NUXIE_RUNTIME_USE_LOCAL=1` verifies both
+ABI libraries and the header against `runtime/local-artifact.json`; missing or
+invalid staging stops the build without downloading. `NUXIE_RUNTIME_USE_LOCAL=0`
+imports the pin in `runtime/artifact.json`. Release publishing requires `=0`.
 
 Gradle remains the independent public API, Android lint and AGP release-packaging
 oracle. `scripts/bazel/sdk.sh check` runs Bazel tests/builds followed by the

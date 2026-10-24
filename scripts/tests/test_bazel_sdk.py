@@ -378,6 +378,7 @@ class BazelSdkPackagingTests(unittest.TestCase):
         output = self.directory / "prepared"
         args = SimpleNamespace(output=output, maven_version="0.2.0-" + "a" * 40, sign=False)
         with patch.object(sdk, "source_identity", return_value=("a" * 40, False)), \
+                patch.dict(os.environ, {"NUXIE_RUNTIME_USE_LOCAL": "0"}), \
                 patch.object(sdk, "toolchain", return_value=(self.directory, self.directory)), \
                 patch.object(sdk, "bazel"), patch.object(sdk, "artifact", side_effect=inputs.__getitem__), \
                 patch.object(sdk, "verify_api"), patch.object(sdk, "verify_native"):
@@ -394,6 +395,28 @@ class BazelSdkPackagingTests(unittest.TestCase):
                                     "size": (ROOT / "LICENSE").stat().st_size}])
         self.assertTrue(all(item["path"].startswith("ai/nuxie/nuxie-android/")
                             for item in receipt["artifacts"] if item["kind"] == "maven"))
+
+    def test_release_preparation_requires_explicit_pinned_selection_before_building(self):
+        for signed, version in [(True, '1.0.0'), (False, '1.0.0-' + 'a' * 40)]:
+            for mode in (None, '1', '', 'other'):
+                with self.subTest(signed=signed, mode=mode), patch.dict(os.environ, {}, clear=True), \
+                     patch.object(sdk, 'bazel') as build, patch.object(sdk, 'source_identity') as source:
+                    if mode is not None:
+                        os.environ['NUXIE_RUNTIME_USE_LOCAL'] = mode
+                    with self.assertRaisesRegex(ValueError, 'NUXIE_RUNTIME_USE_LOCAL=0'):
+                        sdk.prepare(SimpleNamespace(maven_version=version, sign=signed, output=self.directory))
+                    build.assert_not_called()
+                    source.assert_not_called()
+
+    def test_release_preparation_still_refuses_local_provenance_with_zero_selected(self):
+        provenance = self.directory / 'provenance.json'
+        provenance.write_text(json.dumps({'mode': 'local'}))
+        with patch.dict(os.environ, {'NUXIE_RUNTIME_USE_LOCAL': '0'}), \
+             patch.object(sdk, 'source_identity', return_value=('a' * 40, False)), \
+             patch.object(sdk, 'toolchain', return_value=(self.directory, self.directory)), \
+             patch.object(sdk, 'bazel'), patch.object(sdk, 'artifact', return_value=provenance):
+            with self.assertRaisesRegex(ValueError, 'published pinned runtime'):
+                sdk.prepare(SimpleNamespace(maven_version='1.0.0', sign=True, output=self.directory))
 
     def test_suite_discovers_only_classes_with_their_own_test_methods(self):
         source = self.directory / "Owners.kt"

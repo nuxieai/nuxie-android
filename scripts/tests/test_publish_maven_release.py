@@ -45,7 +45,7 @@ class CentralDeploymentTests(unittest.TestCase):
             commands.append(command)
             if 'bundle-maven-release.py' in command[1]:
                 (directory / 'bundle.zip').write_bytes(b'qualified Bazel bundle')
-        with patch.dict(os.environ, {'NUXIE_SIGNING_KEY': 'test key', 'NUXIE_RUNTIME_USE_LOCAL': ''}), \
+        with patch.dict(os.environ, {'NUXIE_SIGNING_KEY': 'test key', 'NUXIE_RUNTIME_USE_LOCAL': '0'}), \
              patch.object(publisher.subprocess, 'run', side_effect=run):
             publisher.prepare('0.1.0', self.directory / 'public.asc', 'A' * 40, directory)
         self.assertEqual(commands[0][1:], ['test'])
@@ -59,6 +59,19 @@ class CentralDeploymentTests(unittest.TestCase):
         self.assertFalse(any('publishReleasePublication' in arg for command in commands for arg in command))
         self.assertTrue(commands[3][1].endswith('/scripts/test-maven-consumer.py'))
         self.assertEqual(json.loads((directory / 'release.json').read_text())['checks'], commands)
+
+    def test_prepare_refuses_default_local_and_invalid_runtime_selections_before_any_commands(self):
+        for mode in (None, '1', '', 'other'):
+            with self.subTest(mode=mode), patch.dict(os.environ, {}, clear=True), \
+                 patch.object(publisher.subprocess, 'run') as run, \
+                 patch.object(publisher, 'tagged_source') as source:
+                if mode is not None:
+                    os.environ['NUXIE_RUNTIME_USE_LOCAL'] = mode
+                with self.assertRaisesRegex(ValueError, 'NUXIE_RUNTIME_USE_LOCAL=0'):
+                    publisher.prepare('0.1.0', self.directory / 'public.asc', 'A' * 40, self.directory / 'rejected')
+                source.assert_not_called()
+                run.assert_not_called()
+                self.assertFalse((self.directory / 'rejected').exists())
 
     def response(self, state):
         receipt = json.loads(self.receipt.read_text())
