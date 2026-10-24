@@ -52,15 +52,16 @@ internal class ExperienceTextInputOverlay(
     private val nativeEvent: (ExperienceTextFieldTarget, Long, ExperienceSemanticTextDraft.Event) -> Unit = { _, _, _ -> },
     private val nativeFocus: ((ExperienceTextFieldTarget, Pair<Float, Float>?, (Boolean) -> Unit) -> Unit)? = null,
 ) : FrameLayout(context) {
-    private class Binding(val input: ExperienceTextInput, val editor: Editor, val container: FrameLayout,
+    private class Binding(var input: ExperienceTextInput, val editor: Editor, val container: FrameLayout,
         var geometryAvailable: Boolean = true, var field: ExperienceNativeTextField,
         val draft: ExperienceSemanticTextDraft,
         var frozenSelection: Pair<Int, Int>? = null)
     private val bindings = mutableListOf<Binding>()
-    private val nativeInputs = inputs.associateBy { it.id }
+    private var nativeInputs = inputs.associateBy { it.id }
     private val session = state.bind()
     private var closed = false
     private var inputEnabled = true
+    private var preserveFocusWhileBlocked = false
     private var keyboardShift = 0f
     private val keyboardLayoutListener = ViewTreeObserver.OnGlobalLayoutListener { avoidKeyboard() }
 
@@ -72,6 +73,11 @@ internal class ExperienceTextInputOverlay(
             post { if (!closed) avoidKeyboard() }
             insets
         }
+    }
+
+    /** Declarations belong to the active Screen; occurrence identity belongs to the page. */
+    fun updateDeclarations(inputs: List<ExperienceTextInput>) {
+        nativeInputs = inputs.associateBy { it.id }
     }
 
     /** Complete occurrence inventory from one presented frame; absent owners are retired. */
@@ -128,19 +134,23 @@ internal class ExperienceTextInputOverlay(
                     editor.onChange = { commit ->
                         if (!closed && session.isCurrent() && inputEnabled && editor.isEnabled && created in bindings) {
                             created.draft.replaceText(editor.text.toString(), editor.isComposingText())
-                            created.draft.requestNotification()?.let { nativeNotification(field.target, it) }
+                            created.draft.requestNotification()?.let { nativeNotification(created.field.target, it) }
                             if (commit) created.draft.requestEvent(ExperienceSemanticTextDraft.EventKind.EDITING_ENDED)
-                                .forEach { nativeEvent(field.target, field.ownerId, it) }
+                                .forEach { nativeEvent(created.field.target, created.field.ownerId, it) }
                             flushNativeWrite(created)
                         }
                     }
                     editor.onReturn = {
                         if (!closed && session.isCurrent() && inputEnabled && editor.isEnabled && created in bindings) {
                             created.draft.requestEvent(ExperienceSemanticTextDraft.EventKind.RETURN)
-                                .forEach { nativeEvent(field.target, field.ownerId, it) }
+                                .forEach { nativeEvent(created.field.target, created.field.ownerId, it) }
                         }
                     }
                 }
+            }
+            if (binding.input != input) {
+                binding.editor.updateDeclaration(input)
+                binding.input = input
             }
             binding.field = field
             binding.editor.semanticNode = field.node
@@ -171,6 +181,7 @@ internal class ExperienceTextInputOverlay(
     /** IME callbacks can outlive touch dispatch; fence them during native preparation too. */
     fun setInputEnabled(enabled: Boolean, preserveFocus: Boolean = false) {
         if (closed || inputEnabled == enabled) return
+        preserveFocusWhileBlocked = !enabled && preserveFocus
         if (!enabled && !preserveFocus) clearEditorFocus()
         inputEnabled = false
         bindings.forEach { binding ->
@@ -332,7 +343,7 @@ internal class ExperienceTextInputOverlay(
             }
             binding.geometryAvailable = field != null && metrics != null && placeCapturedField(input, metrics, editor, container, field, scale, left, top)
             val node = nativeField.node
-            val enabled = binding.geometryAvailable && inputEnabled &&
+            val enabled = binding.geometryAvailable && (inputEnabled || preserveFocusWhileBlocked) &&
                 (node.stateFlags and NativeSemanticState.DISABLED == 0)
             if (enabled && !editor.isEnabled) binding.draft.let { editor.replacePresentedText(it.text) }
             editor.isEnabled = enabled
@@ -399,7 +410,7 @@ internal class ExperienceTextInputOverlay(
 
     // Rive supplies the text appearance; this editor needs platform IME behavior without AppCompat tinting.
     @SuppressLint("AppCompatCustomView")
-    private inner class Editor(context: Context, private val input: ExperienceTextInput) : EditText(context) {
+    private inner class Editor(context: Context, private var input: ExperienceTextInput) : EditText(context) {
         var semanticNode: NativeSemanticNode? = null
         var capturedFirstBaseline: Pair<ExperienceTextInput.EffectiveMetrics, Float>? = null
         var presentedTextOriginY: Float = 0f
@@ -521,30 +532,7 @@ internal class ExperienceTextInputOverlay(
             isSaveEnabled = false
             setPadding(0, 0, 0, 0)
             includeFontPadding = false
-            setSingleLine(!input.multiline || input.secure)
-            inputType = keyboardType(input)
-            imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI or
-                if (input.multiline && !input.secure) EditorInfo.IME_ACTION_NONE else EditorInfo.IME_ACTION_DONE
-            hint = input.placeholder
-            setTextColor(Color.TRANSPARENT)
-            setHintTextColor(input.style.color)
-            gravity = Gravity.TOP or when (input.style.textAlign?.lowercase(Locale.ROOT)) {
-                "center" -> Gravity.CENTER_HORIZONTAL
-                "right", "end" -> Gravity.END
-                else -> Gravity.START
-            }
-            typeface = if (input.style.fontFamily == "System") {
-                SystemFontProvider.typeface(SystemFontRequirement(
-                    input.style.fontAssetName, input.style.fontWeight.toIntOrNull() ?: 0,
-                    if (input.style.italic) "italic" else "normal",
-                ))
-            } else fonts[input.style.fontAssetName]?.let { runCatching { Typeface.createFromFile(it) }.getOrNull() }
-                ?: Typeface.create(input.style.fontFamily, when {
-                    input.style.italic && (input.style.fontWeight.toIntOrNull() ?: 400) >= 600 -> Typeface.BOLD_ITALIC
-                    input.style.italic -> Typeface.ITALIC
-                    (input.style.fontWeight.toIntOrNull() ?: 400) >= 600 -> Typeface.BOLD
-                    else -> Typeface.NORMAL
-                })
+            configureDeclaration()
             if (Build.VERSION.SDK_INT >= 26) importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
             setText(input.value)
             limitText()
@@ -586,6 +574,47 @@ internal class ExperienceTextInputOverlay(
                     true
                 } else false
             }
+        }
+
+        fun updateDeclaration(next: ExperienceTextInput) {
+            val selection = selectionStart to selectionEnd
+            normalizing = true
+            try {
+                input = next
+                configureDeclaration()
+                setSelection(selection.first.coerceIn(0, length()), selection.second.coerceIn(0, length()))
+            } finally { normalizing = false }
+            if (hasFocus()) {
+                (context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)?.restartInput(this)
+            }
+        }
+
+        private fun configureDeclaration() {
+            setSingleLine(!input.multiline || input.secure)
+            inputType = keyboardType(input)
+            imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI or
+                if (input.multiline && !input.secure) EditorInfo.IME_ACTION_NONE else EditorInfo.IME_ACTION_DONE
+            hint = input.placeholder
+            setTextColor(Color.TRANSPARENT)
+            setHintTextColor(input.style.color)
+            gravity = Gravity.TOP or when (input.style.textAlign?.lowercase(Locale.ROOT)) {
+                "center" -> Gravity.CENTER_HORIZONTAL
+                "right", "end" -> Gravity.END
+                else -> Gravity.START
+            }
+            typeface = if (input.style.fontFamily == "System") {
+                SystemFontProvider.typeface(SystemFontRequirement(
+                    input.style.fontAssetName, input.style.fontWeight.toIntOrNull() ?: 0,
+                    if (input.style.italic) "italic" else "normal",
+                ))
+            } else fonts[input.style.fontAssetName]?.let { runCatching { Typeface.createFromFile(it) }.getOrNull() }
+                ?: Typeface.create(input.style.fontFamily, when {
+                    input.style.italic && (input.style.fontWeight.toIntOrNull() ?: 400) >= 600 -> Typeface.BOLD_ITALIC
+                    input.style.italic -> Typeface.ITALIC
+                    (input.style.fontWeight.toIntOrNull() ?: 400) >= 600 -> Typeface.BOLD
+                    else -> Typeface.NORMAL
+                })
+            composingPaint.color = input.style.color
         }
 
         override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {

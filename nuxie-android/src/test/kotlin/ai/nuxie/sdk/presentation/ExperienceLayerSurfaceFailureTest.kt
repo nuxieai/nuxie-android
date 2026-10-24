@@ -257,6 +257,56 @@ class ExperienceLayerSurfaceFailureTest {
         }
     }
 
+    @Test fun `covered skipping Back stays hidden until one reveal and ordinary pop enters once`() = runBlocking {
+        for (skip in listOf(false, true)) withSurface { surface, page, native, lane ->
+            val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
+            val scene = java.io.File.createTempFile("page-covered-cut", ".riv").apply { writeBytes(byteArrayOf(1)) }
+            val descriptor = field(page, "descriptor") as JsonObject
+            val source = PreparedPresentation(scene, "B", 0, PresentationShell.FullScreen(), "b", descriptor,
+                pageHistory = listOf("a", "b"))
+            val target = source.copy(screenId = "a", artboardName = "A", pageHistory = listOf("a"),
+                screenLifecycle = ExperienceScreenLifecycle())
+            val listener = object : ExperienceSurfaceHost.Listener {
+                override fun onFirstFrame() = Unit
+                override fun onFailure(error: ExperiencePresentationException) { throw AssertionError(error) }
+            }
+            val mounted = ExperienceMountedScreen(activity.get(), source, listener, { throw AssertionError(it) })
+            val ownedLane = field(mounted, "lane") as NuxieRuntimeLane
+            set(mounted, "surface", surface)
+            try {
+                mounted.prepareRow(source, listener)
+                lane.call {
+                    page.insertOnLane("b", 1)
+                    page.setPhasesOnLane(listOf("a" to ExperienceScreenLifecycle.Phase.HIDDEN,
+                        "b" to ExperienceScreenLifecycle.Phase.HIDDEN))
+                    native.writes.clear()
+                    native.trace.clear()
+                }
+                val id = if (skip) "a" else "b"
+                val before = page.lifecycle(id)["screen/appearances"]
+                if (skip) {
+                    mounted.cutCoveredPage(target, listener)
+                    assertTrue(native.writes.filter { it.second.path == "screen/phase" }.all { it.second.integerValue == 0L })
+                    assertEquals(before, page.lifecycle(id)["screen/appearances"])
+                    assertTrue(native.trace.any { it.startsWith("begin:") })
+                    assertTrue(native.trace.any { it.startsWith("end:") })
+                }
+                mounted.enterPage()
+                lane.call {}
+                val count = (before as NuxieViewModelScalarValue.NumberValue).value
+                assertEquals(NuxieViewModelScalarValue.NumberValue(count + 1), page.lifecycle(id)["screen/appearances"])
+                mounted.activate()
+                lane.call {}
+                assertEquals(NuxieViewModelScalarValue.StringValue("active"), page.lifecycle(id)["screen/phase"])
+                assertEquals(NuxieViewModelScalarValue.NumberValue(count + 1), page.lifecycle(id)["screen/appearances"])
+            } finally {
+                mounted.close(false) {}
+                assertTrue(ownedLane.awaitQuiescence(5_000))
+                activity.pause().stop().destroy(); scene.delete()
+            }
+        }
+    }
+
     @Test fun `cut swap keeps the incoming completion waiter alive until its arrival`() = runBlocking {
         withSurface { surface, page, native, _ ->
             val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
