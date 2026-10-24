@@ -75,6 +75,8 @@ class ExperiencePageHostContractTest {
             JourneyGrammar.action(buildJsonObject { put("type", "navigate"); put("screenId", "one"); put("transition", transition) }, setOf("one"), emptySet())
         }
         for (json in listOf("""{"type":"custom","transitionId":"pair"}""",
+            """{"type":"fade","transitionIds":{}}""",
+            """{"type":"modal","present":"fullscreen","height":"large"}""",
             """{"type":"magic-move"}""", """{"type":"push","transitionId":"pair"}""",
             """{"type":"fade","transitionId":"pair","transitionIds":{}}""",
             """{"type":"none","transitionIds":{"a":4}}""")) {

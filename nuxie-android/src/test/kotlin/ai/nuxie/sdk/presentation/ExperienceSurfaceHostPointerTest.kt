@@ -981,8 +981,8 @@ class ExperienceSurfaceHostPointerTest {
             assertEquals(listOf(
                 NativePlayerPointer(3, 500f, 500f, 0, 1f),
                 NativePlayerPointer(0, 750f, 500f, 0, 100f),
-            ), native.pointerSteps.last())
-            assertEquals(listOf(0f, 0f), native.elapsedSteps)
+            ), native.pointerSteps.drop(1).flatten())
+            assertEquals(listOf(0f, 0f, 0f), native.elapsedSteps)
             assertEquals(1, native.playersCreated)
         } finally {
             host.onSurfaceTextureDestroyed(texture)
@@ -1732,6 +1732,29 @@ class ExperienceSurfaceHostPointerTest {
             } finally { release.countDown() }
             drain(lane)
             assertTrue("An exit frame must not take retired typing", native.focusSteps.flatten().isEmpty())
+        }
+    }
+
+    @Test fun `step and cover release delivered pointers and keys before another frame`() {
+        for (cover in listOf(false, true)) withFocusHost { host, native, lane, _ ->
+            val down = motion(MotionEvent.ACTION_DOWN, 10, 20f, 20f)
+            try { assertTrue(host.onTouchEvent(down)) } finally { down.recycle() }
+            assertTrue(host.receiveFocusInput(NuxieFocusInput.Key(66, 1, true, false)))
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            assertTrue(native.focusSteps.flatten().any { it.code == 66 && it.pressed })
+            native.pointerSteps.clear()
+            native.focusSteps.clear()
+            if (cover) host.setPresentationVisible(false) else host.setInputEnabled(false)
+            drain(lane)
+            assertEquals(listOf(3), native.pointerSteps.flatten().map { it.kind })
+            val released = native.focusSteps.flatten().single()
+            assertEquals(66, released.code)
+            assertFalse(released.pressed)
+            assertFalse(released.repeated)
+            if (cover) host.setPresentationVisible(false) else host.setInputEnabled(false)
+            drain(lane)
+            assertEquals(1, native.focusSteps.flatten().size)
         }
     }
 
