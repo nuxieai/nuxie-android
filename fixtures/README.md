@@ -4,6 +4,8 @@ These JSON vectors define the contracts shared by SDK implementations.
 
 ## Published runtime values
 
+- `runtime/layer-host-interim/`: interim UNIV-5113 stand-in from the published custom-transition scene. `ExperienceInteractivePageTests` qualifies list rows, default machines, completion attribution, retained values and layout sizing.
+
 - `runtime/screen-exit-reason/`: published dismissed-only and field-absent scenes for optional exit-reason binding, navigation skipping, and the retained terminal pose over the default screen backing.
 - `runtime/paywall-selection/`: portable compiled product-ID tap and signed link setup, with native feedback/read-back proof.
 - `runtime/paywall-catalog-selection/` and `runtime/paywall-placement-selection/`: real `valueFrom` taps from the annual child; catalog remapping and placement selection of two rows with one product are SDK-native assertions. They do not establish normal publication or checkout.
@@ -54,9 +56,16 @@ The signed release fixture is the only release wire shape. Tests consume it dire
 - `encodings/feature-consumption.json`: `/feature/consume` commands and receipts, including App Store evidence with camelCase `customerKind` (`identified` or `anonymous`) frozen at consume admission. Ordinary consumes and retries reconstructed from legacy evidence with no recorded kind omit it, including after sign-in. iOS consumes it in `FeatureConsumptionApiTests`; the upgrade retry is covered through `useFeatureWithPendingPurchase` in `PurchaseBackedFeatureUsageTests` and `TransactionEvidencePersistenceOrchestrationTests`.
 - `features/optimistic-entitlement-projection.json`: authoritative feature state combined with retained purchase evidence.
 - `features/command-recovery.json`: persisted server cooldowns and active-session retry eligibility for durable Feature commands.
+- `purchases/app-store-intro-eligibility.json`: iOS-owned App Store eligibility. Unavailable forced eligibility uses automatic terms for display and checkout without an override; an active subscription in the group blocks automatic intro terms. iOS consumes it in the App Store intro eligibility fixture runner in `TransactionServiceTests`.
 - `purchases/outcome-commit.json`: one purchase outcome committer across StoreKit and host-delegate sources.
 - `purchases/purchase-outbox.json`: the purchase outbox contract (`docs/purchase-outbox.md`): what each producer sends (`reason`, `customer_kind`, requester), how each server answer clears or keeps an entry and refetches the profile, the retry backoff, and the Restore outcome. iOS consumes it in `PurchaseOwnershipClaimTests`.
 - `purchases/app-account-token.json`: the StoreKit `appAccountToken` for each key mode and StoreKit environment. The server derives the same value to decide who owns a purchase; the SDK's service environment takes no part. iOS consumes it in `AppAccountTokenFixtureTests`; nuxie-dev's connectors tests read the same file.
 - `ir/eval-vectors.json` and `ir/response-field-conformance.json`: expression and buffered-response evaluation used by Journey controls.
 
 - `runtime/forms-saves/goals/`: F5 goals from publisher `81fa73c87f0638d151d0a4082fbcab1cd61ec73c`. The unchanged source and oracle qualify ordered native list snapshot/recovery. SDK timed-wait persistence remains its own proof; this fixture has no row-remove event, forms or saves.
+
+`runtime/layer-host-video` wraps the published video Screen in an interim layer
+list to qualify nested decode, bound pause and row retirement on one player.
+
+`runtime/layer-host-input` wraps the published input and greeting Screens in an
+interim layer list to qualify active-row editors, field owners and revisits.
