@@ -4,8 +4,10 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import sys
 import zipfile
 
 FILES = (
@@ -15,6 +17,32 @@ FILES = (
     "jniLibs/x86_64/libc++_shared.so",
     "jniLibs/x86_64/libnux_capi.so",
 )
+
+LOCAL_RUNTIME_REQUIRED = (
+    "Local runtime isn't staged. Build the Android runtime from nuxie-runtime and run "
+    "scripts/stage-runtime.sh <runtime checkout>, or set NUXIE_RUNTIME_USE_LOCAL=0 for the pinned release."
+)
+
+
+def verify_local(tree, provenance_path, maximum):
+    try:
+        provenance = json.loads(provenance_path.read_text())
+        if provenance.get("files") != inspect_tree(tree, maximum):
+            raise ValueError("Staged runtime files changed")
+        if provenance.get("mode") != "local" or provenance.get("androidNdk") != "29.0.14206865" or not re.fullmatch(r"[0-9a-f]{40}", provenance.get("sourceCommit", "")):
+            raise ValueError("Staged runtime source or NDK identity is missing")
+    except (OSError, ValueError, TypeError, AttributeError) as error:
+        raise ValueError(LOCAL_RUNTIME_REQUIRED) from error
+
+
+def select_runtime(tree, provenance_path, maximum):
+    mode = os.environ.get("NUXIE_RUNTIME_USE_LOCAL")
+    if mode == "0":
+        return "published"
+    if mode not in (None, "1"):
+        raise ValueError("NUXIE_RUNTIME_USE_LOCAL must be unset, 1 or 0")
+    verify_local(tree, provenance_path, maximum)
+    return "local"
 
 
 def digest(path):
@@ -53,24 +81,25 @@ def main():
     local = commands.add_parser("verify-local")
     local.add_argument("--tree", type=Path, required=True)
     local.add_argument("--provenance", type=Path, required=True)
+    selection = commands.add_parser("select")
+    selection.add_argument("--tree", type=Path, required=True)
+    selection.add_argument("--provenance", type=Path, required=True)
     stage = commands.add_parser("stamp")
     stage.add_argument("--tree", type=Path, required=True)
     stage.add_argument("--build-inputs", type=Path, required=True)
     stage.add_argument("--source-revision", required=True)
     stage.add_argument("--ndk", required=True)
     stage.add_argument("--output", type=Path, required=True)
-    for command in (download, local, stage):
+    for command in (download, local, selection, stage):
         command.add_argument("--budget", type=Path, required=True)
     args = parser.parse_args()
     maximum = json.loads(args.budget.read_text())["maximumBytes"]
     if args.command == "extract":
         extract(args.archive, args.output, maximum)
     elif args.command == "verify-local":
-        provenance = json.loads(args.provenance.read_text())
-        if provenance.get("files") != inspect_tree(args.tree, maximum):
-            raise ValueError("Staged runtime header or JNI library changed after source verification; run scripts/stage-runtime.sh again")
-        if provenance.get("mode") != "local" or provenance.get("androidNdk") != "29.0.14206865" or not re.fullmatch(r"[0-9a-f]{40}", provenance.get("sourceCommit", "")):
-            raise ValueError("Staged runtime source or NDK identity is missing")
+        verify_local(args.tree, args.provenance, maximum)
+    elif args.command == "select":
+        print(select_runtime(args.tree, args.provenance, maximum))
     else:
         captured = json.loads(args.build_inputs.read_text())
         if captured["sourceRevision"] != args.source_revision or captured["configuration"]["androidNdk"] != args.ndk:
@@ -81,4 +110,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (OSError, ValueError) as error:
+        print(error, file=sys.stderr)
+        sys.exit(1)

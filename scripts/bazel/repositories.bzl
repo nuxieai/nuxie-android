@@ -9,36 +9,36 @@ _FILES = [
 ]
 
 def _runtime_impl(ctx):
-    pin = json.decode(ctx.read(ctx.attr.pin))
-    if pin["abis"] != ["arm64-v8a", "x86_64"]:
-        fail("The SDK requires exactly arm64-v8a and x86_64 runtime artifacts")
-    mode = ctx.getenv("NUXIE_RUNTIME_USE_LOCAL", "")
-    if mode not in ["", "1"]:
-        fail("NUXIE_RUNTIME_USE_LOCAL must be unset or exactly 1")
     python = ctx.which("python3")
     if python == None:
         fail("python3 is required to verify runtime artifact inputs")
     verifier = ctx.path(ctx.attr.verifier)
     budget = ctx.path(ctx.attr.budget)
-    if mode == "1":
-        directory = ctx.path(ctx.attr.pin).dirname
-        tree = directory.get_child("prebuilt")
-        provenance_path = directory.get_child("local-artifact.json")
-        if not provenance_path.exists:
-            fail("Local runtime provenance is missing; run scripts/stage-runtime.sh <runtime-checkout> first")
+    directory = ctx.path(ctx.attr.pin).dirname
+    tree = directory.get_child("prebuilt")
+    provenance_path = directory.get_child("local-artifact.json")
+    selection = ctx.execute(
+        [python, verifier, "select", "--tree", tree, "--provenance", provenance_path, "--budget", budget],
+        environment = {"NUXIE_RUNTIME_USE_LOCAL": ctx.getenv("NUXIE_RUNTIME_USE_LOCAL", "1")},
+    )
+    if selection.return_code:
+        fail(selection.stderr.strip())
+    if selection.stdout.strip() == "local":
         provenance = json.decode(ctx.read(provenance_path, watch = "yes"))
         for path in _FILES:
             ctx.watch(tree.get_child(path))
-        result = ctx.execute([python, verifier, "verify-local", "--tree", tree, "--provenance", provenance_path, "--budget", budget])
         for path in _FILES:
             ctx.symlink(tree.get_child(path), path)
     else:
+        pin = json.decode(ctx.read(ctx.attr.pin))
+        if pin["abis"] != ["arm64-v8a", "x86_64"]:
+            fail("The SDK requires exactly arm64-v8a and x86_64 runtime artifacts")
         ctx.download(url = pin["url"], sha256 = pin["checksum"], output = "runtime.zip")
         result = ctx.execute([python, verifier, "extract", "--archive", ctx.path("runtime.zip"), "--output", ctx.path("."), "--budget", budget])
+        if result.return_code:
+            fail("Runtime artifact verification failed:\n" + result.stderr)
         ctx.delete("runtime.zip")
         provenance = dict(pin, mode = "published")
-    if result.return_code:
-        fail("Runtime artifact verification failed:\n" + result.stderr)
     ctx.file("provenance.json", json.encode(provenance))
     for path in _FILES:
         if not ctx.path(path).exists:
