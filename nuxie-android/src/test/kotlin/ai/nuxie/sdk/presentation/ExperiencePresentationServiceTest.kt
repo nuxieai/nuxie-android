@@ -2677,7 +2677,7 @@ class ExperiencePresentationServiceTest {
         val declaration = Json.parseToJsonElement("""{"id":"pair","kind":"page","sourceScreenId":"screen_welcome",
             "destinationScreenId":"screen_details","durationMs":400,"incomingOnTop":true,
             "source":{"completeEventName":"leave"},"destination":{"completeEventName":"arrive"},
-            "reverse":{"incomingOnTop":false,"source":{"completeEventName":"back-leave"},"destination":{"completeEventName":"back-arrive"}}}""").jsonObject
+            "reverse":{"durationMs":400,"incomingOnTop":false,"source":{"completeEventName":"back-leave"},"destination":{"completeEventName":"back-arrive"}}}""").jsonObject
         // Unsigned interim metadata exercises service ordering, independent of publisher admission.
         val release = AuthenticatedJourneyRelease(field.get(signed) as ai.nuxie.sdk.experiences.JourneyReleaseEnvelope,
             signed.identity, JsonObject(signed.descriptor + ("render" to JsonObject(render + mapOf(

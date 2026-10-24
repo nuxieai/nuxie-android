@@ -74,8 +74,8 @@ internal object JourneyRenderSchema {
             integer(transition["durationMs"], maximum = 60_000)
             endpoints(transition)
             transition["reverse"]?.let { input ->
-                val reverse = exact(input, setOf("source", "destination"), setOf("durationMs"))
-                reverse["durationMs"]?.let { integer(it, maximum = 60_000) }
+                val reverse = exact(input, setOf("durationMs", "source", "destination"))
+                integer(reverse["durationMs"], maximum = 60_000)
                 endpoints(reverse)
             }
         }
