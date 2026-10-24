@@ -11,6 +11,7 @@ import android.widget.FrameLayout
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
@@ -99,34 +100,131 @@ class ExperiencePagePresentationHeightTest {
         } finally { fixture?.close(); scene.delete() }
     }
 
+    @Test fun `pushed page drives hosting sheet through text navigation pop and recreation`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); a.assertHeight(152f)
+            p.start(install = false); p.frame()
+            a.assertWindowHeight(152f)
+            p.install()
+            // A first frame delivered before installation must be applied immediately on push.
+            p.assertHeight(400f)
+            p.text("P\nSecond"); p.frame(); p.assertHeight(480f)
+            p.navigate(content.copy(artboardName = "A", screenId = "a", pageHistory = listOf("b", "a"),
+                closeLayer = { reveal -> reveal.prepare(); reveal.activate(); true },
+                screenLifecycle = ExperienceScreenLifecycle(), retainedViewModel = AtomicReference()))
+            p.frame(); p.assertHeight(240f)
+            val before = a.queries()
+            a.frame()
+            assertEquals("Covered page does not measure", before, a.queries())
+            p.assertWindowHeight(240f)
+            p.navigate(content.copy(isBack = true, pageHistory = listOf("b"),
+                closeLayer = { reveal -> reveal.prepare(); reveal.activate(); true }))
+            p.frame(); p.assertHeight(480f)
+            p.text("P\nSecond\nThird"); p.frame(); p.assertHeight(560f)
+            p.pop()
+            // Restore the lower page even before its next (unchanged-height) frame.
+            a.assertHeight(152f)
+            a.frame(); a.assertHeight(152f)
+        }
+        // Fresh Activity and players, as in the existing recreation test; restore only each page's top row.
+        withPushPages { a, p, _ ->
+            a.start(); a.frame(); p.start(); p.frame(); p.assertHeight(400f)
+            p.text("Restored\nSecond"); p.frame(); p.assertHeight(480f)
+            p.close(recreating = true); a.close(recreating = true)
+            val restoredA = ActivityPage(a.content())
+            val restoredP = ActivityPage(p.content(), lower = restoredA, baseHeights = mapOf(1 to 240f, 2 to 400f))
+            try {
+                restoredA.start(covered = true); restoredP.start(); restoredP.frame()
+                restoredP.assertHeight(480f)
+                restoredP.text("Restored\nSecond\nThird"); restoredP.frame(); restoredP.assertHeight(560f)
+                restoredP.pop(); restoredA.frame(); restoredA.assertHeight(152f)
+            } finally { restoredP.close(); restoredA.close() }
+        }
+    }
+
+    @Test fun `nested sheet isolates pushed page heights and reveals its current height on dismiss`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame(); p.assertHeight(400f)
+            val nested = ActivityPage(content.copy(isPushPage = false, layerContentHeight = AtomicReference()),
+                lower = p, baseHeights = mapOf(1 to 180f, 2 to 320f))
+            try {
+                nested.start(); nested.frame(); nested.assertHeight(320f)
+                val before = p.queries()
+                p.text("Covered\nSecond"); p.frame()
+                assertEquals(before, p.queries())
+                nested.assertWindowHeight(320f)
+                p.assertWindowHeight(400f)
+                nested.pop()
+                p.assertWindowHeight(400f)
+                p.frame(); p.assertHeight(480f)
+                p.pop(); a.assertHeight(152f)
+            } finally { nested.close() }
+        }
+    }
+
+    @Test fun `skipping Back cuts recreated covered lower page then restores its height across push`() = runBlocking {
+        withPushPages(lowerAtB = true) { a, p, content ->
+            a.start(covered = true); p.start(); p.frame(); p.assertHeight(400f)
+            val before = a.queries()
+            a.cutCovered(content.copy(artboardName = "A", screenId = "a", pageHistory = listOf("a"),
+                isPushPage = false, opensLayer = false, layerAncestors = emptyList(), isBack = true,
+                layerContentHeight = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle(),
+                retainedViewModel = AtomicReference()))
+            a.frame()
+            assertEquals(before, a.queries())
+            p.assertHeight(400f)
+            p.pop(); a.frame(); a.assertHeight(152f)
+        }
+    }
+
+    private suspend fun withPushPages(lowerAtB: Boolean = false,
+        exercise: suspend (ActivityPage, ActivityPage, PreparedPresentation) -> Unit) {
+        val scene = java.io.File.createTempFile("page-push-height", ".riv").apply { writeBytes(byteArrayOf(1)) }
+        val descriptor = Json.parseToJsonElement("""{"state":{},"responses":{},"ruleGroups":[],
+            "leg":{"screens":[{"id":"a","defaultViewModelName":"A"},{"id":"b","defaultViewModelName":"B"}]},
+            "render":{"assets":[],"screens":[{"id":"a","artboardName":"A"},{"id":"b","artboardName":"B"}]}}""").jsonObject
+        val lower = PreparedPresentation(scene, if (lowerAtB) "B" else "A", 0, fitContent,
+            if (lowerAtB) "b" else "a", descriptor, pageHistory = if (lowerAtB) listOf("a", "b") else listOf("a"))
+        val pushed = lower.copy(artboardName = "B", screenId = "b", pageHistory = listOf("b"),
+            isPushPage = true, opensLayer = true, layerAncestors = listOf("height-lower"),
+            layerContentHeight = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle(), retainedViewModel = AtomicReference())
+        val a = ActivityPage(lower)
+        val p = ActivityPage(pushed, lower = a, baseHeights = mapOf(1 to 240f, 2 to 400f))
+        try { exercise(a, p, pushed) } finally { p.close(); a.close(); scene.delete() }
+    }
+
     /** Real mounted-page listener and Activity Screen callbacks; only the native runtime is faked. */
-    private class ActivityPage(initial: PreparedPresentation) {
-        private val controller = Robolectric.buildActivity(NuxieExperienceActivity::class.java)
+    private class ActivityPage(initial: PreparedPresentation, private val lower: ActivityPage? = null,
+        private val baseHeights: Map<Int, Float> = mapOf(1 to 152f, 2 to 280f)) {
+        private val controller: org.robolectric.android.controller.ActivityController<NuxieExperienceActivity> =
+            lower?.controller ?: Robolectric.buildActivity(NuxieExperienceActivity::class.java)
         private val activity = controller.get()
         private val screenClass = NuxieExperienceActivity::class.java.declaredClasses.single { it.simpleName == "Screen" }
         private val layerClass = NuxieExperienceActivity::class.java.declaredClasses.single { it.simpleName == "Layer" }
-        private var prepared = initial
+        private val registryId = java.util.UUID.randomUUID().toString()
+        private var prepared = initial.copy(closeLayer = { reveal -> reveal.prepare(); reveal.activate(); true })
         private fun screen(content: PreparedPresentation): ExperienceSurfaceHost.Listener =
             screenClass.declaredConstructors.single { it.parameterCount == 4 }.apply { isAccessible = true }
-                .newInstance(activity, content.screenId, content, false) as ExperienceSurfaceHost.Listener
-        private var current = screen(initial)
+                .newInstance(activity, registryId, content, false) as ExperienceSurfaceHost.Listener
+        private var current = screen(prepared)
         private val failures = mutableListOf<Throwable>()
-        private val mounted = ExperienceMountedScreen(activity, initial, current, { failures += it })
+        private val mounted = ExperienceMountedScreen(activity, prepared, current, { failures += it })
         val surface = mounted.surface
         val texture = SurfaceTexture(0)
         private val lane = field(mounted, "lane") as NuxieRuntimeLane
         private val native = ExperienceInteractivePageTest.RecordingNative().apply {
             presentation = 1
-            contentHeights.putAll(mapOf(1 to 152f, 2 to 280f))
+            contentHeights.putAll(baseHeights)
         }
         private val root = FrameLayout(activity)
-        private val window = ExperienceNativeLayerWindow(activity, root, initial.shell) {}
+        private var window: ExperienceNativeLayerWindow = if (lower != null) lower.window
+            else ExperienceNativeLayerWindow(activity, root, initial.shell) {}
         private val layer = layerClass.declaredConstructors.single { it.parameterCount == 5 }.apply { isAccessible = true }
-            .newInstance(activity, root, current, initial.shell, false)
+            .newInstance(activity, root, current, initial.shell, initial.isPushPage)
         private var clock = 1_000_000_000L
         private var closed = false
 
-        suspend fun start() {
+        suspend fun start(install: Boolean = true, covered: Boolean = false) {
             val runtime = object : NuxieTypedRuntimeNative by native {
                 private var size = floatArrayOf(393f, 852f)
                 override fun inspectFileAssets(bytes: ByteArray) = emptyList<ExpectedFileAsset>()
@@ -144,7 +242,7 @@ class ExperiencePagePresentationHeightTest {
                 override fun acquireWindow(surface: android.view.Surface) = 5L
                 override fun setPlayerLayoutSize(playerHandle: Long, width: Float, height: Float): Int {
                     size = floatArrayOf(width, height)
-                    native.contentHeights[2] = if (width < 350f) 320f else 280f
+                    native.contentHeights[2] = checkNotNull(baseHeights[2]) + if (width < 350f) 40f else 0f
                     return 0
                 }
                 override fun playerLayoutSize(playerHandle: Long) = NativeCallResult(0, size)
@@ -170,18 +268,66 @@ class ExperiencePagePresentationHeightTest {
             set(surface, "runtime", NuxieRuntime(runtime))
             set(surface, "usesSystemFrameCallbacks", false)
             set(current, "mounted", mounted)
-            val view = mounted.mount()
+            val view = mounted.mount(entering = !covered)
             set(current, "view", view)
             root.addView(view)
-            set(layer, "sheet", window)
+            if (install) install()
+            if (covered) mounted.hide()
+            lane.call {}; shadowOf(Looper.getMainLooper()).idle()
+            surface.onSurfaceTextureAvailable(texture, 393, 852)
+        }
+
+        fun install() {
             @Suppress("UNCHECKED_CAST")
             (field(activity, "layers") as MutableList<Any>).add(layer)
             set(activity, "currentScreen", current)
             set(activity, "contentRoot", root)
-            window.show()
-            lane.call {}; shadowOf(Looper.getMainLooper()).idle()
-            surface.onSurfaceTextureAvailable(texture, 393, 852)
+            set(activity, "visible", true)
+            PresentationRegistry.register(registryId,
+                prepared, {}, { throw AssertionError(it) }, {}, {})
+            if (lower == null) {
+                set(layer, "sheet", window)
+                window.show()
+            } else {
+                lower.mounted.hide()
+                val method = if (prepared.isPushPage) "installPushedPage" else "installLayerWindow"
+                if (prepared.isPushPage) NuxieExperienceActivity::class.java.getDeclaredMethod(method, layerClass, layerClass)
+                    .apply { isAccessible = true }.invoke(activity, layer, lower.layer)
+                else {
+                    NuxieExperienceActivity::class.java.getDeclaredMethod(method, layerClass, Function0::class.java)
+                        .apply { isAccessible = true }.invoke(activity, layer, null)
+                    window = field(layer, "sheet") as ExperienceNativeLayerWindow
+                }
+            }
         }
+
+        suspend fun pop() {
+            // Exercise the real close/reveal path without scheduling a native slide animator.
+            set(mounted, "reduceMotionEnabled", true)
+            assertTrue(activityCall { (current as PresentationScreenHandle).dismissPagesFromJourney(1) })
+            assertFalse(activity.isFinishing)
+        }
+
+        suspend fun cutCovered(target: PreparedPresentation) {
+            prepared = checkNotNull(activityCall { (current as PresentationScreenHandle).cutCoveredPage(target) })
+        }
+
+        private suspend fun <T> activityCall(block: suspend () -> T): T = coroutineScope {
+            val result = async(start = CoroutineStart.UNDISPATCHED) { block() }
+            withTimeout(5_000) {
+                while (!result.isCompleted) {
+                    // Activity methods resume on Main after runtime-lane work; runBlocking
+                    // alone does not dispatch Robolectric's queued main-looper callbacks.
+                    shadowOf(Looper.getMainLooper()).idle()
+                    delay(1)
+                }
+            }
+            result.await()
+        }
+
+        fun content(): PreparedPresentation = prepared
+
+        suspend fun queries(): Int = lane.call { native.contentHeightQueries }
 
         suspend fun frame() {
             surface.doFrame(clock); clock += 16_000_000L
@@ -234,7 +380,12 @@ class ExperiencePagePresentationHeightTest {
         fun assertHeight(expected: Float) {
             assertEquals(expected, prepared.layerContentHeight.get())
             assertEquals(expected, field(current, "measuredContentHeight"))
-            assertEquals(expected.toInt(), window.dialog.findViewById<View>(
+            assertWindowHeight(expected)
+        }
+
+        fun assertWindowHeight(expected: Float) {
+            val hostedWindow = if (prepared.isPushPage) window else field(layer, "sheet") as ExperienceNativeLayerWindow
+            assertEquals(expected.toInt(), hostedWindow.dialog.findViewById<View>(
                 com.google.android.material.R.id.design_bottom_sheet).layoutParams.height)
         }
 
@@ -243,7 +394,10 @@ class ExperiencePagePresentationHeightTest {
             closed = true
             screenClass.getDeclaredMethod("close", Boolean::class.javaPrimitiveType).apply { isAccessible = true }.invoke(current, recreating)
             assertTrue(lane.awaitQuiescence(5_000))
-            texture.release(); window.retire(); controller.destroy()
+            texture.release()
+            (field(layer, "sheet") as? ExperienceNativeLayerWindow)?.retire()
+            if (lower == null) controller.destroy()
+            PresentationRegistry.dismiss(registryId, CloseReason.HostDismissed)
         }
 
         companion object {
