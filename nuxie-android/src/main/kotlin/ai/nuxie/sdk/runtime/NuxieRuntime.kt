@@ -756,6 +756,13 @@ internal class NuxieRuntimePlayer internal constructor(
         return size[0] to size[1]
     }
 
+    /** Top expanded Screen's intrinsic height at the page width, after an ordinary step. */
+    fun contentHeight(): Float? {
+        val result = native.playerContentHeight(requireHandle())
+        if (result.status == 3) return null // NUX_STATUS_NOT_FOUND: no expanded Screen.
+        return requireNativeValue(result, "read player content height")
+    }
+
     fun videoSetCaptions(component: Long, language: String, cues: List<NuxieVideoCaptionCue>) {
         require(component >= 0)
         val status = native.videoSetCaptions(requireHandle(), component, language, cues)

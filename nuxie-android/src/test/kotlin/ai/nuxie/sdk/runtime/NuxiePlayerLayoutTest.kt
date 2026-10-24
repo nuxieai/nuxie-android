@@ -26,6 +26,23 @@ class NuxiePlayerLayoutTest {
         assertThrows(IllegalStateException::class.java) { player.layoutSize() }
     }
 
+    @Test fun `content height preserves NotFound failures zero height and closed ownership`() {
+        val native = RecordingNative()
+        val player = NuxieRuntimePlayer(42L, native)
+        assertEquals(152f, player.contentHeight())
+        native.status = 3
+        assertNull(player.contentHeight())
+        for (status in listOf(1, 4, 11)) {
+            native.status = status
+            assertEquals(status, assertThrows(NuxieRuntimeCallException::class.java) { player.contentHeight() }.status)
+        }
+        native.status = 0
+        native.readHeight = 0f
+        assertEquals(0f, player.contentHeight())
+        player.close()
+        assertThrows(IllegalStateException::class.java) { player.contentHeight() }
+    }
+
     @Test fun `GPU CPU copy and readback render paths forward fractional density`() {
         for (copiesToWindow in listOf(false, true)) {
             val native = RecordingNative().apply { copy = copiesToWindow }
@@ -45,6 +62,7 @@ class NuxiePlayerLayoutTest {
         val sizes = mutableListOf<Triple<Long, Float, Float>>()
         val scales = mutableListOf<Pair<String, Float>>()
         var readSize = floatArrayOf(393f, 852f)
+        var readHeight = 152f
         var status = 0
         var copy = false
         override fun setPlayerLayoutSize(playerHandle: Long, width: Float, height: Float): Int {
@@ -52,6 +70,7 @@ class NuxiePlayerLayoutTest {
             return status
         }
         override fun playerLayoutSize(playerHandle: Long) = NativeCallResult(status, readSize)
+        override fun playerContentHeight(playerHandle: Long) = NativeCallResult(status, readHeight)
         override fun freePlayer(handle: Long) = Unit
         override fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int) = 41L
         override fun attachRendererSurface(rendererHandle: Long, windowHandle: Long) = if (copy) -1 else 0
