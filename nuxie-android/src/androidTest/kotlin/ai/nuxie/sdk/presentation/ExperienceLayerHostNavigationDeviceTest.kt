@@ -185,25 +185,15 @@ class ExperienceLayerHostNavigationDeviceTest {
         } finally { directory.deleteRecursively() }
     }
 
-    @Test fun nativeBackDuringForwardStepWaitsThenRunsTheReverseOnTheSameSurface() = runBlocking {
+    @Test fun nativeBackDuringForwardStepWaitsThenClosesTheExperience() = runBlocking {
         val directory = directory()
         try {
-            lateinit var harness: Harness
-            val backFinished = CompletableDeferred<Unit>()
-            var backDestination: PreparedPresentation? = null
-            val a = intermediate(directory).copy(requestBack = {
-                launch(Dispatchers.Default) {
-                    try { harness.navigate(checkNotNull(backDestination)); backFinished.complete(Unit) }
-                    catch (error: Throwable) { backFinished.completeExceptionally(error) }
-                }
-                true
-            })
+            val a = intermediate(directory).copy(pageHistory = listOf("screen_1"))
             Harness(a).use { active ->
-                harness = active
                 val surface = active.mounted().surface
-                backDestination = a.copy(transition = pair, isBack = true)
                 val forward = async(Dispatchers.Default) {
                     active.navigate(a.copy(screenId = "screen_2", artboardName = "Upsell", transition = pair,
+                        pageHistory = listOf("screen_1", "screen_2"),
                         retainedViewModel = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle()))
                 }
                 eventually {
@@ -215,19 +205,17 @@ class ExperienceLayerHostNavigationDeviceTest {
                     @Suppress("DEPRECATION")
                     active.activity.onBackPressed()
                 }
-                assertFalse(backFinished.isCompleted)
+                assertFalse(active.activity.isFinishing)
                 assertSame(surface, forward.await())
-                withTimeout(15_000) { backFinished.await() }
-                assertSame(surface, active.mounted().surface)
-                assertEquals(listOf("screen_1"), surface.layerOperation { it.mountedScreenIdsOnLane() })
-                assertTrue(active.events.contains("screen_2" to "nx_exit_done:transition.native-contract.reverse"))
+                eventually { active.activity.isFinishing }
+                assertFalse(active.events.any { it.second.endsWith(".reverse") })
             }
         } finally { directory.deleteRecursively() }
     }
 
-    @Test fun acquisitionSheetBackDispatcherWalksRowsForDismissibleAndLockedSheets() = acquisitionSheetBack(platform = false)
+    @Test fun acquisitionSheetBackDispatcherClosesDismissibleRootAndKeepsLockedRootOnB() = acquisitionSheetBack(platform = false)
 
-    @Test fun acquisitionSheetPlatformBackWalksRowsForDismissibleAndLockedSheets() {
+    @Test fun acquisitionSheetPlatformBackClosesDismissibleRootAndKeepsLockedRootOnB() {
         org.junit.Assume.assumeTrue(android.os.Build.VERSION.SDK_INT >= 33)
         acquisitionSheetBack(platform = true)
     }
@@ -236,22 +224,12 @@ class ExperienceLayerHostNavigationDeviceTest {
         for (dismissible in listOf(true, false)) {
             val directory = directory()
             try {
-                lateinit var harness: Harness
-                val returned = CompletableDeferred<Unit>()
-                var destination: PreparedPresentation? = null
                 val a = intermediate(directory).copy(shell = PresentationShell.Sheet(PresentationShell.Sheet.Detent.LARGE, dismissible),
-                    requestBack = {
-                        launch(Dispatchers.Default) {
-                            try { harness.navigate(checkNotNull(destination)); returned.complete(Unit) }
-                            catch (error: Throwable) { returned.completeExceptionally(error) }
-                        }
-                        true
-                    })
+                    pageHistory = listOf("screen_1"))
                 Harness(a, acquiring = true).use { active ->
-                    harness = active
-                    destination = a.copy(transition = pair, isBack = true)
                     val surface = active.mounted().surface
                     active.navigate(a.copy(screenId = "screen_2", artboardName = "Upsell", transition = pair,
+                        pageHistory = listOf("screen_1", "screen_2"),
                         retainedViewModel = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle()))
                     lateinit var dialog: com.google.android.material.bottomsheet.BottomSheetDialog
                     val backStack = AtomicReference<List<StackTraceElement>>()
@@ -283,8 +261,8 @@ class ExperienceLayerHostNavigationDeviceTest {
                         instrumentation.waitForIdleSync()
                         assertTrue(instrumentation.uiAutomation.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK))
                     }
-                    assertTrue("Ready acquisition sheet must route native Back to row history (dismissible=$dismissible)",
-                        withTimeoutOrNull(5_000) { returned.await(); true } == true)
+                    eventually { backStack.get() != null }
+                    if (dismissible) eventually { active.activity.isFinishing }
                     val stack = checkNotNull(backStack.get())
                     if (platform) {
                         // API 36's ViewRootImpl selects WindowOnBackInvokedDispatcher.getTopCallback()
@@ -296,22 +274,24 @@ class ExperienceLayerHostNavigationDeviceTest {
                                 it.className.startsWith("android.window.WindowOnBackInvokedDispatcher") })
                     } else assertTrue("Back must arrive through OnBackPressedDispatcher, with the key fallback blocked",
                         stack.any { it.className == "androidx.activity.OnBackPressedDispatcher" })
-                    assertSame(surface, active.mounted().surface)
-                    assertEquals(listOf("screen_1"), surface.layerOperation { it.mountedScreenIdsOnLane() })
-                    assertFalse(active.activity.isFinishing)
-                    instrumentation.runOnMainSync { assertTrue("Back must keep the sheet open", dialog.isShowing) }
+                    if (!dismissible) {
+                        assertSame(surface, active.mounted().surface)
+                        assertEquals("screen_2", PresentationRegistry.resolve(active.id)?.screenId)
+                        assertFalse(active.activity.isFinishing)
+                        instrumentation.runOnMainSync { assertTrue("Locked root stays on B", dialog.isShowing) }
+                    }
                 }
             } finally { directory.deleteRecursively() }
         }
     }
 
-    @Test fun queuedBackRunsWhenNavigationAbortsAndDoesNotLeakIntoTheNextNavigation() = runBlocking {
+    @Test fun queuedBackClosesTheExperienceWhenNavigationAborts() = runBlocking {
         val directory = directory()
         try {
-            val backs = java.util.concurrent.atomic.AtomicInteger()
-            val a = intermediate(directory).copy(requestBack = { backs.incrementAndGet(); true })
+            val a = intermediate(directory).copy(pageHistory = listOf("screen_1"))
             Harness(a).use { active ->
                 val b = a.copy(screenId = "screen_2", artboardName = "Upsell", transition = pair,
+                        pageHistory = listOf("screen_1", "screen_2"),
                     retainedViewModel = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle())
                 val surface = active.navigate(b)
                 val source = checkNotNull(PresentationRegistry.currentScreen(active.id))
@@ -321,13 +301,9 @@ class ExperienceLayerHostNavigationDeviceTest {
                     @Suppress("DEPRECATION")
                     active.activity.onBackPressed()
                 }
-                assertEquals("Back is queued while navigation owns the layer", 0, backs.get())
+                assertFalse("Back waits while navigation owns the page", active.activity.isFinishing)
                 withTimeout(15_000) { pending.abort() }
-                assertEquals("Restoring the source must resolve its queued Back", 1, backs.get())
-                assertEquals(listOf("screen_2"), surface.layerOperation { it.mountedScreenIdsOnLane() })
-                instrumentation.runOnMainSync { assertTrue(surface.isEnabled) }
-                active.navigate(a.copy(transition = pair))
-                assertEquals("An aborted navigation must not leave a Back for a later navigation", 1, backs.get())
+                eventually { active.activity.isFinishing }
             }
         } finally { directory.deleteRecursively() }
     }
@@ -407,6 +383,48 @@ class ExperienceLayerHostNavigationDeviceTest {
                     publish.invoke(surface)
                 }
                 assertEquals(1, delivered.count { it == "screen_2" to "nx_exit_done:transition.native-contract.reverse" })
+                harness.checkFailure()
+            }
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test fun authoredBackCutsRecreatedCoveredPageToRetainedAThenPopsOnce() = runBlocking {
+        val directory = directory()
+        try {
+            val a = intermediate(directory).copy(pageHistory = listOf("screen_1"))
+            Harness(a).use { harness ->
+                harness.mounted().surface.layerOperation {
+                    it.applyJourneyValuesOnLane("screen_1", mapOf("keptValue" to NuxieViewModelScalarValue.NumberValue(42.0)))
+                    a.retainedViewModel.set(it.snapshotOnLane("screen_1"))
+                }
+                harness.navigate(a.copy(screenId = "screen_2", artboardName = "Upsell", transition = pair,
+                    pageHistory = listOf("screen_1", "screen_2"),
+                    retainedViewModel = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle()))
+                val lowerId = harness.id
+                val original = harness.mounted().surface
+                var pops = 0
+                harness.navigate(a.copy(opensLayer = true, isPushPage = true,
+                    transition = Json.parseToJsonElement("""{"type":"push"}""").jsonObject,
+                    layerAncestors = listOf(lowerId), retainedViewModel = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle(),
+                    closeLayer = { reveal ->
+                        pops++
+                        PresentationRegistry.dismiss(harness.id, CloseReason.JourneyNavigation)
+                        reveal.prepare(); reveal.activate(); true
+                    }))
+                harness.recreate()
+                val lower = checkNotNull(PresentationRegistry.currentScreen(lowerId))
+                val mounted = lower.javaClass.getDeclaredField("mounted").apply { isAccessible = true }.get(lower) as ExperienceMountedScreen
+                assertNotSame(original, mounted.surface)
+                assertEquals(listOf("screen_2"), mounted.surface.layerOperation { it.mountedScreenIdsOnLane() })
+                // The service supplies A's retained preparation, even though this player has only B.
+                val restored = checkNotNull(lower.cutCoveredPage(a.copy(isBack = true)))
+                PresentationRegistry.replaceCoveredContent(lowerId, restored)
+                assertTrue(checkNotNull(PresentationRegistry.currentScreen(harness.id)).dismissPagesFromJourney(1))
+                harness.id = lowerId
+                assertEquals(1, pops)
+                assertEquals(listOf("screen_1"), harness.mounted().surface.layerOperation { it.mountedScreenIdsOnLane() })
+                val values = harness.mounted().surface.layerOperation { it.snapshotOnLane("screen_1") }
+                assertEquals(42.0, (values.resolveScalar(listOf("keptValue")) as NuxieViewModelScalarValue.NumberValue).value, 0.01)
                 harness.checkFailure()
             }
         } finally { directory.deleteRecursively() }
