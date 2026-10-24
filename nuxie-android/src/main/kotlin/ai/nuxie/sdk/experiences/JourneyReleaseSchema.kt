@@ -38,6 +38,7 @@ internal object JourneyReleaseSchema {
                 value["present"]?.let { oneOf(it, "sheet", "fullscreen") }
                 value["height"]?.let { oneOf(it, "large", "medium", "fit-content") }
                 value["closedby"]?.let { oneOf(it, "any", "none") }
+                if (value["present"] == JsonPrimitive("fullscreen") && value.containsKey("height")) fail("height is for a sheet")
             }
             "push" -> exact(value, setOf("type"))
             else -> {
@@ -46,7 +47,7 @@ internal object JourneyReleaseSchema {
                 value["transitionId"]?.let(::releaseId)
                 value["transitionIds"]?.let { input ->
                     val routes = record(input)
-                    if (routes.size > 256) fail("transition routes")
+                    if (routes.isEmpty() || routes.size > 256) fail("transition routes")
                     routes.forEach { (source, id) -> releaseId(JsonPrimitive(source)); releaseId(id) }
                 }
                 if (text(value["type"]) == "magic-move" &&

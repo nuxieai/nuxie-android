@@ -252,15 +252,14 @@ internal class ExperienceMountedScreen(
     }
 
     fun hide() {
+        setInputEnabled(false)
         if (isLayer) {
             surface.queueLayerPhases(listOf(checkNotNull(prepared.screenId) to ExperienceScreenLifecycle.Phase.HIDDEN))
             setVisible(false)
-            setInputEnabled(false)
             return
         }
         surface.updateRuntimeValues(lifecycle.move(ExperienceScreenLifecycle.Phase.HIDDEN, exitReason = ExperienceScreenLifecycle.ExitReason.NONE))
         setVisible(false)
-        setInputEnabled(false)
     }
 
     fun exit(reason: ExperienceScreenLifecycle.ExitReason) {

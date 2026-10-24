@@ -719,6 +719,7 @@ internal class ExperienceSurfaceHost(
     private var lastSteppedGeneration = -1L
     private val pointerInput = ExperienceRuntimePointerInput(artboardSize)
     private val focusInput = ExperienceFocusInputQueue()
+    private val deliveredKeys = mutableMapOf<Int, NuxieFocusInput.Key>()
     private val focusGeneration = AtomicLong()
     private var queuedFocusGeneration = 0L
 
@@ -1104,8 +1105,39 @@ internal class ExperienceSurfaceHost(
         val outcome = stepAndRefreshFocus {
             checkNotNull(player).stepTyped(elapsedSeconds = 0.0, pointers = pointers, focusInputs = inputs, correlationId = correlationId)
         }
+        recordDeliveredKeys(inputs)
         val root = captureStepSnapshot(outcome, correlationId)
         root?.let { retainScreenValues(it) }
+    }
+
+    private fun recordDeliveredKeys(inputs: List<NuxieFocusInput>) {
+        inputs.filterIsInstance<NuxieFocusInput.Key>().forEach { key ->
+            if (key.pressed) deliveredKeys[key.code] = key else deliveredKeys.remove(key.code)
+        }
+    }
+
+    /** Retained players receive cancellation before phases change, even without another frame. */
+    private fun withdrawSceneInput() {
+        semanticKeys.clear()
+        riveKeys.clear()
+        discardFocusInput()
+        lane.enqueue {
+            pointerInput.reset()
+            if (player == null || released.get() || failureReported.get()) return@enqueue
+            val pointers = pointerInput.takeBatch()
+            val releases = deliveredKeys.values.map { it.copy(pressed = false, repeated = false) }
+            try {
+                if (pointers.isNotEmpty() || releases.isNotEmpty()) {
+                    if (pendingPresentation && !retireSubmission()) return@enqueue
+                    val batches = releases.chunked(ai.nuxie.sdk.runtime.NuxieFocusLimits.INPUTS_PER_STEP)
+                    nativeEditingStep(pointers, batches.firstOrNull().orEmpty())
+                    batches.drop(1).forEach { nativeEditingStep(inputs = it) }
+                    publishSteps()
+                }
+            } catch (error: Exception) {
+                reportFailure(ExperiencePresentationException.Reason.HOST_FAILED, "Native input cancellation failed", error)
+            }
+        }
     }
 
     private fun focusNativeField(field: ExperienceNativeTextField, point: Pair<Float, Float>? = null): Boolean {
@@ -1268,10 +1300,7 @@ internal class ExperienceSurfaceHost(
         isEnabled = enabled
         semanticEpoch.incrementAndGet()
         if (!enabled) {
-            semanticKeys.clear()
-            riveKeys.clear()
-            discardFocusInput()
-            lane.enqueue { pointerInput.reset() }
+            withdrawSceneInput()
         }
         if (!enabled) {
             accessibility.withdraw()
@@ -1284,7 +1313,7 @@ internal class ExperienceSurfaceHost(
         if (!visible) {
             semanticKeys.clear()
             riveKeys.clear()
-            if (!preservePendingInput) discardFocusInput()
+            if (!preservePendingInput) withdrawSceneInput()
             captionPublication.incrementAndGet()
             listener?.onVideoCaptions(emptyMap())
             retireSemantics(preserveFocus = true)
@@ -1611,6 +1640,7 @@ internal class ExperienceSurfaceHost(
                                 textRunNames = emptyList(),
                             )
                         }.also {
+                            recordDeliveredKeys(focusBatch)
                             if (layoutStepPending || presentationHeight.measuresContent) {
                                 val size = player.layoutSize()
                                 val bounds = ExperienceArtboardSize(size.first, size.second)

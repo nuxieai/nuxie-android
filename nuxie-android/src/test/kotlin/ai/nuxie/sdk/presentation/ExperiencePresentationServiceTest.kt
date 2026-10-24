@@ -2374,7 +2374,7 @@ class ExperiencePresentationServiceTest {
         val vectors = Json.parseToJsonElement(checkNotNull(javaClass.getResource("/page-host/presentation-pages.json")).readText()).jsonObject.getValue("cases").jsonArray
         val release = renderedJourneyRelease("text-input-navigation.json")
         fun screen(id: String) = if (id == "screen") "screen_welcome" else "screen_details"
-        for (value in vectors) {
+        for (modalPresentation in listOf("sheet", "fullscreen")) for (value in vectors) {
             val vector = value.jsonObject
             val hosts = mutableMapOf<String, PresentationScreenHandle>()
             val nativeLayers = mutableListOf<String>()
@@ -2523,16 +2523,24 @@ class ExperiencePresentationServiceTest {
                             assertEquals(retainedId, nativeLayers.last())
                         }
                         val beforePages = nativeLayers.size
+                        edges.clear()
                         when (result) {
                             is JourneyPresentationActionResult.Navigate -> navigate(result.screenId, step["transition"] as? JsonObject)
                             JourneyPresentationActionResult.Handled -> assertEquals(1, service.layerScreenIds().last().size)
                             else -> fail("Back must navigate within its page or pop a page")
+                        }
+                        if (beforePages > nativeLayers.size) {
+                            val revealed = checkNotNull(PresentationRegistry.resolve(nativeLayers.last())).screenId
+                            assertEquals("One shown callback after Back across a native page", 1,
+                                edges.count { it == "active:$revealed" })
+                            assertEquals(1, edges.count { it == "reveal:$revealed" })
                         }
                         repeat(beforePages - nativeLayers.size) { draftsByLayer.removeAt(draftsByLayer.lastIndex) }
                     }
                     else -> {
                         val type = if (operation == "replace") "none" else operation
                         val transition = mutableMapOf<String, kotlinx.serialization.json.JsonElement>("type" to JsonPrimitive(type))
+                        if (type == "modal") transition["present"] = JsonPrimitive(modalPresentation)
                         if (type == "custom") transition["transitionId"] = JsonPrimitive("not-declared")
                         navigate(screen(step.getValue("screen").jsonPrimitive.content), JsonObject(transition))
                         if (operation in setOf("modal", "push")) draftsByLayer += mutableMapOf()
@@ -2883,6 +2891,22 @@ class ExperiencePresentationServiceTest {
         assertEquals(listOf("screen_welcome"), shownScreens)
         assertEquals(listOf(listOf("screen_welcome", "screen_details", "screen_welcome")), service.layerScreenIds())
         windowPagesToClose = 1
+        val pushSame = Json.parseToJsonElement("""{"type":"push"}""").jsonObject
+        show("screen_welcome", pushSame)
+        val middlePage = pages.last()
+        val middleHost = hosts.getValue(middlePage)
+        show("screen_welcome", pushSame)
+        assertEquals(3, pages.size)
+        assertTrue(pages.last() != middlePage)
+        shownScreens.clear()
+        assertEquals(JourneyPresentationActionResult.Navigate("screen_welcome"), service.dispatchJourneyAction(owner,
+            Json.parseToJsonElement("""{"type":"back"}""").jsonObject, "duplicate-page-back"))
+        show("screen_welcome")
+        assertEquals(listOf(retainedRoot, middlePage), pages)
+        assertSame(middleHost, PresentationRegistry.currentScreen(middlePage))
+        assertEquals(listOf("screen_welcome"), shownScreens)
+        assertTrue(middleHost.dismissLayerFromJourney())
+        assertEquals(listOf(retainedRoot), pages)
         boundary("terminal dismissal") { service.dismissFromHost("customer-1") }
         pages.forEach { id -> PresentationRegistry.detach(id, hosts.getValue(id)) }
     }
