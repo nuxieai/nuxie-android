@@ -2597,11 +2597,11 @@ class ExperiencePresentationServiceTest {
             assertTrue(hugging.fitsContentHeight)
             hugging.layerContentHeight.set(152f)
             navigate("screen_welcome")
-            val fixed = checkNotNull(PresentationRegistry.resolve(nativeLayers.last()))
-            assertFalse(fixed.fitsContentHeight)
-            assertTrue(fixed.shell.fitsContent)
-            assertTrue(hugging.layerContentHeight === fixed.layerContentHeight)
-            assertEquals(152f, fixed.layerContentHeight.get())
+            val destination = checkNotNull(PresentationRegistry.resolve(nativeLayers.last()))
+            assertTrue(destination.fitsContentHeight)
+            assertTrue(destination.shell.fitsContent)
+            assertTrue(hugging.layerContentHeight === destination.layerContentHeight)
+            assertEquals(152f, destination.layerContentHeight.get())
             // A completed system close withdraws preparation in its source
             // layer, instead of turning the native dismissal into an error.
             val sourceId = nativeLayers.last()

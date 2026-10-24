@@ -8,7 +8,13 @@ import android.os.Looper
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
@@ -36,6 +42,217 @@ class ExperiencePagePresentationHeightTest {
     }
 
     private val fitContent = PresentationShell.Sheet(PresentationShell.Sheet.Detent.FIT_CONTENT, true)
+
+    @Test fun `mounted page delivers heights through active Activity Screen after navigation rollback Back and recreation`() = runBlocking {
+        val scene = java.io.File.createTempFile("page-activity-height", ".riv").apply { writeBytes(byteArrayOf(1)) }
+        val descriptor = Json.parseToJsonElement("""{"state":{},"responses":{},"ruleGroups":[],
+            "leg":{"screens":[{"id":"a","defaultViewModelName":"A"},{"id":"b","defaultViewModelName":"B"}]},
+            "render":{"assets":[],"screens":[{"id":"a","artboardName":"A"},{"id":"b","artboardName":"B"}],
+            "transitions":[{"id":"pair","kind":"page","sourceScreenId":"a","destinationScreenId":"b","durationMs":0,
+            "source":{"completeEventName":"leave"},"destination":{"completeEventName":"arrive"},
+            "reverse":{"durationMs":0,"source":{"completeEventName":"leave.reverse"},
+            "destination":{"completeEventName":"arrive.reverse"}}}]}}""").jsonObject
+        val a = PreparedPresentation(scene, "A", 0, fitContent, "a", descriptor, pageHistory = listOf("a"))
+        val b = a.copy(artboardName = "B", screenId = "b", pageHistory = listOf("a", "b"),
+            screenLifecycle = ExperienceScreenLifecycle(), retainedViewModel = AtomicReference())
+        var fixture: ActivityPage? = null
+        try {
+            var page = ActivityPage(a).also { fixture = it }
+            page.start()
+            page.frame()
+            page.assertHeight(152f)
+            page.navigate(b)
+            page.frame()
+            page.assertHeight(280f)
+            page.text("First\nSecond")
+            page.frame()
+            page.assertHeight(360f)
+            page.surface.onSurfaceTextureSizeChanged(page.texture, 300, 600)
+            page.frame()
+            page.assertHeight(400f)
+
+            // Rebuild only B in a fresh Activity/player, preserving the service-owned page state.
+            page.close(recreating = true)
+            page = ActivityPage(b).also { fixture = it }
+            page.start()
+            page.frame()
+            page.assertHeight(360f)
+            page.text("Restored\nSecond\nThird")
+            page.frame()
+            page.assertHeight(440f)
+
+            val back = a.copy(pageHistory = listOf("a"), isBack = true,
+                transition = Json.parseToJsonElement("""{"type":"magic-move","transitionId":"pair"}""").jsonObject)
+            page.navigate(back, cancel = true)
+            page.text("Still B\nSecond\nThird\nFourth")
+            page.frame()
+            page.assertHeight(520f)
+            page.navigate(back)
+            page.assertHeight(520f)
+            page.frame()
+            page.assertHeight(152f)
+            // A later visit uses the kept/recreated row and a fresh Activity listener.
+            page.navigate(b, frameBeforeCommit = true)
+            page.assertHeight(520f)
+            page.frame()
+            page.assertHeight(520f)
+        } finally { fixture?.close(); scene.delete() }
+    }
+
+    /** Real mounted-page listener and Activity Screen callbacks; only the native runtime is faked. */
+    private class ActivityPage(initial: PreparedPresentation) {
+        private val controller = Robolectric.buildActivity(NuxieExperienceActivity::class.java)
+        private val activity = controller.get()
+        private val screenClass = NuxieExperienceActivity::class.java.declaredClasses.single { it.simpleName == "Screen" }
+        private val layerClass = NuxieExperienceActivity::class.java.declaredClasses.single { it.simpleName == "Layer" }
+        private var prepared = initial
+        private fun screen(content: PreparedPresentation): ExperienceSurfaceHost.Listener =
+            screenClass.declaredConstructors.single { it.parameterCount == 4 }.apply { isAccessible = true }
+                .newInstance(activity, content.screenId, content, false) as ExperienceSurfaceHost.Listener
+        private var current = screen(initial)
+        private val failures = mutableListOf<Throwable>()
+        private val mounted = ExperienceMountedScreen(activity, initial, current, { failures += it })
+        val surface = mounted.surface
+        val texture = SurfaceTexture(0)
+        private val lane = field(mounted, "lane") as NuxieRuntimeLane
+        private val native = ExperienceInteractivePageTest.RecordingNative().apply {
+            presentation = 1
+            contentHeights.putAll(mapOf(1 to 152f, 2 to 280f))
+        }
+        private val root = FrameLayout(activity)
+        private val window = ExperienceNativeLayerWindow(activity, root, initial.shell) {}
+        private val layer = layerClass.declaredConstructors.single { it.parameterCount == 5 }.apply { isAccessible = true }
+            .newInstance(activity, root, current, initial.shell, false)
+        private var clock = 1_000_000_000L
+        private var closed = false
+
+        suspend fun start() {
+            val runtime = object : NuxieTypedRuntimeNative by native {
+                private var size = floatArrayOf(393f, 852f)
+                override fun inspectFileAssets(bytes: ByteArray) = emptyList<ExpectedFileAsset>()
+                override fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int) = 4L
+                override fun newFile(rendererHandle: Long, bytes: ByteArray, expectedAssets: List<ExpectedFileAsset>,
+                    externalAssets: Map<Int, ByteArray>, imageDecoder: NuxImageDecoder, videoEnabled: Boolean) = 1L
+                override fun installValueMarkers(file: Long, entries: Array<NativeValueMarker>) = 0
+                override fun installValueRules(file: Long, entries: Array<NativeValueRule>) = NativeRuleInstallResult(0, null, null)
+                override fun installRuleGroups(file: Long, entries: Array<NativeRuleGroup>) = 0
+                override fun enableSemantics(player: Long) = 0
+                override fun captureSemantics(player: Long) = NativeCallResult(0, 99L)
+                override fun semanticInfo(snapshot: Long) = NativeCallResult(0, longArrayOf(1, 1, 0))
+                override fun validateSemantics(player: Long, snapshot: Long) = 0
+                override fun freeSemantics(snapshot: Long) = 0
+                override fun acquireWindow(surface: android.view.Surface) = 5L
+                override fun setPlayerLayoutSize(playerHandle: Long, width: Float, height: Float): Int {
+                    size = floatArrayOf(width, height)
+                    native.contentHeights[2] = if (width < 350f) 320f else 280f
+                    return 0
+                }
+                override fun playerLayoutSize(playerHandle: Long) = NativeCallResult(0, size)
+                override fun snapshotViewModel(viewModelHandle: Long): NativeCallResult<NativeViewModelSnapshot> {
+                    val snapshot = checkNotNull(native.snapshotViewModel(viewModelHandle).value)
+                    val label = native.writes.lastOrNull { it.first == viewModelHandle && it.second.path == "label" }
+                        ?.second?.bytesValue ?: return NativeCallResult(0, snapshot)
+                    return NativeCallResult(0, snapshot.copy(values = snapshot.values + NativeViewModelSnapshotValue(
+                        viewModelHandle, 4, "label", 1, label, 0)))
+                }
+                override fun viewModelCatalog(fileHandle: Long): NativeCallResult<NativeViewModelCatalog> {
+                    val catalog = checkNotNull(native.viewModelCatalog(fileHandle).value)
+                    // Add the B text binding to the shared fake's schema.
+                    val properties = catalog.properties.toMutableList()
+                    properties.add(10, NativeViewModelProperty(2, 4, "label", 1, -1, emptyArray()))
+                    val schemas = catalog.schemas.map {
+                        if (it.index == 2L) it.copy(propertyCount = it.propertyCount + 1)
+                        else if (it.firstProperty >= 10) it.copy(firstProperty = it.firstProperty + 1) else it
+                    }.toTypedArray()
+                    return NativeCallResult(0, catalog.copy(schemas = schemas, properties = properties.toTypedArray()))
+                }
+            }
+            set(surface, "runtime", NuxieRuntime(runtime))
+            set(surface, "usesSystemFrameCallbacks", false)
+            set(current, "mounted", mounted)
+            val view = mounted.mount()
+            set(current, "view", view)
+            root.addView(view)
+            set(layer, "sheet", window)
+            @Suppress("UNCHECKED_CAST")
+            (field(activity, "layers") as MutableList<Any>).add(layer)
+            set(activity, "currentScreen", current)
+            set(activity, "contentRoot", root)
+            window.show()
+            lane.call {}; shadowOf(Looper.getMainLooper()).idle()
+            surface.onSurfaceTextureAvailable(texture, 393, 852)
+        }
+
+        suspend fun frame() {
+            surface.doFrame(clock); clock += 16_000_000L
+            lane.call {}; shadowOf(Looper.getMainLooper()).idle()
+            surface.onSurfaceTextureUpdated(texture); lane.call {}
+            (field(current, "failure") as? Throwable)?.let { throw AssertionError("Activity Screen failed", it) }
+            assertTrue(failures.joinToString { it.stackTraceToString() }, failures.isEmpty())
+        }
+
+        suspend fun text(value: String) {
+            mounted.updateRowRuntimeValues(checkNotNull(prepared.screenId),
+                mapOf("label" to NuxieViewModelScalarValue.StringValue(value)))
+        }
+
+        suspend fun navigate(target: PreparedPresentation, cancel: Boolean = false, frameBeforeCommit: Boolean = false) {
+            val next = screen(target)
+            set(next, "mounted", mounted)
+            set(next, "view", field(current, "view"))
+            set(next, "ownsMounted", false)
+            mounted.prepareRow(target, next)
+            if (target.transition != null) coroutineScope {
+                val before = checkNotNull(prepared.layerContentHeight.get())
+                lane.call { native.trace.clear() }
+                val step = async(start = CoroutineStart.UNDISPATCHED) { mounted.navigateLayer(target, target.isBack) }
+                withTimeout(5_000) {
+                    while (!lane.call { native.trace.any { it.startsWith("begin:") } }) { frame(); yield() }
+                }
+                frame()
+                assertFalse("Reverse completion has not landed", step.isCompleted)
+                assertHeight(before)
+                // No completion events: the normal watchdog lands this step after the asserted frame.
+                step.await()
+            } else mounted.navigateLayer(target, target.isBack)
+            if (cancel) {
+                mounted.restoreRow(prepared, checkNotNull(target.screenId))
+                screenClass.getDeclaredMethod("close", Boolean::class.javaPrimitiveType).apply { isAccessible = true }.invoke(next, false)
+            } else {
+                // Navigation.activate transfers the page, replaces the layer Screen and closes the source.
+                if (frameBeforeCommit) frame()
+                set(layer, "screen", next)
+                screenClass.getDeclaredMethod("takeLayerOwnership", screenClass).apply { isAccessible = true }
+                    .invoke(next, current)
+                screenClass.getDeclaredMethod("close", Boolean::class.javaPrimitiveType).apply { isAccessible = true }.invoke(current, false)
+                current = next
+                prepared = target
+                set(activity, "currentScreen", next)
+            }
+        }
+
+        fun assertHeight(expected: Float) {
+            assertEquals(expected, prepared.layerContentHeight.get())
+            assertEquals(expected, field(current, "measuredContentHeight"))
+            assertEquals(expected.toInt(), window.dialog.findViewById<View>(
+                com.google.android.material.R.id.design_bottom_sheet).layoutParams.height)
+        }
+
+        fun close(recreating: Boolean = false) {
+            if (closed) return
+            closed = true
+            screenClass.getDeclaredMethod("close", Boolean::class.javaPrimitiveType).apply { isAccessible = true }.invoke(current, recreating)
+            assertTrue(lane.awaitQuiescence(5_000))
+            texture.release(); window.retire(); controller.destroy()
+        }
+
+        companion object {
+            private fun field(owner: Any, name: String): Any? = owner.javaClass.getDeclaredField(name)
+                .apply { isAccessible = true }.get(owner)
+            private fun set(owner: Any, name: String, value: Any?) = owner.javaClass.getDeclaredField(name)
+                .apply { isAccessible = true }.set(owner, value)
+        }
+    }
 
     @Test fun `forward measures first ordinary frame and Back waits for end removal and next frame`() = runBlocking {
         checkPreparation(fitContent, covered = false, hasSize = true) { host, lane, texture, window, heights, native, failures ->
