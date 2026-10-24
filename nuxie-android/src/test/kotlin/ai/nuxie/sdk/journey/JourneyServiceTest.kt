@@ -3392,38 +3392,16 @@ class JourneyServiceTest {
         assertAuthoredDismiss("purchase", failReportOnce = true)
     }
 
-    @Test fun `native Back dismissed route defers navigation beyond the layer mutex`() = runBlocking {
-        assertNativeBackLifecycleNavigation(SystemEventNames.SCREEN_DISMISSED)
-    }
-
-    @Test fun `native Back shown route defers navigation beyond the layer mutex`() = runBlocking {
-        assertNativeBackLifecycleNavigation(SystemEventNames.SCREEN_SHOWN)
-    }
-
-    @Test fun `native Back follows the owned offer alternative before revisiting a retained Screen`() = runBlocking {
-        assertNativeBackLifecycleNavigation(null, JourneyOfferAccess.Decision.ALREADY_ENTITLED)
-    }
-
-    @Test fun `native Back follows the unknown offer alternative before revisiting a retained Screen`() = runBlocking {
-        assertNativeBackLifecycleNavigation(null, JourneyOfferAccess.Decision.UNKNOWN)
-    }
-
-    @Test fun `native Back still presents the retained row when its offer remains eligible`() = runBlocking {
-        assertNativeBackLifecycleNavigation(null, JourneyOfferAccess.Decision.ELIGIBLE)
-    }
-
     @Test fun `authored Back follows the owned offer alternative after access changes`() = runBlocking {
-        assertNativeBackLifecycleNavigation(null, JourneyOfferAccess.Decision.ALREADY_ENTITLED, authoredBack = true)
+        assertAuthoredBackOfferNavigation(JourneyOfferAccess.Decision.ALREADY_ENTITLED)
     }
 
     @Test fun `authored Back follows the unknown offer alternative after access changes`() = runBlocking {
-        assertNativeBackLifecycleNavigation(null, JourneyOfferAccess.Decision.UNKNOWN, authoredBack = true)
+        assertAuthoredBackOfferNavigation(JourneyOfferAccess.Decision.UNKNOWN)
     }
 
-    private suspend fun assertNativeBackLifecycleNavigation(eventName: String?, offerDecision: JourneyOfferAccess.Decision? = null,
-        authoredBack: Boolean = false) {
+    private suspend fun assertAuthoredBackOfferNavigation(offerDecision: JourneyOfferAccess.Decision) {
         val expectedScreen = when (offerDecision) {
-            null -> "screen_after"
             JourneyOfferAccess.Decision.ELIGIBLE -> "screen_welcome"
             JourneyOfferAccess.Decision.ALREADY_ENTITLED -> "screen_owned"
             JourneyOfferAccess.Decision.UNKNOWN -> "screen_unknown"
@@ -3450,11 +3428,8 @@ class JourneyServiceTest {
             "routes" to Json.parseToJsonElement("""[
                 {"host":{"kind":"screen","screenId":"screen_welcome"},"eventName":"forward","entryStepId":"forward"},
                 {"host":{"kind":"screen","screenId":"screen_details"},"eventName":"back","entryStepId":"back"}
-            ]""").jsonArray.let { routes -> if (eventName == null) routes else JsonArray(routes + buildJsonObject {
-                put("host", buildJsonObject { put("kind", "screen"); put("screenId", if (eventName == SystemEventNames.SCREEN_SHOWN) "screen_welcome" else "screen_details") })
-                put("eventName", eventName); put("entryStepId", "routed")
-            }) },
-            "offers" to if (offerDecision == null) JsonArray(emptyList()) else Json.parseToJsonElement("""[
+            ]"""),
+            "offers" to Json.parseToJsonElement("""[
                 {"screenId":"screen_welcome","placementIds":["golden:monthly"],"alreadyEntitledStepId":"owned","unknownStepId":"unknown"}]
             """),
             "screens" to Json.parseToJsonElement("""[{"id":"screen_welcome"},{"id":"screen_details"},{"id":"screen_after"},{"id":"screen_owned"},{"id":"screen_unknown"}]""")))
@@ -3473,7 +3448,7 @@ class JourneyServiceTest {
         val presentations = ExperiencePresentationService(emit = { _, _, _ -> }, scope = scope,
             runtimeAvailable = { true }, currentDistinctId = identity::distinctId, launch = launched::add)
         val contents = CopyOnWriteArrayList<ai.nuxie.sdk.presentation.PreparedPresentation>()
-        val nativeBackStarted = java.util.concurrent.atomic.AtomicBoolean()
+        val backStarted = java.util.concurrent.atomic.AtomicBoolean()
         val routed = CompletableDeferred<Unit>()
         fun host(id: String): ai.nuxie.sdk.presentation.PresentationScreenHandle = object : ai.nuxie.sdk.presentation.PresentationScreenHandle {
             var reason: CloseReason? = null
@@ -3488,7 +3463,7 @@ class JourneyServiceTest {
                     override fun activate() {
                         PresentationRegistry.attach(target, host(target)); PresentationRegistry.detach(id, source)
                         PresentationRegistry.reportFirstFrame(target)
-                        if (nativeBackStarted.get() && content.screenId == expectedScreen) routed.complete(Unit)
+                        if (backStarted.get() && content.screenId == expectedScreen) routed.complete(Unit)
                     }
                     override suspend fun abort() = Unit
                 }
@@ -3507,12 +3482,8 @@ class JourneyServiceTest {
                 val showing = scope.async {
                     presentations.presentJourney(request.fences, release, request.screenId, request.journeyId, request.ownerDistinctId, request.reservation,
                         acquire = { AcquiredJourneyRelease(release.identity, mapOf("renders/main.riv" to file), file, protection = Closeable {}) },
-                        onScreenChanged = { id ->
-                            // Only the native revisit consumes this route, not the first reveal.
-                            if (!nativeBackStarted.get() && eventName == SystemEventNames.SCREEN_SHOWN) true else request.onScreenChanged(id)
-                        }, onScreenDismissed = request.onScreenDismissed, onEmissionBatch = request.onEmissionBatch,
-                        onPresentationRevealed = request.onPresentationRevealed, onOutcome = request.onOutcome,
-                        withPresentationCallbacks = request.withPresentationCallbacks, onBackNavigation = request.onBackNavigation)
+                        onScreenChanged = request.onScreenChanged, onScreenDismissed = request.onScreenDismissed, onEmissionBatch = request.onEmissionBatch,
+                        onPresentationRevealed = request.onPresentationRevealed, onOutcome = request.onOutcome)
                 }
                 if (requests.size == 1) {
                     withTimeout(5_000) { while (launched.isEmpty()) kotlinx.coroutines.delay(10) }
@@ -3550,21 +3521,21 @@ class JourneyServiceTest {
             withTimeout(5_000) {
                 while (presentations.layerScreenIds() != listOf(listOf("screen_welcome", "screen_details"))) kotlinx.coroutines.delay(10)
             }
-            if (offerDecision != null) access.set(when (offerDecision) {
+            access.set(when (offerDecision) {
                 JourneyOfferAccess.Decision.UNKNOWN -> null
                 JourneyOfferAccess.Decision.ALREADY_ENTITLED -> ai.nuxie.sdk.features.FeatureAccess(true, true, null, ai.nuxie.sdk.features.FeatureType.BOOLEAN)
                 JourneyOfferAccess.Decision.ELIGIBLE -> access.get()
             })
-            nativeBackStarted.set(true)
-            if (authoredBack) {
+            backStarted.set(true)
+            run {
                 val active = requests.last()
                 assertEquals(JourneyEmissionBatchResult.ACCEPTED, active.onEmissionBatch(JourneyScreenEmissionBatch(active.journeyId,
                     1, "authored-back", JourneyScreenEmissionSource("screen_details", "back"),
                     listOf(JourneyScreenEmission("back-event", 1, 100_002L, "back", JsonObject(emptyMap())))), null))
-            } else assertTrue(checkNotNull(contents.last().requestBack).invoke())
+            }
             assertTrue("Back must reach $expectedScreen through Journey eligibility and its lifecycle callback boundary",
                 kotlinx.coroutines.withTimeoutOrNull(2_000) { routed.await(); true } == true)
-            if (offerDecision != null) {
+            run {
                 assertEquals(listOf("screen_details", expectedScreen), contents.map { it.screenId })
                 assertEquals(offerDecision == JourneyOfferAccess.Decision.ELIGIBLE, contents.last().isBack)
                 if (offerDecision == JourneyOfferAccess.Decision.ELIGIBLE) assertSame(retained, contents.last().retainedViewModel.get())

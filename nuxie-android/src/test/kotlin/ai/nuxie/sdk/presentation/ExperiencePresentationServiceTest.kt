@@ -2746,12 +2746,6 @@ class ExperiencePresentationServiceTest {
         assertEquals("back-leave", resolved.outgoingCompletionEvent)
         assertEquals("pair.reverse", resolved.id)
         show("screen_details", push)
-        assertTrue(checkNotNull(prepared.last().requestBack).invoke())
-        runCurrent()
-        assertEquals("screen_welcome", service.journeyScreenId(JourneyPresentationOwner("journey-1", "customer-1")))
-        assertEquals("screen_welcome" to "screen_welcome", revealSources.last())
-        assertTrue(prepared.last().isBack)
-        show("screen_details", push)
         val legacy = Json.parseToJsonElement("""{"type":"fade"}""").jsonObject
         assertEquals(JourneyPresentationActionResult.Navigate("screen_welcome"), service.dispatchJourneyAction(
             JourneyPresentationOwner("journey-1", "customer-1"), JsonObject(mapOf("type" to JsonPrimitive("back"), "transition" to legacy)), "legacy-back"))
@@ -2760,7 +2754,11 @@ class ExperiencePresentationServiceTest {
         service.dismissFromHost("customer-1")
     }
 
-    @Test fun pushOpensPageAndBackPopsRetainedLowerPage() = runTest {
+    @Test fun pushOpensPageAndBackPopsRetainedLowerPage() = assertPageBack()
+    @Test fun backTwoFromABAOnlyRetiresUnreachableBWithoutNavigation() = assertPageBack(3)
+    @Test fun backTwoFromABABTrimsVisitsAndKeepsReachableRowsWithoutNavigation() = assertPageBack(4)
+
+    private fun assertPageBack(repeatedVisits: Int = 0) = runTest {
         val signed = renderedJourneyRelease("text-input-navigation.json")
         val envelope = signed.javaClass.getDeclaredField("envelope").apply { isAccessible = true }.get(signed)
             as ai.nuxie.sdk.experiences.JourneyReleaseEnvelope
@@ -2776,6 +2774,8 @@ class ExperiencePresentationServiceTest {
         var windowPagesToClose = 1
         val shownScreens = mutableListOf<String>()
         val pageOrder = mutableListOf<String>()
+        val retiredHistories = mutableListOf<List<String>>()
+        var retainedA: PreparedPresentation? = null
         fun host(id: String): PresentationScreenHandle = object : PresentationScreenHandle {
             var reason: CloseReason? = null
             override fun requestCloseFromService(reason: CloseReason): Boolean { this.reason = reason; return true }
@@ -2783,10 +2783,15 @@ class ExperiencePresentationServiceTest {
             override fun finishAfterServiceClose() {
                 if (reason != CloseReason.JourneyNavigation) PresentationRegistry.detach(id, this)
             }
-            override suspend fun cutCoveredPage(screenId: String, history: List<String>): PreparedPresentation {
+            override suspend fun updatePageHistory(history: List<String>) { retiredHistories += history }
+            override suspend fun cutCoveredPage(target: PreparedPresentation): PreparedPresentation {
                 assertTrue(id != pages.last())
-                pageOrder += "hidden-cut:$screenId"
-                return checkNotNull(PresentationRegistry.resolve(id)).copy(screenId = screenId, transition = null, pageHistory = history)
+                pageOrder += "hidden-cut:${target.screenId}"
+                assertEquals("screen_welcome", target.screenId)
+                assertSame(retainedA?.retainedViewModel, target.retainedViewModel)
+                assertSame(retainedA?.textInputState, target.textInputState)
+                assertSame(retainedA?.screenLifecycle, target.screenLifecycle)
+                return target
             }
             override suspend fun dismissLayerFromJourney(): Boolean {
                 pageOrder += "pop"
@@ -2841,10 +2846,33 @@ class ExperiencePresentationServiceTest {
             presentation.await()
         }
         show("screen_welcome")
+        retainedA = PresentationRegistry.resolve(pages.single())
         show("screen_details")
         val lower = pages.single()
         val lowerHost = hosts.getValue(lower)
         val lowerContent = checkNotNull(PresentationRegistry.resolve(lower))
+        if (repeatedVisits > 0) {
+            show("screen_welcome")
+            if (repeatedVisits == 4) show("screen_details")
+            val count = prepared.size
+            val active = checkNotNull(PresentationRegistry.resolve(pages.single()))
+            val phase = active.screenLifecycle.phase
+            val owner = JourneyPresentationOwner("journey-1", "customer-1")
+            assertEquals(JourneyPresentationActionResult.Handled, service.dispatchJourneyAction(owner,
+                Json.parseToJsonElement("""{"type":"back","steps":2}""").jsonObject, "same-screen-back"))
+            val expected = if (repeatedVisits == 3) listOf("screen_welcome") else listOf("screen_welcome", "screen_details")
+            assertEquals(listOf(expected), service.layerScreenIds())
+            assertEquals(listOf(expected), retiredHistories)
+            assertEquals(expected, PresentationRegistry.resolve(pages.single())?.pageHistory)
+            assertEquals(count, prepared.size)
+            assertEquals(phase, active.screenLifecycle.phase)
+            assertEquals(if (repeatedVisits == 3) JourneyPresentationActionResult.Handled
+                else JourneyPresentationActionResult.Navigate("screen_welcome"), service.dispatchJourneyAction(owner,
+                    Json.parseToJsonElement("""{"type":"back"}""").jsonObject, "following-back"))
+            service.dismissFromHost("customer-1")
+            pages.forEach { id -> PresentationRegistry.detach(id, hosts.getValue(id)) }
+            return@runTest
+        }
         show("screen_welcome", Json.parseToJsonElement("""{"type":"push"}""").jsonObject)
         assertEquals(listOf(listOf("screen_welcome", "screen_details"), listOf("screen_welcome")), service.layerScreenIds())
         assertTrue(prepared.last().opensLayer); assertTrue(prepared.last().isPushPage)
