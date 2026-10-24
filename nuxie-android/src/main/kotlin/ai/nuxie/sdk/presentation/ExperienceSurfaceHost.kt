@@ -163,13 +163,6 @@ internal class ExperienceSurfaceHost(
         } + prepared.commerceValues.get())
     }
 
-    internal fun takePageIncomingOnLane(page: ExperienceInteractivePage, target: String, source: String, isBack: Boolean) {
-        page.takeIncomingOnLane(target, source, isBack, nextCorrelationId++) { step ->
-            captureLayerStep(step)
-            publishSteps()
-        }
-    }
-
     internal suspend fun selectLayerRow(screenId: String) = layerOperation { layer ->
         activeRowId = screenId
         viewModelState = layer.valuesOnLane(screenId)
@@ -218,10 +211,7 @@ internal class ExperienceSurfaceHost(
 
     internal suspend fun restoreLayerRow(sourceId: String, targetId: String, keepTarget: Boolean = false) = layerOperation { layer ->
         if (sourceId != targetId) {
-            layer.cancelStepOnLane(sourceId, targetId, nextCorrelationId++) { step ->
-                captureLayerStep(step)
-                publishSteps()
-            }
+            layer.cancelStepOnLane(sourceId, targetId)
             val targetMounted = targetId in layer.mountedScreenIdsOnLane()
             // Cancelled preparation may not have created the target row.
             layer.setPhasesOnLane(listOfNotNull((targetId to ExperienceScreenLifecycle.Phase.HIDDEN).takeIf { targetMounted },
@@ -231,7 +221,6 @@ internal class ExperienceSurfaceHost(
                 else layer.removeOnLane(targetId)
             }
         }
-        publishSteps()
     }
 
     private var videoPlayback: ExperienceVideoPlayback? = null

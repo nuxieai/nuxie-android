@@ -39,9 +39,10 @@ class ExperienceLayerSurfaceFailureTest {
         }
     }
 
-    @Test fun `mount and ordinary steps deliver takeoff and landing commands once in order`() = runBlocking {
+    @Test fun `row mutations defer pending events and commands to the first ordinary frame exactly once`() = runBlocking {
         withSurface { surface, page, native, lane ->
             val commands = mutableListOf<String>()
+            val events = mutableListOf<String>()
             lane.call {
                 set(surface, "firstFrameComposed", true)
                 set(surface, "listener", object : ExperienceSurfaceHost.Listener {
@@ -51,14 +52,24 @@ class ExperienceLayerSurfaceFailureTest {
                         snapshot: NuxieViewModelSnapshot, saves: List<ExperienceResponseSaveRequest>) {
                         assertEquals("a", screenId)
                         commands += outcome.hostCommands.map { it.name }
+                        events += outcome.events.map { it.name }
                     }
                 })
-                surface.takePageIncomingOnLane(page, "b", "a", false)
+                native.events = arrayOf(NativeRuntimeEvent(0, 0, "pending", "", "", 0f, emptyArray(), 200))
+                native.trace.clear()
+                page.takeIncomingOnLane("b", "a", false)
                 page.beginOnLane("b", "pair"); page.endOnLane("b", "pair")
-                // The retained move supplies the next normal result, before its own phase batch.
-                surface.takePageIncomingOnLane(page, "a", "b", false)
+                // Row mutations never drain commands; the first ordinary frame does.
+                page.takeIncomingOnLane("a", "b", false)
+                assertTrue(commands.isEmpty())
+                assertTrue(events.isEmpty())
+                assertFalse(native.trace.any { it.startsWith("step:") })
+                captureAndPublish(surface, page.stepOnLane(0.016))
+                assertEquals(listOf("pending"), events)
                 assertEquals(listOf("takeoff", "landing"), commands)
-                surface.takePageIncomingOnLane(page, "b", "a", false)
+                page.takeIncomingOnLane("b", "a", false)
+                captureAndPublish(surface, page.stepOnLane(0.016))
+                assertEquals(listOf("pending"), events)
                 assertEquals(listOf("takeoff", "landing"), commands)
             }
         }
@@ -446,14 +457,14 @@ class ExperienceLayerSurfaceFailureTest {
                     page.stepOnLane(0.0)
                     native.traceListMutations = true
                     native.trace.clear()
-                    native.onStep = { assertEquals(listOf("b", "a"), page.mountedScreenIdsOnLane()) }
                 }
                 if (covered) mounted.cutCoveredPage(target, listener)
                 else {
                     mounted.prepareRow(target, listener)
                     mounted.navigateLayer(target, isBack = true)
                 }
-                assertEquals(listOf("insert:1", "move:1:0", "step:0.0"), native.trace.take(3))
+                assertEquals(listOf("insert:1", "move:1:0", "begin:B:null"), native.trace.take(3))
+                assertFalse(native.trace.any { it.startsWith("step:") })
                 assertEquals(listOf("b"), page.mountedScreenIds())
             } finally {
                 native.onStep = {}
@@ -588,7 +599,7 @@ class ExperienceLayerSurfaceFailureTest {
                                 batches++
                                 if (ended) currentCoroutineContext().cancel()
                             }
-                            override suspend fun takeIncoming() { mutations += { surface.takePageIncomingOnLane(it, "b", "a", false) } }
+                            override suspend fun takeIncoming() { mutations += { it.takeIncomingOnLane("b", "a", false) } }
                             override suspend fun phases(values: List<Pair<String, ExperienceScreenLifecycle.Phase>>, transition: String) {
                                 mutations += { it.setPhasesOnLane(values, transition) }
                             }
@@ -620,11 +631,11 @@ class ExperienceLayerSurfaceFailureTest {
             if (keepTarget) {
                 assertTrue(page.isCollapsed("b"))
                 assertEquals(NuxieViewModelScalarValue.StringValue("hidden"), page.lifecycle("b")["screen/phase"])
-                assertTrue(native.trace.indexOf("move:1:0") < native.trace.indexOf("step:0.0"))
+                assertTrue(native.trace.indexOf("move:1:0") < native.trace.indexOf("begin:A:null"))
             }
             surface.layerOperation {
                 it.prepareOnLane("b")
-                surface.takePageIncomingOnLane(it, "b", "a", false)
+                it.takeIncomingOnLane("b", "a", false)
                 it.beginOnLane("b", null); it.endOnLane("b", null)
                 it.retireOnLane(setOf("a", "b"), "b")
                 it.setPhasesOnLane(listOf("a" to ExperienceScreenLifecycle.Phase.HIDDEN, "b" to ExperienceScreenLifecycle.Phase.ACTIVE))
