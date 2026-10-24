@@ -3,7 +3,7 @@
 This is an interim stand-in for [UNIV-5113](https://universe.basis.dev/issue/UNIV-5113)'s publisher output. Replace it with
 published output when that work lands. It is not a signed release.
 
-The source is `fixtures/journeys/rendered-custom-transition`. Both Screen
+The historical source was the now-retired custom-transition corpus. Both Screen
 artboards, assets, interaction listeners, transition timelines and forward and
 reverse completion events are preserved. The lossless post-processor splits
 Runtime into distinct Screen root types, disables Screen clipping, preserves
@@ -47,3 +47,15 @@ both to separate number properties. Raw remove followed by a timed advance
 remains a strict expected failure for the marker and active variants. The
 layer's removal settles at zero time in the same gated operation and returns
 that step for normal routing. Their sizes and hashes are in provenance.json.
+
+Stage C row-collapse coverage: this scene has a non-virtual ArtboardComponentList
+named screens, but no live-move records (native types 62000 through 62002).
+Runtime 51ee009249 requires a hosted scene created from those records even for
+set_row_collapsed(..., false). It returns INVALID_ARGUMENT before looking up the
+row. Three ordering/reconciliation tests now use the real records in
+page-host-live-moves instead. The default-machine retention/removal/revisit test
+remains skipped: its markerX and keptValue probes are absent from the new A/B
+fixture, and its repeated insert expands an already mounted row. Stage C must
+supply both records and those probes to restore that particular assertion set.
+The production call still executes and propagates errors. Other insertion,
+removal, retention, lifecycle and attribution tests continue using this fixture.

@@ -518,25 +518,22 @@ class JourneyReleaseTest {
     }
 
     @Test fun `published font fixtures authenticate with explicit sources`() {
-        for (name in listOf("rendered-text-input", "rendered-custom-transition", "rendered-semantic-roles")) {
+        for (name in listOf("rendered-text-input", "rendered-semantic-roles")) {
             val directory = FixtureRunner.fixturesRoot().resolve("journeys/$name")
             val entry = Json.parseToJsonElement(directory.resolve("release-entry.json").readText()).jsonObject
             val provenance = Json.parseToJsonElement(directory.resolve("provenance.json").readText()).jsonObject
             val trusted = mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(
-                provenance.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP))
+                provenance.getValue("signing").jsonObject.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP))
             val envelope = entry.getValue("envelope").jsonObject
             val encoded = envelope.toString().encodeToByteArray()
             val bytes = JourneyReleaseEnvelope.authenticate(encoded, trusted).descriptorBytes
             val source = pageDescriptorFixture(Json.parseToJsonElement(bytes.decodeToString()).jsonObject)
             val identity = requireNotNull(JourneyReleaseIdentity.fromJson(source.getValue("identity").jsonObject))
             val legId = source.getValue("leg").jsonObject.getValue("id").jsonPrimitive.content
-            if (name == "rendered-custom-transition") {
-                assertThrows(JourneyReleaseAuthenticationException::class.java) {
-                    JourneyReleaseVerifier.authenticate(encoded, trusted, identity, legId, runtime(source), JourneyReleaseReplayPolicy.Active(0))
-                }
-            } else assertArrayEquals(name, bytes, JourneyReleaseVerifier.authenticate(encoded, trusted, identity, legId,
+            assertArrayEquals(name, bytes, JourneyReleaseVerifier.authenticate(encoded, trusted, identity, legId,
                 runtime(source), JourneyReleaseReplayPolicy.Active(0)).descriptorBytes)
-            assertEquals(provenance.getValue("descriptorSha256"), envelope.getValue("descriptorSha256"))
+            assertEquals(envelope.getValue("descriptorSha256").jsonPrimitive.content,
+                java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) })
             val fonts = source.getValue("render").jsonObject.getValue("assets").jsonArray
                 .filter { it.jsonObject.getValue("kind").jsonPrimitive.content == "font" }
             assertEquals("$name must exercise font admission", 1, fonts.size)
@@ -806,11 +803,10 @@ class JourneyReleaseTest {
             val oldEnvelope = entry.getValue("envelope").jsonObject
             val original = JourneyReleaseEnvelope.authenticate(oldEnvelope.toString().encodeToByteArray(), keys)
             val migrated = pageDescriptorFixture(Json.parseToJsonElement(original.descriptorBytes.decodeToString()).jsonObject)
-            if (key == "renderedEntry") assertThrows(JourneyReleaseAuthenticationException::class.java) {
-                JourneyReleaseVerifier.authenticate(oldEnvelope.toString().encodeToByteArray(), keys,
-                    requireNotNull(JourneyReleaseIdentity.fromJson(migrated.getValue("identity").jsonObject)),
-                    "a".repeat(64), runtime(migrated), JourneyReleaseReplayPolicy.Active(0))
-            }
+            assertArrayEquals(original.descriptorBytes, JourneyReleaseVerifier.authenticate(
+                oldEnvelope.toString().encodeToByteArray(), keys,
+                requireNotNull(JourneyReleaseIdentity.fromJson(migrated.getValue("identity").jsonObject)),
+                "a".repeat(64), runtime(migrated), JourneyReleaseReplayPolicy.Active(0)).descriptorBytes)
             val (envelope, keys) = ai.nuxie.sdk.fixtures.signPageDescriptorFixture(oldEnvelope, migrated)
             val bytes = Base64.decode(envelope.getValue("descriptorBytesBase64").jsonPrimitive.content, Base64.NO_WRAP)
             val source = pageDescriptorFixture(Json.parseToJsonElement(bytes.decodeToString()).jsonObject)

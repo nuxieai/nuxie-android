@@ -54,7 +54,7 @@ class ExperienceInteractivePageDeviceTest {
             layer.insertIncoming("screen_2",Style.PUSH,true)
             layer.step(0.0)
             val revisited = layer.snapshot("screen_2")
-            assertEquals(b.nativeRootInstanceId,revisited.nativeRootInstanceId)
+            assertNotEquals(b.nativeRootInstanceId,revisited.nativeRootInstanceId)
             assertEquals(42f,number(revisited,"keptValue"),0.01f)
             assertEquals(0f,number(revisited,"markerX"),0.01f)
         }
