@@ -265,14 +265,14 @@ internal class ExperienceSurfaceHost(
         private set
 
     fun dispatchExperienceKeyEvent(event: KeyEvent): Boolean {
-        if (!running || !sceneInputEnabled.get() || released.get()) {
+        if (!running || !sceneInputEnabled.get() || released.get() || failureReported.get()) {
             semanticKeys.clear()
             riveKeys.clear()
             return false
         }
         val code = event.keyCode
         if (rootView.findFocus()?.onCheckIsTextEditor() == true) {
-            riveKeys.clear()
+            if (riveKeys.isNotEmpty()) withdrawSceneInput()
             val authoredTab = code == KeyEvent.KEYCODE_TAB &&
                 (event.hasNoModifiers() || event.hasModifiers(KeyEvent.META_SHIFT_ON))
             if (!authoredTab) { semanticKeys.clear(); return false }
@@ -327,6 +327,8 @@ internal class ExperienceSurfaceHost(
     }
 
     private fun discardFocusInput() {
+        semanticKeys.clear()
+        riveKeys.clear()
         focusGeneration.incrementAndGet()
         lane.enqueue { focusInput.clear() }
     }
@@ -720,7 +722,6 @@ internal class ExperienceSurfaceHost(
     private var lastSteppedGeneration = -1L
     private val pointerInput = ExperienceRuntimePointerInput(artboardSize)
     private val focusInput = ExperienceFocusInputQueue()
-    private val deliveredKeys = mutableMapOf<Int, NuxieFocusInput.Key>()
     private val focusGeneration = AtomicLong()
     private var queuedFocusGeneration = 0L
 
@@ -1106,15 +1107,8 @@ internal class ExperienceSurfaceHost(
         val outcome = stepAndRefreshFocus {
             checkNotNull(player).stepTyped(elapsedSeconds = 0.0, pointers = pointers, focusInputs = inputs, correlationId = correlationId)
         }
-        recordDeliveredKeys(inputs)
         val root = captureStepSnapshot(outcome, correlationId)
         root?.let { retainScreenValues(it) }
-    }
-
-    private fun recordDeliveredKeys(inputs: List<NuxieFocusInput>) {
-        inputs.filterIsInstance<NuxieFocusInput.Key>().forEach { key ->
-            if (key.pressed) deliveredKeys[key.code] = key else deliveredKeys.remove(key.code)
-        }
     }
 
     /** Retained players receive cancellation before phases change, even without another frame. */
@@ -1126,13 +1120,10 @@ internal class ExperienceSurfaceHost(
             pointerInput.reset()
             if (player == null || released.get() || failureReported.get()) return@enqueue
             val pointers = pointerInput.takeBatch()
-            val releases = deliveredKeys.values.map { it.copy(pressed = false, repeated = false) }
             try {
-                if (pointers.isNotEmpty() || releases.isNotEmpty()) {
+                if (pointers.isNotEmpty()) {
                     if (pendingPresentation && !retireSubmission()) return@enqueue
-                    val batches = releases.chunked(ai.nuxie.sdk.runtime.NuxieFocusLimits.INPUTS_PER_STEP)
-                    nativeEditingStep(pointers, batches.firstOrNull().orEmpty())
-                    batches.drop(1).forEach { nativeEditingStep(inputs = it) }
+                    nativeEditingStep(pointers = pointers)
                     publishSteps()
                 }
             } catch (error: Exception) {
@@ -1643,7 +1634,6 @@ internal class ExperienceSurfaceHost(
                                 textRunNames = emptyList(),
                             )
                         }.also {
-                            recordDeliveredKeys(focusBatch)
                             if (layoutStepPending || presentationHeight.measuresContent) {
                                 val size = player.layoutSize()
                                 val bounds = ExperienceArtboardSize(size.first, size.second)
