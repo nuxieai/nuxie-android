@@ -193,8 +193,8 @@ class ExperienceInteractivePageTest {
             assertEquals(77uL, removal.correlationId)
             layer.step(0.5)
             layer.insertIncoming("a", Style.PUSH, true)
-            assertEquals(200L, layer.snapshot("a").nativeRootInstanceId)
-            assertEquals(2, native.allocated)
+            assertNotEquals(200L, layer.snapshot("a").nativeRootInstanceId)
+            assertEquals(3, native.allocated)
         }
     }
     @Test fun `each row routes with its own tables and removal creates no synthetic effects`() = runBlocking {
@@ -321,8 +321,8 @@ class ExperienceInteractivePageTest {
             layer.insertIncoming("a", Style.NONE, false)
             layer.remove("a")
             layer.insertIncoming("a", Style.NONE, false)
-            assertEquals(1, native.allocated)
-            assertFalse(native.writes.any { it.second.path == "keptValue" })
+            assertEquals(2, native.allocated)
+            assertEquals(21.0, native.writes.last { it.second.path == "keptValue" }.second.numberValue.toDouble(), 0.0)
         }
     }
 
@@ -341,8 +341,55 @@ class ExperienceInteractivePageTest {
         }
     }
 
+    @Test fun `removed B rejects native writes and revisits from retained values with a fresh default`() = runBlocking {
+        withLayer { page, native ->
+            page.insertIncoming("a", Style.NONE, false)
+            page.insertIncoming("b", Style.NONE, false)
+            val cached = page.snapshot("b")
+            page.applyValues("b", mapOf("keptValue" to NuxieViewModelScalarValue.NumberValue(42.0)))
+            val old = page.snapshot("b").nativeRootInstanceId
+            page.takeIncoming("a", "b", true)
+            page.begin("a", "pair.reverse"); page.end("a", "pair.reverse")
+            page.retire(setOf("a"), "a")
+            assertTrue(native.freed.contains("values:$old"))
+            native.writes.clear()
+            page.applyRuntimeValues("b", mapOf("env/fontScale" to NuxieViewModelScalarValue.NumberValue(2.0),
+                "env/reduceMotion" to NuxieViewModelScalarValue.BooleanValue(true), "keptValue" to string("ignored")))
+            page.applyJourneyValues("b", mapOf("keptValue" to string("ignored")))
+            page.applyValues("b", mapOf("keptValue" to string("ignored")))
+            page.applyListOperation("b", NativeViewModelWrite(NuxieViewModelMutationKind.LIST_CLEAR, "items"))
+            page.fireTrigger("b", "accepted")
+            page.setPhases(listOf("b" to ExperienceScreenLifecycle.Phase.HIDDEN))
+            native.lane.call {
+                page.applyLifecycleOnLane("b")
+                page.commandOnLane("b") { it.restoreWrites(listOf(NativeViewModelWrite(NuxieViewModelMutationKind.SET_STRING, "text"))) }
+                assertTrue(runCatching { page.valuesOnLane("b") }.exceptionOrNull() is IllegalArgumentException)
+                assertTrue(runCatching { page.insertOnLane("b", 1) }.exceptionOrNull() is IllegalArgumentException)
+                assertFalse(page.canWriteNativeOwnerOnLane(old))
+                assertFalse(page.canWriteNativeOwnerOnLane(old + 1))
+            }
+            assertTrue(runCatching { page.setCollapsed("b", true) }.isFailure)
+            assertTrue(native.writes.isEmpty())
+            assertEquals(old, page.snapshot("b").nativeRootInstanceId)
+            // A stale Journey checkpoint must not override the retained person's value.
+            assertFalse(native.lane.call { page.prepareOnLane("b", snapshot = cached) })
+            page.takeIncoming("b", "a", false)
+            val fresh = page.snapshot("b").nativeRootInstanceId
+            assertNotEquals(old, fresh)
+            native.lane.call {
+                assertFalse(page.canWriteNativeOwnerOnLane(old))
+                assertTrue(page.canWriteNativeOwnerOnLane(fresh))
+            }
+            assertEquals(listOf("a", "b"), page.mountedScreenIds())
+            assertEquals(42.0, native.writes.single { it.first == fresh && it.second.path == "keptValue" }.second.numberValue.toDouble(), 0.0)
+            assertFalse(native.writes.any { it.first == old })
+            assertTrue(native.allocations.all { it.second == null })
+        }
+    }
+
     private suspend fun withLayer(native: RecordingNative = RecordingNative(), body: suspend (ExperienceInteractivePage, RecordingNative) -> Unit) {
         val lane = NuxieRuntimeLane()
+        native.lane = lane
         val file = NuxieRuntimeFile(1, native)
         val descriptor = Json.parseToJsonElement("""{"leg":{"screens":[
             {"id":"a","defaultViewModelName":"A","defaultInstanceId":"alias-a"},
@@ -360,6 +407,7 @@ class ExperienceInteractivePageTest {
     private fun event(name: String, source: Long) = NativeRuntimeEvent(0, 0, name, "", "", 0f, emptyArray(), source)
 
     internal class RecordingNative : NuxieTypedRuntimeNative {
+        lateinit var lane: NuxieRuntimeLane
         val writes = mutableListOf<Pair<Long, NativeViewModelWrite>>()
         val trace = mutableListOf<String>()
         var events = emptyArray<NativeRuntimeEvent>()
@@ -378,6 +426,9 @@ class ExperienceInteractivePageTest {
         val globalBindings = mutableListOf<Pair<String, Long>>()
         var allocated = 0
         var catalogQueries = 0
+        val allocations = mutableListOf<Pair<Int, Int?>>()
+        private val kept = mutableMapOf<Long, Float>()
+        val snapshotOverrides = mutableMapOf<Long, NativeViewModelSnapshot>()
         private val schemas = mutableMapOf(100L to 0)
         private val catalog get() = NativeViewModelCatalog(arrayOf(
             NativeViewModelSchema(0,"\$nuxie.Page",0,1,0,0,-1,false),
@@ -425,12 +476,19 @@ class ExperienceInteractivePageTest {
         override fun playerFocusState(playerHandle: Long) = NativeCallResult(0,NuxieFocusState(false,false))
         override fun newViewModel(fileHandle: Long, schemaIndex: Int, authoredInstanceIndex: Int?): NativeCallResult<Long> {
             if (schemaIndex in setOf(1, 2, 6)) allocated++
-            val id = (schemaIndex + 1) * 100L; schemas[id] = schemaIndex
+            allocations += schemaIndex to authoredInstanceIndex
+            val base = (schemaIndex + 1) * 100L
+            val id = if (base !in schemas) base else base + allocations.count { it.first == schemaIndex } * 10000L
+            schemas[id] = schemaIndex
             return NativeCallResult(0,id)
         }
         override fun snapshotViewModel(viewModelHandle: Long): NativeCallResult<NativeViewModelSnapshot> {
+            check("values:$viewModelHandle" !in freed) { "Read released row" }
+            snapshotOverrides[viewModelHandle]?.let { return NativeCallResult(0, it) }
             val schema = schemas.getValue(viewModelHandle).toLong()
-            val values = if (schema == 0L) arrayOf(value(100,"screens",8)) else arrayOf(value(viewModelHandle,"screen",9,viewModelHandle+1))
+            val values = if (schema == 0L) arrayOf(value(100,"screens",8)) else arrayOf(value(viewModelHandle,"screen",9,viewModelHandle+1)) +
+                if (schema in setOf(1L, 2L, 6L)) arrayOf(NativeViewModelSnapshotValue(viewModelHandle, 2, "keptValue", 2,
+                    byteArrayOf(), 0, numberValue = kept[viewModelHandle] ?: 0f)) else emptyArray()
             val instances = if (schema == 0L) arrayOf(NativeViewModelSnapshotInstance(100,0)) else arrayOf(
                 NativeViewModelSnapshotInstance(viewModelHandle,schema),NativeViewModelSnapshotInstance(viewModelHandle+1,3),NativeViewModelSnapshotInstance(999,3))
             return NativeCallResult(0,NativeViewModelSnapshot(viewModelHandle,instances,values))
@@ -438,6 +496,7 @@ class ExperienceInteractivePageTest {
         override fun mutateViewModel(viewModelHandle: Long, write: NativeViewModelWrite): Int {
             if (failWrites) return 11
             writes += viewModelHandle to write
+            if (write.path == "keptValue" && write.kind == NuxieViewModelMutationKind.SET_NUMBER) kept[viewModelHandle] = write.numberValue
             if (write.kind == NuxieViewModelMutationKind.LIST_REMOVE) trace += "remove"
             return 0
         }
