@@ -152,6 +152,9 @@ internal class NuxieExperienceActivity : Activity() {
         fun takeLayerOwnership(source: Screen) {
             source.ownsMounted = false
             ownsMounted = true
+            // The page may have published through the destination listener before
+            // Navigation.activate transferred the native sheet to this Screen.
+            onPresentationHeight(prepared.layerContentHeight.get())
         }
 
         fun close(changingConfigurations: Boolean) {

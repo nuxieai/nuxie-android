@@ -67,7 +67,9 @@ internal class ExperienceMountedScreen(
             if (!prepared.fitsContentHeight && retained != null) available.copy(height = minOf(available.height, retained))
             else available
         },
-        listener = object : ExperienceSurfaceHost.Listener by listener {
+        listener = object : ExperienceSurfaceHost.Listener {
+            override fun onFirstFrame() = activeListener.onFirstFrame()
+            override fun onPresentationHeight(height: Float?) = activeListener.onPresentationHeight(height)
             override fun onLayoutBounds(bounds: ExperienceArtboardSize) {
                 layoutBounds = bounds
                 textOverlay?.updateLayoutBounds(bounds)
@@ -79,7 +81,7 @@ internal class ExperienceMountedScreen(
             }
             override fun onRuntimeEvent(event: ai.nuxie.sdk.runtime.NuxieRuntimeEvent, viewModelSnapshot: NuxieViewModelSnapshot?) {
                 transitionEvents.receive(event.name)
-                listener.onRuntimeEvent(event, viewModelSnapshot)
+                activeListener.onRuntimeEvent(event, viewModelSnapshot)
             }
             override fun onRuntimeStep(outcome: ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome,
                 correlationId: ULong, viewModelSnapshot: NuxieViewModelSnapshot?, saves: List<ExperienceResponseSaveRequest>) {
@@ -98,6 +100,10 @@ internal class ExperienceMountedScreen(
             override fun onTextInputEvent(inputId: String, event: ExperienceSemanticTextDraft.Event) =
                 activeListener.onTextInputEvent(inputId, event)
             override fun onFailure(error: ExperiencePresentationException) = activeListener.onFailure(error)
+            override fun onTextInputSnapshot(snapshot: NuxieViewModelSnapshot,
+                geometry: ai.nuxie.sdk.runtime.NuxieTextGeometryCapture) = activeListener.onTextInputSnapshot(snapshot, geometry)
+            override fun onSemanticFields(fields: Map<String, ai.nuxie.sdk.runtime.NativeSemanticNode>): Map<Long, View> =
+                activeListener.onSemanticFields(fields)
             override fun onNativeTextFields(fields: List<ExperienceNativeTextField>): Map<Long, View> {
                 textOverlay?.updateNativeFields(fields)
                 val ids = fields.map { it.target.nodeId }.toSet()
