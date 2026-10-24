@@ -485,8 +485,14 @@ class JourneyServiceTest {
         val contract = Json.parseToJsonElement(
             FixtureRunner.fixturesRoot().resolve("journeys/planes/text-input-navigation.json").readText(),
         ).jsonObject
-        val entry = contract.getValue("transitionEntry").jsonObject
-        val catalog = catalog(entry)
+        val originalEntry = contract.getValue("transitionEntry").jsonObject
+        val originalEnvelope = originalEntry.getValue("envelope").jsonObject
+        val original = JourneyReleaseEnvelope.authenticate(originalEnvelope.toString().encodeToByteArray(),
+            mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(contract.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP)))
+        val descriptor = ai.nuxie.sdk.fixtures.pageDescriptorFixture(Json.parseToJsonElement(original.descriptorBytes.decodeToString()).jsonObject)
+        val (signed, localKeys) = ai.nuxie.sdk.fixtures.signPageDescriptorFixture(originalEnvelope, descriptor)
+        val entry = JsonObject(originalEntry + ("envelope" to signed))
+        val catalog = JourneyProfileCatalog(localKeys, JourneyReleaseHighWaterStore(context)) { runtime(entry) }
         val authority = authority(entry)
         catalog.commit("customer", catalog.prepare(profile(releaseEntry = entry), authority))
         val presenter = RecordingJourneyPresenter()
@@ -1364,10 +1370,25 @@ class JourneyServiceTest {
         val snapshot = baseline.copy(releasesByDigest = mapOf(release.descriptorSha256 to release))
         val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
         val launched = CopyOnWriteArrayList<String>()
+        fun nativePage(id: String): ai.nuxie.sdk.presentation.PresentationScreenHandle = object : ai.nuxie.sdk.presentation.PresentationScreenHandle {
+            var reason: CloseReason? = null
+            override fun requestCloseFromService(reason: CloseReason): Boolean { this.reason = reason; return true }
+            override fun screenCloseReason() = reason
+            override fun finishAfterServiceClose() { PresentationRegistry.detach(id, this) }
+            override suspend fun prepareNavigation(target: String, content: ai.nuxie.sdk.presentation.PreparedPresentation) =
+                object : ai.nuxie.sdk.presentation.PreparedScreenNavigation {
+                    override fun activate() {
+                        launched += target
+                        PresentationRegistry.attach(target, nativePage(target))
+                        PresentationRegistry.reportFirstFrame(target)
+                    }
+                    override suspend fun abort() = Unit
+                }
+        }
         val presentations = ExperiencePresentationService(
             emit = { name, properties, _ -> captures += name to properties },
             scope = scope, runtimeAvailable = { true }, currentDistinctId = identity::distinctId,
-            launch = launched::add,
+            launch = { id -> launched += id; PresentationRegistry.attach(id, nativePage(id)) },
         )
         var firstRequest: JourneyPresentationRequest? = null
         val presenter = object : JourneyPresenting {
@@ -1427,13 +1448,10 @@ class JourneyServiceTest {
             val lifecycle = captures.filter { it.first in lifecycleNames }
             assertEquals(1, lifecycle.count { it.first == SystemEventNames.EXPERIENCE_SHOWN })
             assertEquals(listOf(SystemEventNames.SCREEN_SHOWN, SystemEventNames.EXPERIENCE_SHOWN,
-                SystemEventNames.SCREEN_DISMISSED, SystemEventNames.SCREEN_SHOWN), lifecycle.map { it.first })
+                SystemEventNames.SCREEN_SHOWN), lifecycle.map { it.first })
             assertEquals(listOf("screen_welcome", "screen_details"), lifecycle.filter { it.first == SystemEventNames.SCREEN_SHOWN }
                 .map { it.second["screen_id"] })
-            val dismissed = lifecycle.single { it.first == SystemEventNames.SCREEN_DISMISSED }.second
-            assertEquals("screen_welcome", dismissed["screen_id"])
-            assertEquals("screen_details", dismissed["revealing_screen_id"])
-            assertEquals("navigate", dismissed["method"])
+            assertTrue("Push covers the lower page without dismissing it", lifecycle.none { it.first == SystemEventNames.SCREEN_DISMISSED })
             assertEquals(mapOf("journey_id" to request.journeyId, "experience_id" to release.identity.experienceId,
                 "experience_version_id" to release.identity.experienceVersionId),
                 lifecycle.single { it.first == SystemEventNames.EXPERIENCE_SHOWN }.second)

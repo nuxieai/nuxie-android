@@ -58,6 +58,13 @@ class ExperienceScreenTransitionPlanTest {
             val item = value.jsonObject
             val transition = item.getValue("transition").jsonObject
             val action = JsonObject(mapOf("type" to JsonPrimitive("navigate"), "screenId" to JsonPrimitive("one"), "transition" to transition))
+            // The published page contract now refuses height on fullscreen modals.
+            if (transition["present"] == JsonPrimitive("fullscreen") && transition.containsKey("height")) {
+                assertThrows(ai.nuxie.sdk.experiences.JourneyReleaseAuthenticationException::class.java) {
+                    ai.nuxie.sdk.experiences.JourneyGrammar.action(action, setOf("one"), emptySet())
+                }
+                continue
+            }
             ai.nuxie.sdk.experiences.JourneyGrammar.action(action, setOf("one"), emptySet())
             val plan = ExperienceScreenTransitionPlan.resolve(transition, JsonArray(emptyList()), "one", "two")
             assertEquals(ExperienceScreenTransitionPlan.Kind.MODAL, plan.kind)
