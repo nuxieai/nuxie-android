@@ -152,6 +152,10 @@ internal class ExperienceInteractivePage private constructor(
     }
 
     internal fun cancelStepOnLane(source: String) = checked {
+        // A cut may have removed its source before waiting for arrival. Restore a
+        // fresh schema default from the retained snapshot, even if step_end ran
+        // before cancellation was observed. Never reinsert the closed instance.
+        prepareOnLane(source)
         liveStep?.let { (target, transition) ->
             endOnLane(target, transition)
             takeIncomingOnLane(source)
