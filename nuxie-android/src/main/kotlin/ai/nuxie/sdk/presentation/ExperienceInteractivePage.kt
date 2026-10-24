@@ -45,7 +45,6 @@ internal class ExperienceInteractivePage private constructor(
     private val loggedRemovedWrites = mutableSetOf<String>()
     private val collapsed = mutableSetOf<String>()
     private var liveStep: Pair<String, String?>? = null
-    private var rowsNeedReconciliation = false
     private var closed = false
     private var failure: Throwable? = null
 
@@ -91,14 +90,12 @@ internal class ExperienceInteractivePage private constructor(
         require(screenId !in mounted && index == mounted.size) { "New page rows must append" }
         artboard.insertDefaultListItem(contract.listPath, index, valuesOnLane(screenId))
         mounted.add(screenId)
-        rowsNeedReconciliation = true
     }
 
     suspend fun takeIncoming(screenId: String, source: String, isBack: Boolean) =
         lane.call { takeIncomingOnLane(screenId, source, isBack) }
 
-    internal fun takeIncomingOnLane(screenId: String, source: String? = null, isBack: Boolean = false,
-        correlationId: ULong = 0uL, capture: (Step) -> Unit = {}) = checked {
+    internal fun takeIncomingOnLane(screenId: String, source: String? = null, isBack: Boolean = false) = checked {
         val isNew = screenId !in mounted
         if (isNew) insertOnLane(screenId, mounted.size)
         // New forward rows stay on top; every Back uses the outgoing row's position.
@@ -112,17 +109,13 @@ internal class ExperienceInteractivePage private constructor(
                 artboard.moveDefaultListItem(contract.listPath, from, to)
                 mounted.removeAt(from)
                 mounted.add(to, screenId)
-                rowsNeedReconciliation = true
             }
         }
-        // Bindings rebuild hosted rows on step, not on the list notification.
-        // Stay on this lane through expansion and the caller's phase/begin batch.
-        if (rowsNeedReconciliation) capture(stepOnLane(0.0, correlationId = correlationId))
+        // Collapse and begin apply pending list changes using these updated indexes.
         if (screenId in collapsed) setCollapsedOnLane(screenId, false)
     }
 
     internal fun setCollapsedOnLane(screenId: String, value: Boolean) = checked {
-        check(!rowsNeedReconciliation) { "Row indexes must be reconciled before collapse" }
         val index = mounted.indexOf(screenId)
         require(index >= 0) { "Screen is absent from the page" }
         player.setRowCollapsed(contract.listPath, index, value)
@@ -151,21 +144,19 @@ internal class ExperienceInteractivePage private constructor(
         liveStep = null
     }
 
-    internal fun cancelStepOnLane(source: String, target: String, correlationId: ULong = 0uL,
-        capture: (Step) -> Unit = {}) = checked {
+    internal fun cancelStepOnLane(source: String, target: String) = checked {
         liveStep?.let { (incoming, transition) -> endOnLane(incoming, transition) }
         // Retirement may have removed the source, even when step_end already ran.
         // Restore its retained values into a fresh instance before taking it back.
         prepareOnLane(source)
-        takeIncomingOnLane(source, target.takeIf { it in mounted }, isBack = true,
-            correlationId = correlationId, capture = capture)
+        takeIncomingOnLane(source, target.takeIf { it in mounted }, isBack = true)
         beginOnLane(source, null)
         endOnLane(source, null)
     }
 
     /** The new history determines all reachable rows, including repeated visits. */
     internal fun retireOnLane(reachable: Set<String>, active: String) = checked {
-        // Collapse while native indexes still match. Removals reconcile on the next ordinary step.
+        // Collapse applies pending list changes. Removals need no settlement advance.
         mounted.filter { it in reachable && it != active && it !in collapsed }
             .forEach { setCollapsedOnLane(it, true) }
         mounted.filter { it !in reachable }.forEach { removeOnLane(it) }
@@ -349,7 +340,6 @@ internal class ExperienceInteractivePage private constructor(
         mounted.removeAt(index)
         collapsed.remove(screenId)
         captureOnLane(NuxiePlayerStepOutcome(false, emptyList(), emptyList(), emptyList(), emptyList()), correlationId)
-            .also { rowsNeedReconciliation = true }
     }
 
     suspend fun step(elapsedSeconds: Double, pointers: List<NuxiePlayerPointerEvent> = emptyList(),
@@ -375,7 +365,6 @@ internal class ExperienceInteractivePage private constructor(
     }
 
     internal fun captureOnLane(outcome: NuxiePlayerStepOutcome, correlationId: ULong): Step = checked {
-        rowsNeedReconciliation = false
         val captures = mounted.associateWith { row(it).values.captureSnapshot(outcome.viewModelChanges) }
         val snapshots = captures.mapValues { it.value.values }
         val owners = outcome.events.map { owner(it, snapshots) }
