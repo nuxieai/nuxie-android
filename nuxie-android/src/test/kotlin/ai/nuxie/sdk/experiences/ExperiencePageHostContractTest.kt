@@ -2,7 +2,6 @@ package ai.nuxie.sdk.experiences
 
 import ai.nuxie.sdk.fixtures.FixtureRunner
 import ai.nuxie.sdk.runtime.NuxieViewModelCatalog
-import java.util.Base64
 import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
@@ -11,12 +10,17 @@ class ExperiencePageHostContractTest {
     private val cases = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
         .resolve("runtime/layer-host-interim/format-cases.json").readText()).jsonObject
     private fun render(): JsonObject {
-        val entry = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
-            .resolve("journeys/rendered-custom-transition/release-entry.json").readText()).jsonObject
-        val bytes = Base64.getDecoder().decode(entry.getValue("envelope").jsonObject
-            .getValue("descriptorBytesBase64").jsonPrimitive.content)
-        val old = Json.parseToJsonElement(bytes.decodeToString()).jsonObject.getValue("render").jsonObject
-        return ai.nuxie.sdk.fixtures.pageDescriptorFixture(old)
+        // Schema-only input: this does not stand in for a published motion fixture.
+        return Json.parseToJsonElement("""{
+          "renderer":"nux",
+          "nux":{"key":"renders/sha256/${"0".repeat(64)}.nux","sha256":"${"0".repeat(64)}","sizeBytes":1,"contentType":"application/vnd.nuxie.scene"},
+          "assets":[],"textInputs":[],
+          "screens":[{"id":"a","artboardId":"a","artboardName":"a","width":402,"height":874},
+                     {"id":"b","artboardId":"b","artboardName":"b","width":402,"height":874}],
+          "transitions":[{"id":"ab","kind":"page","sourceScreenId":"a","destinationScreenId":"b","durationMs":400,
+            "source":{"completeEventName":"out"},"destination":{"completeEventName":"in"},
+            "reverse":{"durationMs":400,"source":{"completeEventName":"out.reverse"},"destination":{"completeEventName":"in.reverse"}}}]
+        }""").jsonObject
     }
     @Test fun `page declarations validate and retired host and transition fields are refused`() {
         val render = render()

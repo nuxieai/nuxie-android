@@ -48,7 +48,7 @@ class PublishedRunValuesDeviceTest {
                 try {
                     instrumentation.runOnMainSync {
                         host = ExperienceSurfaceHost(activity, run.lane, clearColor = 0xff112233.toInt(),
-                            artboardSize = ExperienceArtboardSize(393f, 852f), usesSystemFrameCallbacks = false,
+                            artboardSize = ExperienceArtboardSize(402f, 874f), usesSystemFrameCallbacks = false,
                             runValues = run, listener = object : ExperienceSurfaceHost.Listener {
                                 override fun onFirstFrame() {
                                     image.set(checkNotNull(host).bitmap)
@@ -60,7 +60,7 @@ class PublishedRunValuesDeviceTest {
                             "env/reduceMotion" to NuxieViewModelScalarValue.BooleanValue(motion),
                             "safeArea/top" to NuxieViewModelScalarValue.NumberValue(if (motion) 59.0 else 0.0)))
                         checkNotNull(host).loadArtboard(PublishedRunValuesFixture.bytes, "device",
-                            PublishedRunValuesFixture.descriptor, onLoaded = { success ->
+                            PublishedRunValuesFixture.descriptor, layerScreen = PublishedRunValuesFixture.screen("device"), onLoaded = { success ->
                                 if (!success) failure.compareAndSet(null, AssertionError("F4 device did not load"))
                                 loaded.countDown()
                             })
@@ -151,7 +151,7 @@ class PublishedRunValuesDeviceTest {
                     }
                     instrumentation.runOnMainSync {
                         host = ExperienceSurfaceHost(activity, run.lane, clearColor = 0xff112233.toInt(),
-                            artboardSize = ExperienceArtboardSize(393f, 852f), usesSystemFrameCallbacks = false,
+                            artboardSize = ExperienceArtboardSize(402f, 874f), usesSystemFrameCallbacks = false,
                             runValues = run, listener = object : ExperienceSurfaceHost.Listener {
                                 override fun onFirstFrame() {
                                     image.set(checkNotNull(host).bitmap)
@@ -160,7 +160,7 @@ class PublishedRunValuesDeviceTest {
                                 override fun onFailure(error: ExperiencePresentationException) { failure.set(error) }
                             })
                         checkNotNull(host).loadArtboard(PublishedRunValuesFixture.bytes, "level",
-                            PublishedRunValuesFixture.descriptor, onLoaded = { success ->
+                            PublishedRunValuesFixture.descriptor, layerScreen = PublishedRunValuesFixture.screen("level"), onLoaded = { success ->
                                 if (!success) failure.compareAndSet(null, AssertionError("F4 did not load"))
                                 loaded.countDown()
                             })
@@ -207,6 +207,16 @@ class PublishedRunValuesDeviceTest {
 internal object PublishedRunValuesFixture {
     fun read(name: String) = InstrumentationRegistry.getInstrumentation().context.assets
         .open("runtime/run-values/$name").use { it.readBytes() }
+    // loadArtboard receives the scene bytes directly; only the page's metadata is used here.
+    fun screen(name: String): PreparedPresentation {
+        val source = descriptor
+        val screen = source.getValue("render").jsonObject.getValue("screens").jsonArray.single {
+            it.jsonObject.getValue("artboardName") == JsonPrimitive(name)
+        }.jsonObject
+        return PreparedPresentation(File("fixture.nux"), name, 0xff112233.toInt(), PresentationShell.FullScreen(),
+            screen.getValue("id").jsonPrimitive.content, source, artboardSize = ExperienceArtboardSize(
+                screen.getValue("width").jsonPrimitive.float, screen.getValue("height").jsonPrimitive.float))
+    }
     val bytes get() = read("screen.riv")
     val expectations get() = Json.parseToJsonElement(read("expectations.json").decodeToString()).jsonObject
     val descriptor get() = Json.parseToJsonElement(read("release.json").decodeToString()).jsonObject

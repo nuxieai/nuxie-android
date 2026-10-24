@@ -56,7 +56,9 @@ class TestStoreDeviceTest {
             instrumentation.waitForIdleSync()
             Nuxie.overridesForTesting = NuxieCore.Overrides(
                 transport = object : HttpTransport {
-                    override fun execute(request: HttpTransport.Request) = HttpTransport.Response(503, ByteArray(0))
+                    override fun execute(request: HttpTransport.Request) = if (request.url.path == "/purchase")
+                        HttpTransport.Response(200, """{"success":true,"features":[]}""".encodeToByteArray())
+                    else HttpTransport.Response(503, ByteArray(0))
                 },
                 requestInitialProfileRefresh = false,
                 billingClientFactory = BillingClientAdapterFactory {
@@ -160,7 +162,7 @@ class TestStoreDeviceTest {
                     entry.getValue("envelope").jsonObject.getValue("descriptorBytesBase64").jsonPrimitive.content,
                     android.util.Base64.NO_WRAP).decodeToString()).jsonObject
                 val render = descriptor.getValue("render").jsonObject
-                val artifacts = (render.getValue("assets").jsonArray.toList() + render.getValue("nux"))
+                val artifacts = (render.getValue("assets").jsonArray.filter { it.jsonObject["key"] != null } + render.getValue("nux"))
                     .associate { value -> value.jsonObject.let { it.getValue("key").jsonPrimitive.content to it } }
                 val appId = locator.getValue("appId").jsonPrimitive.content
                 val environment = locator.getValue("environment").jsonPrimitive.content
@@ -186,6 +188,8 @@ class TestStoreDeviceTest {
                                 val artifact = artifacts.getValue(request.url.path.removePrefix("/"))
                                 return HttpTransport.Response(200, bytes, mapOf("Content-Type" to artifact.getValue("contentType").jsonPrimitive.content))
                             }
+                            if (request.url.path == "/purchase") return HttpTransport.Response(200,
+                                """{"success":true,"features":[]}""".encodeToByteArray())
                             return HttpTransport.Response(503, ByteArray(0))
                         }
                     },

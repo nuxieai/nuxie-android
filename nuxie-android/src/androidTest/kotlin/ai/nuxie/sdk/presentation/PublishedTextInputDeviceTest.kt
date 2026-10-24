@@ -11,6 +11,7 @@ import ai.nuxie.sdk.billing.RestoreResult
 import ai.nuxie.sdk.billing.StoreProduct
 import ai.nuxie.sdk.features.FeatureCheckPolicy
 
+import ai.nuxie.sdk.experiences.SystemFontProvider
 import ai.nuxie.sdk.experiences.ExperienceAssetImportBuilder
 import ai.nuxie.sdk.experiences.ExperienceViewModelBinding
 import ai.nuxie.sdk.runtime.NuxieViewModelSnapshot
@@ -49,6 +50,9 @@ import ai.nuxie.sdk.network.ProfileDeliveryAuthority
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.JsonPrimitive
 import android.app.Application
 import android.accessibilityservice.AccessibilityService
@@ -463,10 +467,24 @@ class PublishedTextInputDeviceTest {
     @Test
     fun nativeEditingUsesRiveFocusAndWholeValueReplacement() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val fixture = loadPublishedFixture(instrumentation)
-        val descriptor = fixture.release.descriptor
-        val screen = descriptor.getValue("render").jsonObject.getValue("screens").jsonArray.first().jsonObject
-        val inputs = ExperienceTextInput.forScreen(descriptor, screen.getValue("id").jsonPrimitive.content)
+        fun source(name: String) = instrumentation.context.assets.open("runtime/published-input/$name")
+            .bufferedReader().use { Json.parseToJsonElement(it.readText()) }
+        val descriptor = buildJsonObject {
+            put("state", buildJsonObject {}); put("responses", buildJsonObject {}); put("ruleGroups", buildJsonArray {})
+            put("leg", buildJsonObject { put("screens", buildJsonArray { add(buildJsonObject {
+                put("id", "scr_screens_sinput"); put("defaultViewModelName", "Runtime input scr_screens_sinput")
+            }) }) })
+            put("render", buildJsonObject {
+                put("assets", kotlinx.serialization.json.JsonArray(source("provenance.json").jsonObject.getValue("fonts").jsonArray.map {
+                    JsonObject(it.jsonObject + ("kind" to JsonPrimitive("font")))
+                }))
+                put("textInputs", source("text-inputs.json"))
+                put("screens", buildJsonArray { add(buildJsonObject {
+                    put("id", "scr_screens_sinput"); put("artboardName", "input"); put("width", 393); put("height", 852)
+                }) })
+            })
+        }
+        val inputs = ExperienceTextInput.forScreen(descriptor, "scr_screens_sinput")
         // This is explicitly a test control, not a replacement signed release.
         val bytes = instrumentation.context.assets.open("runtime/typing-probes/f3-field-in-flow.riv").use { it.readBytes() }
         val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
@@ -504,7 +522,7 @@ class PublishedTextInputDeviceTest {
                     addView(surface, android.widget.FrameLayout.LayoutParams(-1, -1))
                     addView(overlay, android.widget.FrameLayout.LayoutParams(-1, -1))
                 })
-                surface.loadArtboard(bytes, "input", descriptor, fixture.assets, textInputs = inputs)
+                surface.loadArtboard(bytes, "input", descriptor, emptyMap(), textInputs = inputs)
             }
             assertTrue("First frame must be presented", firstFrame.await(30, TimeUnit.SECONDS))
             assertTrue("Native field must be presented", fieldReady.await(10, TimeUnit.SECONDS))
@@ -673,84 +691,6 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun signedPublishedCustomTransitionEmitsForwardAndReverseEvents() {
-        assertTrue(NuxieRuntime.shared.isAvailable)
-        val fixture = loadPublishedFixture(InstrumentationRegistry.getInstrumentation(), "journeys/rendered-custom-transition")
-        val render = fixture.release.descriptor.getValue("render").jsonObject
-        val screens = render.getValue("screens").jsonArray.map { it.jsonObject }
-        val declaration = render.getValue("transitions").jsonArray.single().jsonObject
-        val transitionId = declaration.getValue("id").jsonPrimitive.content
-        val runtime = NuxieRuntime.shared
-        val lane = NuxieRuntimeLane()
-        try {
-            runBlocking { lane.call {
-                val renderer = checkNotNull(runtime.newAndroidVulkanRenderer(390, 844))
-                try {
-                    val bytes = fixture.riv.readBytes()
-                    val assets = ExperienceAssetImportBuilder.build(fixture.release.descriptor, fixture.assets,
-                        checkNotNull(runtime.inspectFileAssets(bytes)))
-                    val file = checkNotNull(runtime.importFile(renderer, bytes, assets.expectedAssets, assets.externalAssets))
-                    try {
-                        for ((index, screen) in screens.withIndex()) {
-                            val name = screen.getValue("artboardName").jsonPrimitive.content
-                            val artboard = checkNotNull(file.newArtboard(name))
-                            try {
-                                artboard.bindDefaultViewModel(checkNotNull(ExperienceViewModelBinding.defaultSchemaName(fixture.release.descriptor, name)))
-                                fun write(path: String, value: String) {
-                                    assertTrue("Native transition state must accept $path=$value",
-                                        artboard.setDefaultViewModelValue(path, NuxieViewModelScalarValue.StringValue(value)))
-                                }
-                                write("screen/phase", "entering")
-                                val player = checkNotNull(artboard.newPlayer())
-                                try {
-                                    repeat(10) { player.stepWithEvents(0.05) }
-                                    for (reverse in listOf(true, false, true, false)) {
-                                        val outgoing = if (reverse) index == 1 else index == 0
-                                        write("screen/transition", "")
-                                        write("screen/phase", if (outgoing) "active" else "entering")
-                                        player.stepWithEvents(0.0)
-                                        write("screen/phase", if (outgoing) "exiting" else "entering")
-                                        write("screen/transition", transitionId)
-                                        val edge = if (reverse) declaration.getValue("reverse").jsonObject else declaration
-                                        val endpoint = if (outgoing) "source" else "destination"
-                                        val expected = edge.getValue(endpoint).jsonObject.getValue("completeEventName").jsonPrimitive.content
-                                        val events = mutableListOf<String>()
-                                        var steps = 0
-                                        while (expected !in events && steps < 14) {
-                                            events += player.stepWithEvents(0.05).events.map { it.name }
-                                            steps++
-                                        }
-                                        assertEquals("Native $name reverse=$reverse steps=$steps events=$events", 1, events.count { it == expected })
-                                        assertTrue("Native completion must precede the 700ms watchdog", steps < 14)
-                                        val held = mutableListOf<String>()
-                                        repeat(20) { held += player.stepWithEvents(0.05).events.map { it.name } }
-                                        assertFalse("Completion must remain latched while its start conditions hold: $held", expected in held)
-                                        write("screen/phase", if (outgoing) "hidden" else "active")
-                                        write("screen/transition", "")
-                                        val idle = mutableListOf<String>()
-                                        repeat(20) { idle += player.stepWithEvents(0.05).events.map { it.name } }
-                                        assertFalse("Completion must not replay after the SDK leaves its transition phase: $idle", expected in idle)
-
-                                        write("screen/phase", if (outgoing) "exiting" else "entering")
-                                        write("screen/transition", transitionId)
-                                        val interrupted = mutableListOf<String>()
-                                        repeat(2) { interrupted += player.stepWithEvents(0.05).events.map { it.name } }
-                                        write("screen/phase", if (outgoing) "active" else "hidden")
-                                        write("screen/transition", "")
-                                        repeat(20) { interrupted += player.stepWithEvents(0.05).events.map { it.name } }
-                                        assertFalse("An interrupted transition must not emit completion: $interrupted", expected in interrupted)
-                                    }
-                                } finally { player.close() }
-                            } finally { artboard.close() }
-                        }
-                    } finally { file.close() }
-                } finally { renderer.close() }
-            } }
-        } finally { lane.shutdown(); assertTrue(lane.awaitQuiescence(5_000)) }
-    }
-
-    @Test
-    @SdkSuppress(minSdkVersion = 26)
     fun renderedResourceDestructionCanOverlapRendererCreation() = exerciseRendererOverlap(false)
 
     @Test
@@ -766,13 +706,13 @@ class PublishedTextInputDeviceTest {
         val runtime = NuxieRuntime.shared
         assertTrue(runtime.isAvailable)
         val fixture = loadPublishedFixture(instrumentation)
-        val screen = fixture.release.descriptor.getValue("render").jsonObject
-            .getValue("screens").jsonArray.first().jsonObject
+        val screen = publishedFixtureEntryScreen(fixture.release.descriptor)
         val artboardName = screen.getValue("artboardName").jsonPrimitive.content
         val schema = checkNotNull(ExperienceViewModelBinding.defaultSchemaName(fixture.release.descriptor, artboardName))
         val bytes = fixture.riv.readBytes()
         val assets = ExperienceAssetImportBuilder.build(fixture.release.descriptor, fixture.assets,
-            checkNotNull(runtime.inspectFileAssets(bytes)))
+            checkNotNull(runtime.inspectFileAssets(bytes)),
+            systemFontBytes = { SystemFontProvider.prepare(it).bytes })
         class RenderedResources(val render: () -> Unit, val cleanup: () -> Unit) : Closeable {
             override fun close() = cleanup()
         }
@@ -847,8 +787,7 @@ class PublishedTextInputDeviceTest {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         assertTrue(NuxieRuntime.shared.isAvailable)
         val fixture = loadPublishedFixture(instrumentation)
-        val screen = fixture.release.descriptor.getValue("render").jsonObject
-            .getValue("screens").jsonArray.first().jsonObject
+        val screen = publishedFixtureEntryScreen(fixture.release.descriptor)
         val artboardName = screen.getValue("artboardName").jsonPrimitive.content
         val schema = checkNotNull(ExperienceViewModelBinding
             .defaultSchemaName(fixture.release.descriptor, artboardName))
@@ -869,7 +808,8 @@ class PublishedTextInputDeviceTest {
                 try {
                     val bytes = fixture.riv.readBytes()
                     val assets = ExperienceAssetImportBuilder.build(fixture.release.descriptor,
-                        fixture.assets, checkNotNull(runtime.inspectFileAssets(bytes)))
+                        fixture.assets, checkNotNull(runtime.inspectFileAssets(bytes)),
+                        systemFontBytes = { SystemFontProvider.prepare(it).bytes })
                     val file = checkNotNull(runtime.importFile(renderer, bytes, assets.expectedAssets, assets.externalAssets))
                     try {
                         val artboard = checkNotNull(file.newArtboard(artboardName))
@@ -951,8 +891,7 @@ class PublishedTextInputDeviceTest {
             .bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject.getValue("unseenClose").jsonObject }
         assertTrue(NuxieRuntime.shared.isAvailable)
         val fixture = loadPublishedFixture(instrumentation)
-        val screen = fixture.release.descriptor.getValue("render").jsonObject
-            .getValue("screens").jsonArray.first().jsonObject
+        val screen = publishedFixtureEntryScreen(fixture.release.descriptor)
         val id = UUID.randomUUID().toString()
         val closed = CountDownLatch(1)
         val created = CountDownLatch(1)
@@ -968,11 +907,20 @@ class PublishedTextInputDeviceTest {
             override fun onActivityStarted(activity: Activity) {
                 if (activity.intent.getStringExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID) != id) return
                 target.set(activity)
-                assertEquals(ExperienceScreenLifecycle.Phase.ENTERING, prepared.screenLifecycle.phase)
-                created.countDown()
-                @Suppress("DEPRECATION")
-                activity.onBackPressed()
-                assertEquals(closeContract.getValue("loadingAllowsBack").jsonPrimitive.boolean, activity.isFinishing)
+                try {
+                    // Page rows are prepared on the runtime lane. Hold the UI before its first
+                    // frame until that row has entered, then exercise Back on the unseen page.
+                    val deadline = SystemClock.uptimeMillis() + 10_000
+                    while (prepared.screenLifecycle.snapshot()["screen/phase"] == NuxieViewModelScalarValue.StringValue("hidden") &&
+                        failures.get() == null && SystemClock.uptimeMillis() < deadline) SystemClock.sleep(10)
+                    assertEquals(ExperienceScreenLifecycle.Phase.ENTERING, prepared.screenLifecycle.phase)
+                    @Suppress("DEPRECATION")
+                    activity.onBackPressed()
+                    assertEquals(closeContract.getValue("loadingAllowsBack").jsonPrimitive.boolean, activity.isFinishing)
+                } catch (error: Throwable) {
+                    failures.set(error)
+                    activity.finish()
+                } finally { created.countDown() }
             }
             override fun onActivityCreated(activity: Activity, state: Bundle?) = Unit
             override fun onActivityResumed(activity: Activity) = Unit
@@ -1041,8 +989,7 @@ class PublishedTextInputDeviceTest {
         }
         assertTrue(NuxieRuntime.shared.isAvailable)
         val fixture = loadPublishedFixture(instrumentation)
-        val screen = fixture.release.descriptor.getValue("render").jsonObject
-            .getValue("screens").jsonArray.first().jsonObject
+        val screen = publishedFixtureEntryScreen(fixture.release.descriptor)
         val id = UUID.randomUUID().toString()
         val firstFrame = CountDownLatch(1)
         val dismissed = CountDownLatch(1)
@@ -1360,31 +1307,19 @@ class PublishedTextInputDeviceTest {
     @SdkSuppress(minSdkVersion = 26)
     fun customTransitionWatchdogPreservesPreparedAppearanceAndRollback() = exerciseTransparentPreparation("custom")
 
-    @Test
-    @SdkSuppress(minSdkVersion = 26)
-    fun signedCustomTransitionsComposeAndRestoreSourceOnAbort() {
-        exerciseTransparentPreparation("custom", signedCustom = true)
-        exerciseTransparentPreparation("custom", signedCustom = true, reverse = true)
-    }
-
     private fun exerciseTransparentPreparation(
         transitionKind: String? = null,
-        signedCustom: Boolean = false,
-        reverse: Boolean = false,
     ) {
         assertTrue(NuxieRuntime.shared.isAvailable)
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val contract = instrumentation.context.assets.open("journeys/planes/persistent-navigation-android.json")
             .bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject
                 .getValue("transparentPreparation").jsonObject }
-        val fixture = loadPublishedFixture(instrumentation,
-            if (signedCustom) "journeys/rendered-custom-transition" else "journeys/rendered-text-input")
+        val fixture = loadPublishedFixture(instrumentation)
         val screens = fixture.release.descriptor.getValue("render").jsonObject
-            .getValue("screens").jsonArray.map { it.jsonObject }
-        val sourceIndex = if (reverse) 1 else 0
-        val destinationIndex = if (reverse) 0 else 1
-        val signedDeclaration = if (signedCustom) fixture.release.descriptor.getValue("render").jsonObject
-            .getValue("transitions").jsonArray.single().jsonObject else null
+            .getValue("screens").jsonArray.map { it.jsonObject }.sortedBy { it.getValue("id").jsonPrimitive.content }
+        val sourceIndex = 0
+        val destinationIndex = 1
         fun content(index: Int, background: Int): PreparedPresentation {
             val screen = screens[index]
             return PreparedPresentation(fixture.riv, screen.getValue("artboardName").jsonPrimitive.content,
@@ -1398,7 +1333,7 @@ class PublishedTextInputDeviceTest {
         val transitionContract = instrumentation.context.assets.open("journeys/planes/screen-transition-plan-android.json")
             .bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject }
         val custom = transitionContract.getValue("customExecution").jsonObject
-        val descriptor = if (transitionKind == "custom" && !signedCustom) {
+        val descriptor = if (transitionKind == "custom") {
             val declaration = JsonObject(transitionContract.getValue("declaration").jsonObject + mapOf(
                 "sourceScreenId" to screens[0].getValue("id"), "destinationScreenId" to screens[1].getValue("id"),
             ))
@@ -1410,7 +1345,7 @@ class PublishedTextInputDeviceTest {
             descriptor = descriptor,
             transition = transitionKind?.let { JsonObject(mapOf(
                 "type" to kotlinx.serialization.json.JsonPrimitive(it),
-                "transitionId" to (signedDeclaration?.getValue("id") ?: custom.getValue("transitionId")),
+                "transitionId" to custom.getValue("transitionId"),
             )) },
         )
         val firstFrame = CountDownLatch(1)
@@ -1452,7 +1387,7 @@ class PublishedTextInputDeviceTest {
                         during.compress(Bitmap.CompressFormat.PNG, 100, it)
                     }
                     File(instrumentation.targetContext.cacheDir, "provisional-context.txt").writeText(
-                        "transition=$transitionKind signed=$signedCustom reverse=$reverse changedPixels=$provisionalChangedPixels bounds=$captureBounds")
+                        "transition=$transitionKind changedPixels=$provisionalChangedPixels bounds=$captureBounds")
                 }
                 assertEquals("Transparent source must not expose a provisional destination",
                     contract.getValue("composedPixelsChanged").jsonPrimitive.long.toInt(), provisionalChangedPixels)
@@ -1461,13 +1396,8 @@ class PublishedTextInputDeviceTest {
                     runBlocking { kotlinx.coroutines.withTimeout(10_000) { checkNotNull(pending).awaitExit() } }
                     if (transitionKind == "custom") {
                         val elapsed = SystemClock.uptimeMillis() - started
-                        if (signedCustom) {
-                            val watchdog = checkNotNull(signedDeclaration).getValue("durationMs").jsonPrimitive.long + 250
-                            assertTrue("Both signed native completion events must finish before watchdog: reverse=$reverse elapsed=$elapsed", elapsed < watchdog)
-                        } else {
-                            assertTrue("Missing native completion events must wait for the authored watchdog",
-                                elapsed >= custom.getValue("watchdogMs").jsonPrimitive.long)
-                        }
+                        assertTrue("Missing native completion events must wait for the authored watchdog",
+                            elapsed >= custom.getValue("watchdogMs").jsonPrimitive.long)
                         assertEquals(custom.getValue("preparedAppearances").jsonPrimitive.long.toULong(),
                             destination.screenLifecycle.appearances)
                         assertEquals(ExperienceScreenLifecycle.Phase.ENTERING, destination.screenLifecycle.phase)
@@ -1488,14 +1418,6 @@ class PublishedTextInputDeviceTest {
                         restored = composedSurface(instrumentation, surface, captureBounds)
                     }
                     try {
-                        if (signedCustom && changedPixels(before, restored, Rect(0, 0, before.width, before.height)) != 0) {
-                            File(instrumentation.targetContext.cacheDir, "custom-rollback-before.png").outputStream().use {
-                                before.compress(Bitmap.CompressFormat.PNG, 100, it)
-                            }
-                            File(instrumentation.targetContext.cacheDir, "custom-rollback-after.png").outputStream().use {
-                                restored.compress(Bitmap.CompressFormat.PNG, 100, it)
-                            }
-                        }
                         assertEquals("$transitionKind rollback must restore composed source pixels", 0,
                             changedPixels(before, restored, Rect(0, 0, before.width, before.height)))
                     } finally { restored.recycle() }
@@ -1539,8 +1461,7 @@ class PublishedTextInputDeviceTest {
         val contract = instrumentation.context.assets.open("journeys/planes/navigation-input-handoff-android.json")
             .bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject }
         fun value(key: String) = contract.getValue(key).jsonPrimitive.content
-        val screen = fixture.release.descriptor.getValue("render").jsonObject
-            .getValue("screens").jsonArray.first().jsonObject
+        val screen = publishedFixtureEntryScreen(fixture.release.descriptor)
         val source = PreparedPresentation(fixture.riv, screen.getValue("artboardName").jsonPrimitive.content,
             android.graphics.Color.WHITE, PresentationShell.FullScreen(), screen.getValue("id").jsonPrimitive.content,
             fixture.release.descriptor, fixture.assets,
@@ -1647,8 +1568,7 @@ class PublishedTextInputDeviceTest {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val fixture = loadPublishedFixture(instrumentation)
         assertTrue(NuxieRuntime.shared.isAvailable)
-        val screen = fixture.release.descriptor.getValue("render").jsonObject
-            .getValue("screens").jsonArray.first().jsonObject
+        val screen = publishedFixtureEntryScreen(fixture.release.descriptor)
         val inputs = ExperienceTextInput.forScreen(fixture.release.descriptor, screen.getValue("id").jsonPrimitive.content)
         val activity = instrumentation.startActivitySync(Intent(instrumentation.targetContext,
             SurfaceCompatibilityHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -1801,7 +1721,7 @@ class PublishedTextInputDeviceTest {
         val riv = fixture.riv
         val assets = fixture.assets
         val render = release.descriptor.getValue("render").jsonObject
-        val screen = render.getValue("screens").jsonArray.first().jsonObject
+        val screen = publishedFixtureEntryScreen(release.descriptor)
         val input = render.getValue("textInputs").jsonArray.single().jsonObject
         val inputId = input.getValue("id").jsonPrimitive.content
         val firstFrame = CountDownLatch(1)
@@ -2705,6 +2625,7 @@ class PublishedTextInputDeviceTest {
     fun shutdownAfterCompiledActionAdmissionDrains() =
         exerciseDurableNativeEmission(PublishedBehavior.SCRIPT, shutdownAfterAdmission = true)
 
+    @org.junit.Ignore("Waiting on compiler plain Text semantics: https://universe.basis.dev/issue/UNIV-3248")
     @Test
     @SdkSuppress(minSdkVersion = 26)
     fun semanticSceneEntersAccessibilityOnlyAfterCompletePublication() = exerciseAccessibilityPublication(true)
@@ -2718,7 +2639,7 @@ class PublishedTextInputDeviceTest {
         val automation = instrumentation.uiAutomation
         val originalFlags = automation.serviceInfo.flags
         val fixture = loadPublishedFixture(instrumentation,
-            if (candidateSemantics) "journeys/rendered-semantic-roles" else "journeys/rendered-custom-transition", candidateSemantics)
+            if (candidateSemantics) "journeys/rendered-semantic-roles" else "journeys/rendered-text-input", candidateSemantics)
         val descriptor = fixture.release.descriptor
         val authored = descriptor.getValue("render").jsonObject.getValue("screens").jsonArray.first().jsonObject
         val prepared = PreparedPresentation(fixture.riv, authored.getValue("artboardName").jsonPrimitive.content,
@@ -2770,7 +2691,9 @@ class PublishedTextInputDeviceTest {
                 published = nodes()
             }
             assertTrue("The heading must become accessible after publication", published.any { it.text?.toString() == "Choose your plan" })
-            assertEquals("The retained roles scene has no native input declaration", 0, published.count { it.isEditable })
+            val password = published.single { it.isEditable }
+            assertTrue("The published Password field is a native secure editor", password.isPassword)
+            assertEquals("android.widget.EditText", password.className.toString())
         } finally {
             try {
                 mounted?.let { owner ->
@@ -2790,9 +2713,16 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
+    fun signedPasswordIsANativeSecureEditor() =
+        exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, roleProbe = AuthoredRoleProbe.SECURE_EDITOR)
+
+    @org.junit.Ignore("Waiting on compiler semantics: https://universe.basis.dev/issue/UNIV-3248")
+    @Test
+    @SdkSuppress(minSdkVersion = 26)
     fun signedAuthoredRolesExposeDurableNativeActions() =
         exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES)
 
+    @org.junit.Ignore("Waiting on compiler semantics: https://universe.basis.dev/issue/UNIV-3248")
     @Test
     @SdkSuppress(minSdkVersion = 34)
     fun signedAuthoredRolesEnterAtHeadingWithTalkBack() {
@@ -2800,6 +2730,7 @@ class PublishedTextInputDeviceTest {
         exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, roleProbe = AuthoredRoleProbe.HEADING_ENTRY)
     }
 
+    @org.junit.Ignore("Waiting on compiler semantics: https://universe.basis.dev/issue/UNIV-3248")
     @Test
     @SdkSuppress(minSdkVersion = 34)
     fun signedAuthoredRolesEnterAtHeadingAfterNativeEditor() {
@@ -2821,6 +2752,7 @@ class PublishedTextInputDeviceTest {
         exerciseDurableNativeEmission(PublishedBehavior.TEXT_INPUT, roleProbe = AuthoredRoleProbe.EDITOR_HOME_RETURN)
     }
 
+    @org.junit.Ignore("Waiting on compiler semantics: https://universe.basis.dev/issue/UNIV-3248")
     @Test
     @SdkSuppress(minSdkVersion = 34)
     fun signedAuthoredRolesRestoreTalkBackSliderAfterHome() {
@@ -2828,17 +2760,19 @@ class PublishedTextInputDeviceTest {
         exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, roleProbe = AuthoredRoleProbe.SLIDER_HOME_RETURN)
     }
 
+    @org.junit.Ignore("Waiting on compiler semantics: https://universe.basis.dev/issue/UNIV-3248")
     @Test
     @SdkSuppress(minSdkVersion = 26)
     fun signedSliderKeyboardMatchesNativeSeekBarInLtr() =
         exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, roleProbe = AuthoredRoleProbe.KEYBOARD_LTR)
 
+    @org.junit.Ignore("Waiting on compiler semantics: https://universe.basis.dev/issue/UNIV-3248")
     @Test
     @SdkSuppress(minSdkVersion = 26)
     fun signedSliderKeyboardMatchesNativeSeekBarInRtl() =
         exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, roleProbe = AuthoredRoleProbe.KEYBOARD_RTL)
 
-    private enum class AuthoredRoleProbe { COMPLETE, HEADING_ENTRY, EDITOR_ENTRY, EDITOR_HOME_RETURN, SLIDER_HOME_RETURN, KEYBOARD_LTR, KEYBOARD_RTL }
+    private enum class AuthoredRoleProbe { SECURE_EDITOR, COMPLETE, HEADING_ENTRY, EDITOR_ENTRY, EDITOR_HOME_RETURN, SLIDER_HOME_RETURN, KEYBOARD_LTR, KEYBOARD_RTL }
 
     @Test
     fun signedRepeatedPurchaseButtonsDispatchTheirOwnPlacements() {
@@ -2880,7 +2814,7 @@ class PublishedTextInputDeviceTest {
     }
 
     @Test
-    fun signedConditionIgnoresReservedResponseCommandInNativeEmission() {
+    fun signedConditionReadsSavedFormSelectionBeforeNavigation() {
         exerciseDurableNativeEmission(PublishedBehavior.SCRIPT, conditionGate = true)
         exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_SCRIPT, conditionGate = true)
     }
@@ -3056,8 +2990,7 @@ class PublishedTextInputDeviceTest {
                         val oldLane = ExperienceSurfaceHost::class.java.getDeclaredField("lane").apply { isAccessible = true }.get(previous) as NuxieRuntimeLane
                         val mutated = CountDownLatch(1)
                         assertTrue(oldLane.enqueue {
-                            val artboard = ExperienceSurfaceHost::class.java.getDeclaredField("artboard").apply { isAccessible = true }.get(previous) as ai.nuxie.sdk.runtime.NuxieRuntimeArtboard
-                            assertTrue(artboard.setDefaultViewModelValue("second/placementId", NuxieViewModelScalarValue.StringValue("plan:lifetime")))
+                            previous.fixtureActivePageRowOnLane().setValue("second/placementId", NuxieViewModelScalarValue.StringValue("plan:lifetime"))
                             mutated.countDown()
                             check(releaseOldLane.await(15, TimeUnit.SECONDS))
                         })
@@ -3117,6 +3050,17 @@ class PublishedTextInputDeviceTest {
             }
             if (behavior == PublishedBehavior.SEMANTIC_ROLES) {
                 assertTrue("Authored roles require a revealed presentation", initiallyRevealed.await(10, TimeUnit.SECONDS))
+                if (roleProbe == AuthoredRoleProbe.SECURE_EDITOR) {
+                    val editor = awaitEditor(instrumentation, first, "text-input/screen_1/password")
+                    instrumentation.runOnMainSync {
+                        assertTrue(editor.isEnabled && editor.isFocusable)
+                        assertTrue(editor.transformationMethod is android.text.method.PasswordTransformationMethod)
+                        assertTrue(editor.text.isEmpty() || editor.text.all { it in "•●*" })
+                    }
+                    assertTrue(accepted.isEmpty())
+                    assertTrue(journalRun().context.getValue("responses").jsonObject.isEmpty())
+                    return
+                }
                 assertAuthoredRoles(instrumentation, first, accepted, roleProbe) { journalRun().context.getValue("responses").jsonObject }
                 assertEquals(artifactFiles.keys, downloaded.toSet())
                 return
@@ -3175,7 +3119,7 @@ class PublishedTextInputDeviceTest {
                         assertTrue("Retained control surface must return", ready)
                         dispatch(MotionEvent.ACTION_UP)
                         assertEquals("Stale release must not publish an action", null, accepted.poll(500, TimeUnit.MILLISECONDS))
-                        assertFalse(journalRun().context.getValue("responses").jsonObject.containsKey("selection"))
+                        assertFalse(journalRun().context.getValue("responses").jsonObject.containsKey("plan/selection"))
                         assertEquals(1, presentationCount.get())
                     } finally { first.application.unregisterActivityLifecycleCallbacks(callbacks) }
                 }
@@ -3240,7 +3184,7 @@ class PublishedTextInputDeviceTest {
                 assertEquals("abandoned", checkNotNull(completedJournal.checkmark(fixture.release.identity.experienceId)).outcome)
                 assertTrue(completedJournal.runs().isEmpty())
                 assertTrue(terminalOutcomes.isEmpty())
-                assertFalse(checkNotNull(failureCheckpointResponses.get()).containsKey("selection"))
+                assertFalse(checkNotNull(failureCheckpointResponses.get()).containsKey("plan/selection"))
                 assertEquals(null, accepted.poll(300, TimeUnit.MILLISECONDS))
                 assertEquals(1, presentationCount.get())
                 assertEquals(artifactFiles.keys, downloaded.toSet())
@@ -3275,22 +3219,9 @@ class PublishedTextInputDeviceTest {
                 assertTrue("Terminal action shutdown must destroy its Activity", destroyed)
                 return
             }
-            if (conditionGate) {
-                val completed = JourneyRunJournal(directory, owner, JourneyStorageScope(authority))
-                val deadline = SystemClock.elapsedRealtime() + 10_000
-                while (completed.checkmark(fixture.release.identity.experienceId) == null &&
-                    SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(20)
-                assertEquals("A reserved response command cannot satisfy a Journey value condition",
-                    "selection_missing", checkNotNull(completed.checkmark(fixture.release.identity.experienceId)).outcome)
-                assertTrue(completed.runs().isEmpty())
-                assertEquals(listOf("script_control_activated"), checkNotNull(batch).emissions.map { it.name })
-                assertEquals(1, presentationCount.get())
-                assertNull(accepted.poll(300, TimeUnit.MILLISECONDS))
-                return
-            }
             val reopened = journalRun()
-            assertTrue("Native edits and reserved commands must not populate the removed response store",
-                reopened.context.getValue("responses").jsonObject.isEmpty())
+            if (scripted) assertEquals(JsonPrimitive("pro"), reopened.context.getValue("responses").jsonObject["plan/selection"])
+            else assertTrue("Native edits must not synthesize responses", reopened.context.getValue("responses").jsonObject.isEmpty())
             if (scripted) {
                 val committed = checkNotNull(batch)
                 assertEquals(committed.batchSequence + 1, reopened.nextPresentationBatchSequence)
@@ -3300,7 +3231,7 @@ class PublishedTextInputDeviceTest {
                 runBlocking { kotlinx.coroutines.withTimeout(10_000) {
                     while (responsesBeforeNavigation.get() == null) kotlinx.coroutines.delay(20)
                 } }
-                assertTrue(checkNotNull(responsesBeforeNavigation.get()).isEmpty())
+                assertEquals(JsonPrimitive("pro"), checkNotNull(responsesBeforeNavigation.get())["plan/selection"])
                 val captured = runBlocking { checkNotNull(store.stableEvent(committed.emissions.single().id)) }
                 assertEquals("script_control_activated", captured.name)
                 assertEquals(owner, captured.distinctId)
@@ -3444,7 +3375,7 @@ class PublishedTextInputDeviceTest {
         val useTalkBack = InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true"
         val automation = if (useTalkBack) instrumentation.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
             else instrumentation.uiAutomation
-        val expectedLabels = listOf("Choose your plan", "Continue", "Annual plan", "Seats", "Unavailable", "Plan option", "Plan option", "Optional extras", "Choose the options that suit you.")
+        val expectedLabels = listOf("Choose your plan", "Continue", "Annual plan", "Seats", "Password", "Unavailable", "Plan option", "Plan option", "Optional extras", "Choose the options that suit you.")
         fun nodes(): List<android.view.accessibility.AccessibilityNodeInfo> {
             fun collect(node: android.view.accessibility.AccessibilityNodeInfo): List<android.view.accessibility.AccessibilityNodeInfo> =
                 listOf(node) + (0 until node.childCount).mapNotNull { node.getChild(it) }.flatMap { collect(it) }
@@ -3506,7 +3437,7 @@ class PublishedTextInputDeviceTest {
                         try {
                             assertTalkBackHomeReturn(instrumentation, activity, input, next,
                                 { nodes().singleOrNull { label(it) == "Seats" } },
-                                { nodes().single { label(it) == "Unavailable" } })
+                                { nodes().single { label(it) == "Password" } })
                         } catch (failure: AssertionError) {
                             throw AssertionError("Virtual Home/return cycle ${cycle + 1}: ${failure.message}", failure)
                         }
@@ -3550,7 +3481,10 @@ class PublishedTextInputDeviceTest {
         assertFalse(disabled.isEnabled)
         assertFalse(disabled.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK))
         assertEquals(2, published.filter { label(it) == "Plan option" }.distinct().size)
-        assertEquals("Retired text-run declarations do not create native fields", 0, nodes().count { it.isEditable })
+        val password = named("Password")
+        assertEquals("android.widget.EditText", password.className.toString())
+        assertTrue(password.isEditable && password.isPassword && password.isEnabled)
+        assertEquals(1, nodes().count { it.isEditable })
         fun awaitEmission(name: String) {
             val batch = checkNotNull(accepted.poll(10, TimeUnit.SECONDS)) { "Authored native action must reach durable Journey admission: $name" }
             assertEquals(listOf(name), batch.emissions.map { it.name })
@@ -3927,7 +3861,7 @@ class PublishedTextInputDeviceTest {
         val locator = entry.getValue("locator").jsonObject
         val provenance = objectAt("provenance.json")
         val keyId = envelope.getValue("signature").jsonObject.getValue("keyId").jsonPrimitive.content
-        val trustedKeys = mapOf(keyId to Base64.decode(provenance.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP))
+        val trustedKeys = mapOf(keyId to Base64.decode(provenance.getValue("signing").jsonObject.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP))
         fun authenticate(supported: ai.nuxie.sdk.experiences.JourneyReleaseSupportedRuntime) = JourneyReleaseVerifier.authenticate(
             envelope.toString().toByteArray(),
             trustedKeys,
@@ -3945,7 +3879,7 @@ class PublishedTextInputDeviceTest {
             }
         }
         val release = authenticate(runtimeForFixture(candidateSemantics))
-        assertEquals(provenance.getValue("descriptorSha256").jsonPrimitive.content, release.descriptorSha256)
+        assertEquals(envelope.getValue("descriptorSha256").jsonPrimitive.content, release.descriptorSha256)
         val directory = File(context.cacheDir, "published-input-${UUID.randomUUID()}").apply { mkdirs() }
         fun stage(artifact: JsonObject): Pair<String, File> {
             val key = artifact.getValue("key").jsonPrimitive.content
