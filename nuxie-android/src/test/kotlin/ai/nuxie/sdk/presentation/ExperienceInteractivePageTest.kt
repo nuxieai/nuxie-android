@@ -27,6 +27,18 @@ class ExperienceInteractivePageTest {
         }
     }
 
+    @Test fun `new forward rows append on top and new Back rows move below source before reconciliation`() = runBlocking {
+        for (isBack in listOf(false, true)) withLayer { page, native ->
+            page.insertIncoming("a", Style.NONE, false)
+            native.traceListMutations = true
+            native.trace.clear()
+            page.insertIncoming("b", Style.MAGIC_MOVE, isBack, source = "a")
+            assertEquals(if (isBack) listOf("b", "a") else listOf("a", "b"), page.mountedScreenIds())
+            assertEquals(if (isBack) listOf("insert:1", "move:1:0", "step:0.0")
+                else listOf("insert:1", "step:0.0"), native.trace)
+        }
+    }
+
     @Test fun `Back removes unreachable rows after end and remaining indexes follow list removals`() = runBlocking {
         withLayer { page, native ->
             page.insertIncoming("a", Style.NONE, false)
@@ -521,10 +533,16 @@ class ExperienceInteractivePageTest {
                 NativeViewModelSnapshotInstance(viewModelHandle,schema),NativeViewModelSnapshotInstance(viewModelHandle+1,3),NativeViewModelSnapshotInstance(999,3))
             return NativeCallResult(0,NativeViewModelSnapshot(viewModelHandle,instances,values))
         }
+        var traceListMutations = false
         override fun mutateViewModel(viewModelHandle: Long, write: NativeViewModelWrite): Int {
             if (failWrites) return 11
             writes += viewModelHandle to write
             if (write.path == "keptValue" && write.kind == NuxieViewModelMutationKind.SET_NUMBER) kept[viewModelHandle] = write.numberValue
+            if (traceListMutations) when (write.kind) {
+                NuxieViewModelMutationKind.LIST_INSERT -> trace += "insert:${write.index}"
+                NuxieViewModelMutationKind.LIST_MOVE -> trace += "move:${write.index}:${write.secondIndex}"
+                else -> Unit
+            }
             if (write.kind == NuxieViewModelMutationKind.LIST_REMOVE) trace += "remove"
             return 0
         }

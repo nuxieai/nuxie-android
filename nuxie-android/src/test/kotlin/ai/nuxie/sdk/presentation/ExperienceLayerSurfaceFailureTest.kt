@@ -422,6 +422,48 @@ class ExperienceLayerSurfaceFailureTest {
         }
     }
 
+    @Test fun `recreated page Back positions missing destination below current Screen for visible and covered cuts`() = runBlocking {
+        for (covered in listOf(false, true)) withSurface(prepareTarget = false) { surface, page, native, lane ->
+            val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
+            val scene = java.io.File.createTempFile("page-recreated-back", ".riv").apply { writeBytes(byteArrayOf(1)) }
+            val descriptor = field(page, "descriptor") as JsonObject
+            // Warm recreation restores only current A, retaining the earlier B visit in history.
+            val source = PreparedPresentation(scene, "A", 0, PresentationShell.FullScreen(), "a", descriptor,
+                pageHistory = listOf("b", "a"))
+            val target = source.copy(screenId = "b", artboardName = "B", pageHistory = listOf("b"),
+                screenLifecycle = ExperienceScreenLifecycle())
+            val listener = object : ExperienceSurfaceHost.Listener {
+                override fun onFirstFrame() = Unit
+                override fun onFailure(error: ExperiencePresentationException) { throw AssertionError(error) }
+            }
+            val mounted = ExperienceMountedScreen(activity.get(), source, listener, { throw AssertionError(it) })
+            val ownedLane = field(mounted, "lane") as NuxieRuntimeLane
+            set(mounted, "surface", surface)
+            try {
+                mounted.prepareRow(source, listener)
+                assertEquals(listOf("a"), page.mountedScreenIds())
+                lane.call {
+                    page.stepOnLane(0.0)
+                    native.traceListMutations = true
+                    native.trace.clear()
+                    native.onStep = { assertEquals(listOf("b", "a"), page.mountedScreenIdsOnLane()) }
+                }
+                if (covered) mounted.cutCoveredPage(target, listener)
+                else {
+                    mounted.prepareRow(target, listener)
+                    mounted.navigateLayer(target, isBack = true)
+                }
+                assertEquals(listOf("insert:1", "move:1:0", "step:0.0"), native.trace.take(3))
+                assertEquals(listOf("b"), page.mountedScreenIds())
+            } finally {
+                native.onStep = {}
+                mounted.close(false) {}
+                assertTrue(ownedLane.awaitQuiescence(5_000))
+                activity.pause().stop().destroy(); scene.delete()
+            }
+        }
+    }
+
     @Test fun `covered skipping Back stays hidden until one reveal and ordinary pop enters once`() = runBlocking {
         for (skip in listOf(false, true)) withSurface { surface, page, native, lane ->
             val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
