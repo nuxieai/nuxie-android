@@ -134,13 +134,13 @@ internal class ExperienceInteractivePage private constructor(
     internal fun beginOnLane(screenId: String, transition: String?) = checked {
         check(liveStep == null) { "Page step already active" }
         check(screenId in mounted && screenId !in collapsed) { "Incoming row must be expanded" }
-        player.stepBegin(ExperiencePageHostContract.screenArtboard(descriptor, screenId), transition)
+        player.stepBegin(ExperiencePageHostContract.screenArtboard(descriptor, screenId), contract.stepNames[transition] ?: transition)
         liveStep = screenId to transition
     }
 
     internal fun endOnLane(screenId: String, transition: String?) = checked {
         check(liveStep == screenId to transition) { "Page step does not match" }
-        player.stepEnd(ExperiencePageHostContract.screenArtboard(descriptor, screenId), transition)
+        player.stepEnd(ExperiencePageHostContract.screenArtboard(descriptor, screenId), contract.stepNames[transition] ?: transition)
         liveStep = null
     }
 
@@ -256,7 +256,7 @@ internal class ExperienceInteractivePage private constructor(
         phases.forEach { row(it.first) }
         for ((id, phase) in phases) {
             val row = row(id)
-            val values = row.lifecycle.move(phase, transition, exitReason)
+            val values = row.lifecycle.move(phase, contract.stepNames[transition] ?: transition, exitReason)
             if (writableRow(id) != null) writeLifecycle(row, values)
         }
     }
@@ -388,7 +388,12 @@ internal class ExperienceInteractivePage private constructor(
         return accepted
     }
 
-    suspend fun setLayoutSize(width: Float, height: Float) = lane.call { player.setLayoutSize(width, height) }
+    suspend fun setLayoutSize(width: Float, height: Float) = lane.call { setLayoutSizeOnLane(width, height) }
+    internal fun setLayoutSizeOnLane(width: Float, height: Float) = checked {
+        player.setLayoutSize(width, height)
+        val writes = ExperienceEnvironmentBindings(file.viewModelCatalog()).viewportMutations(width, height)
+        if (writes.isNotEmpty()) environment?.restoreWrites(writes)
+    }
     suspend fun layoutSize(): Pair<Float, Float> = lane.call { layoutSizeOnLane() }
 
     internal fun layoutSizeOnLane(): Pair<Float, Float> = checked { player.layoutSize() }

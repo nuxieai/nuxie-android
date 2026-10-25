@@ -67,8 +67,8 @@ internal object ExperiencePageStep {
                 val completions = mutableListOf<Deferred<Unit>>()
                 operations.batch(present = true, watchdogMs = plan.watchdogMs) {
                     operations.takeIncoming()
-                    completions += operations.register(source, plan.outgoingCompletionEvent)
-                    completions += operations.register(target, plan.incomingCompletionEvent)
+                    plan.outgoingCompletionEvent.takeIf { it.isNotEmpty() }?.let { completions += operations.register(source, it) }
+                    plan.incomingCompletionEvent.takeIf { it.isNotEmpty() }?.let { completions += operations.register(target, it) }
                     operations.phases(exiting + entering, phasesTransition)
                     operations.begin(transition)
                 }
@@ -79,7 +79,7 @@ internal object ExperiencePageStep {
                     operations.phases(hidden + active, "")
                 }
             } else {
-                val outgoing = (plan?.outgoingCompletionEvent ?: exit.event)?.let { operations.register(source, it) }
+                val outgoing = (plan?.outgoingCompletionEvent ?: exit.event)?.takeIf { it.isNotEmpty() }?.let { operations.register(source, it) }
                 val leaveBudget = plan?.watchdogMs ?: exit.watchdogMs ?: 250
                 operations.batch(present = outgoing != null, watchdogMs = leaveBudget) {
                     operations.phases(exiting, phasesTransition)
@@ -88,7 +88,7 @@ internal object ExperiencePageStep {
                 var incoming: Deferred<Unit>? = null
                 operations.batch(present = plan != null, watchdogMs = plan?.watchdogMs ?: 250) {
                     operations.takeIncoming()
-                    incoming = plan?.let { operations.register(target, it.incomingCompletionEvent) }
+                    incoming = plan?.incomingCompletionEvent?.takeIf { it.isNotEmpty() }?.let { operations.register(target, it) }
                     operations.phases(entering, phasesTransition)
                     operations.begin(transition)
                     operations.retire()

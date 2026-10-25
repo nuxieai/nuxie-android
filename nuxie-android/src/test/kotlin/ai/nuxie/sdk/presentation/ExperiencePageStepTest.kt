@@ -86,6 +86,17 @@ class ExperiencePageStepTest {
         assertTrue(org.robolectric.shadows.ShadowLog.getLogsForTag("ExperiencePageStep").any { it.msg.contains("fade has no transitionId") })
     }
 
+    @Test fun `native A B fixture waits only for its actual incoming completion`() = runBlocking {
+        for (style in listOf(Style.MAGIC_MOVE, Style.NONE)) {
+            val trace = Trace()
+            perform(trace, style, plan.copy(outgoingCompletionEvent = ""))
+            assertFalse(trace.events.any { it == "register:a:" })
+            assertTrue("register:b:arrive" in trace.events)
+            assertEquals(listOf("wait:1:650"), trace.events.filter { it.startsWith("wait:") })
+            assertTrue(trace.events.indexOf("end:pair") < trace.events.indexOf("active"))
+        }
+    }
+
     @Test fun `self navigation has no step or phase change`() = runBlocking {
         val trace = Trace(); perform(trace, Style.MAGIC_MOVE, target = "a"); assertTrue(trace.events.isEmpty())
     }
