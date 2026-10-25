@@ -107,6 +107,11 @@ internal data class PreparedPresentation(
     val isPushPage: Boolean = false,
     val pageHistory: List<String> = emptyList(),
     val isBack: Boolean = false,
+    // Explicit native fixture injection; signed production preparations always use the fixed page contract.
+    val pageHost: ExperiencePageHostContract.Host = ExperiencePageHostContract.Host(),
+    val initializePageFixture: ((ai.nuxie.sdk.runtime.NuxieRuntimeArtboard) -> Unit)? = null,
+    val pageTransitionsFixture: List<ExperiencePageHostContract.Transition>? = null,
+    val importPageFixture: ((ai.nuxie.sdk.runtime.NuxieRuntime, ai.nuxie.sdk.runtime.NuxieAndroidVulkanRenderer, ByteArray) -> ai.nuxie.sdk.runtime.NuxieRuntimeFile?)? = null,
 )
 
 internal sealed interface PresentationShell {

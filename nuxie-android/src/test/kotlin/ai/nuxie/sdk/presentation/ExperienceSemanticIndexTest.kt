@@ -22,7 +22,9 @@ class ExperienceSemanticIndexTest {
     @Test fun `native fields are associated once and hidden ancestors suppress descendants`() {
         val index = ExperienceSemanticIndex()
         val field = node(1).copy(role = 6)
-        assertThrows(IllegalArgumentException::class.java) { index.update(tree(field)) }
+        index.update(tree(field))
+        assertTrue("Undeclared fields have no native editor and are omitted", index.entries.isEmpty())
+        assertTrue(index.readingOrder.isEmpty())
         index.update(tree(field, node(2), node(3).copy(stateFlags = 256), node(4).copy(parentId = 3)), setOf(1))
         assertEquals(listOf(2L), index.entries.values.map { it.node.id })
     }

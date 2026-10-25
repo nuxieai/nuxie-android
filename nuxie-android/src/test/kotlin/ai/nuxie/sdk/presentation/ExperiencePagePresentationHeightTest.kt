@@ -513,15 +513,58 @@ class ExperiencePagePresentationHeightTest {
         }
     }
 
-    private suspend fun checkPreparation(shell: PresentationShell, covered: Boolean, hasSize: Boolean,
+    @Test fun `page retirement captures row mutations newer than the last presented frame`() = runBlocking {
+        withPushPages { a, p, _ ->
+            a.start(); a.frame()
+            p.start(); p.frame()
+            val retained = p.content().retainedViewModel
+            p.surface.layerOperation { page ->
+                page.valuesOnLane("b").setValue("label", NuxieViewModelScalarValue.StringValue("after the last frame"))
+            }
+            // No intervening ordinary step is allowed to refresh the retained capture.
+            p.close(recreating = true)
+            assertEquals("after the last frame", checkNotNull(retained.get()).resolveString("label"))
+        }
+    }
+
+    @Test fun `page viewport environment follows initial logical size and surface resize before stepping`() = runBlocking {
+        for (hasSize in listOf(false, true)) checkPreparation(PresentationShell.FullScreen(), covered = false,
+            hasSize = hasSize, environmentViewport = true) { host, lane, texture, _, _, native, failures ->
+            fun viewport() = native.writes.filter { it.second.path in setOf("width", "height") }
+                .associate { (owner, write) ->
+                    assertEquals("Only the page global env receives viewport values", 500L, owner)
+                    write.path to write.numberValue
+                }
+            assertEquals(if (hasSize) mapOf("width" to 393f, "height" to 852f) else emptyMap(), viewport())
+            native.writes.clear()
+            host.onSurfaceTextureAvailable(texture, 300, 600)
+            host.doFrame(1_000_000_000L); lane.call {}; shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(mapOf("width" to 300f, "height" to 600f), viewport())
+            assertTrue(failures.isEmpty())
+        }
+    }
+
+    private suspend fun checkPreparation(shell: PresentationShell, covered: Boolean, hasSize: Boolean, environmentViewport: Boolean = false,
         exercise: (suspend (ExperienceSurfaceHost, NuxieRuntimeLane, SurfaceTexture, ExperienceNativeLayerWindow,
             MutableList<Float?>, ExperienceInteractivePageTest.RecordingNative, MutableList<ExperiencePresentationException>) -> Unit)? = null) {
         val controller = Robolectric.buildActivity(Activity::class.java).setup()
         val activity = controller.get()
         val lane = NuxieRuntimeLane()
-        val pageNative = ExperienceInteractivePageTest.RecordingNative().apply { presentation = 1 }
+        val pageNative = ExperienceInteractivePageTest.RecordingNative().apply { presentation = 1; globals = environmentViewport }
         val native = object : NuxieTypedRuntimeNative by pageNative {
             var size = floatArrayOf(393f, 852f)
+            override fun viewModelCatalog(fileHandle: Long): NativeCallResult<NativeViewModelCatalog> {
+                val catalog = checkNotNull(pageNative.viewModelCatalog(fileHandle).value)
+                if (!environmentViewport) return NativeCallResult(0, catalog)
+                val props = catalog.properties.toMutableList().apply {
+                    addAll(16, listOf(NativeViewModelProperty(4, 2, "width", 2, -1, emptyArray()),
+                        NativeViewModelProperty(4, 3, "height", 2, -1, emptyArray())))
+                }
+                return NativeCallResult(0, catalog.copy(properties = props.toTypedArray(), schemas = catalog.schemas.map {
+                    if (it.index == 4L) it.copy(propertyCount = 4)
+                    else if (it.firstProperty >= 16) it.copy(firstProperty = it.firstProperty + 2) else it
+                }.toTypedArray()))
+            }
             override fun inspectFileAssets(bytes: ByteArray) = emptyList<ExpectedFileAsset>()
             override fun newAndroidVulkanRenderer(pixelWidth: Int, pixelHeight: Int) = 4L
             override fun newFile(rendererHandle: Long, bytes: ByteArray, expectedAssets: List<ExpectedFileAsset>,

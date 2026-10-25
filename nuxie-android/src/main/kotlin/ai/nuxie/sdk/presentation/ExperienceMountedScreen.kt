@@ -301,7 +301,7 @@ internal class ExperienceMountedScreen(
         val targetId = checkNotNull(target.screenId)
         val intent = target.transition?.let(ai.nuxie.sdk.experiences.ExperiencePageHostContract::intent)
         val style = intent?.style ?: ai.nuxie.sdk.experiences.ExperiencePageHostContract.Style.NONE
-        val plan = ExperienceScreenTransitionPlan.resolveLayer(target.transition, checkNotNull(target.descriptor), sourceId, targetId)
+        val plan = ExperienceScreenTransitionPlan.resolveLayer(target.transition, checkNotNull(target.descriptor), sourceId, targetId, target.pageTransitionsFixture)
         val waiters = mutableListOf<Pair<String, kotlinx.coroutines.Deferred<Unit>>>()
         var phasePresented = true
         var loggedPresentationTimeout = false

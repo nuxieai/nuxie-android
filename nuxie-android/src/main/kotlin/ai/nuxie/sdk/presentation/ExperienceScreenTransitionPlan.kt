@@ -26,11 +26,12 @@ internal data class ExperienceScreenTransitionPlan(
     fun shouldAnimate(reduceMotion: Boolean): Boolean = kind != Kind.NONE && !reduceMotion
 
     companion object {
-        fun resolveLayer(intent: JsonObject?, descriptor: JsonObject, source: String, destination: String): Custom? {
+        fun resolveLayer(intent: JsonObject?, descriptor: JsonObject, source: String, destination: String,
+            nativeFixtureTransitions: List<ai.nuxie.sdk.experiences.ExperiencePageHostContract.Transition>? = null): Custom? {
             val selected = ai.nuxie.sdk.experiences.ExperiencePageHostContract.resolveIntent(intent, source)
             val id = selected?.let { ai.nuxie.sdk.experiences.ExperiencePageHostContract.intent(it, source) }?.transitionId ?: return null
             val render = descriptor["render"] as JsonObject
-            val declaration = ai.nuxie.sdk.experiences.ExperiencePageHostContract.transitions(render).firstOrNull { it.id == id }
+            val declaration = (nativeFixtureTransitions ?: ai.nuxie.sdk.experiences.ExperiencePageHostContract.transitions(render)).firstOrNull { it.id == id }
                 ?: return null
             val edge = declaration.resolve(source, destination) ?: return null
             val name = if (declaration.sourceScreenId == source) id else "$id.reverse"
