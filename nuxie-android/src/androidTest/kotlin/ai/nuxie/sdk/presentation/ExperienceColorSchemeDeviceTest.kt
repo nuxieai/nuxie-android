@@ -96,7 +96,7 @@ class ExperienceColorSchemeDeviceTest {
                             if (!matched) delay(16)
                         }
                         failure.get()?.let { throw AssertionError("Appearance change failed", it) }
-                        assertTrue("A live ${scheme.label} configuration must redraw the Theme colour", matched)
+                        assertTrue("A live ${scheme.label} configuration must redraw the Theme color", matched)
                         val handle = lane.call { assertBindings(host, scheme) }
                         if (scheme == initial) assertEquals("Switching back reuses the retained instance", initialHandle, handle)
                         else assertNotEquals(initialHandle, handle)
@@ -111,7 +111,7 @@ class ExperienceColorSchemeDeviceTest {
         } finally { instrumentation.runOnMainSync { activity.finish() } }
     }
 
-    @Test fun runtimeSchemaDefaultPreservesTheAuthoredLightColour() {
+    @Test fun runtimeSchemaDefaultPreservesTheAuthoredLightColor() {
         val runtime = NuxieRuntime.shared
         assertTrue(runtime.isAvailable)
         val bytes = InstrumentationRegistry.getInstrumentation().context.assets.open("theme-entry/theme.riv").use { it.readBytes() }
@@ -145,7 +145,7 @@ class ExperienceColorSchemeDeviceTest {
     }
 
     private fun assertSurface(bitmap: Bitmap, density: Float, scheme: ExperienceColorScheme) {
-        assertEquals("The first frame draws the ${scheme.label} authored colour", color(scheme), surface(bitmap, density))
+        assertEquals("The first frame draws the ${scheme.label} authored color", color(scheme), surface(bitmap, density))
     }
 
     private fun surface(bitmap: Bitmap, density: Float): Int = bitmap.getPixel((100 * density).toInt(), (100 * density).toInt())

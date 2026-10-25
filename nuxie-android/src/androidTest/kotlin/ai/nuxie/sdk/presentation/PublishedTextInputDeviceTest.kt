@@ -257,7 +257,7 @@ class PublishedTextInputDeviceTest {
                                 assertTrue("Committed $name must differ from primary-font missing glyphs", different > 10)
                             }
                             if (name == "emoji") {
-                                // Colour emoji, not text-colour outlines: count changed
+                                // Color emoji, not text-color outlines: count changed
                                 // pixels whose channels differ strongly (the field's text is grey).
                                 fun saturated(bitmap: Bitmap) = (top until bottom).sumOf { y -> (left until right).count { x ->
                                     val pixel = bitmap.getPixel(x, y)
@@ -266,7 +266,7 @@ class PublishedTextInputDeviceTest {
                                     val b = android.graphics.Color.blue(pixel)
                                     pixel != empty.getPixel(x, y) && maxOf(r, g, b) - minOf(r, g, b) > 80
                                 } }
-                                // Colour the missing-glyph control does not also add.
+                                // Color the missing-glyph control does not also add.
                                 emojiInk = saturated(drawn) - saturated(missing)
                                 android.util.Log.i("FontFallbackProof", "field emoji saturated=$emojiInk")
                             }
@@ -277,7 +277,7 @@ class PublishedTextInputDeviceTest {
                     }
                 } finally { empty.recycle(); missing.recycle() }
                 if (!baseline && name == "emoji") assertTrue(
-                    "Typed emoji must draw in colour inside the field (UNIV-4921)", emojiInk > 200)
+                    "Typed emoji must draw in color inside the field (UNIV-4921)", emojiInk > 200)
             }
         } finally {
             ai.nuxie.sdk.runtime.SystemFontFallback.suppressForTesting(false)

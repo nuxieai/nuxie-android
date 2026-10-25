@@ -98,7 +98,7 @@ internal class ExperienceNativeLayerWindow(
 
     /**
      * The Activity handles uiMode changes itself, so nothing rebuilds an open sheet when the system
-     * switches between light and dark: re-resolve the sheet and handle colours here.
+     * switches between light and dark: re-resolve the sheet and handle colors here.
      */
     fun refreshChrome() {
         val look = sheetLook() ?: return
