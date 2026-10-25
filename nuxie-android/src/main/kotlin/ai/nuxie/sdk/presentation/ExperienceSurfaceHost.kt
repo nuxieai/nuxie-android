@@ -790,6 +790,8 @@ internal class ExperienceSurfaceHost(
                 videoBindings = shared.imports?.videos.orEmpty()
                 videoTargets = shared.imports?.videoElements.orEmpty()
                 shared.file
+            } else if (layerScreen?.importPageFixture != null) {
+                layerScreen.importPageFixture.invoke(runtime, activeRenderer, sceneBytes)
             } else if (descriptor == null) {
                 runtime.importFile(activeRenderer, sceneBytes)
             } else {
@@ -861,7 +863,7 @@ internal class ExperienceSurfaceHost(
                 try {
                     requireLayerPresentation(layerScreen.fitsContentHeight)
                     val layer = ExperienceInteractivePage.openOnLane(lane, runtime, loadedFile,
-                        checkNotNull(descriptor), shared?.values)
+                        checkNotNull(descriptor), shared?.values, layerScreen.pageHost, layerScreen.initializePageFixture)
                     interactiveLayer = layer
                     pageFitsContentHeight = layerScreen.fitsContentHeight
                     artboard = layer.artboard
@@ -883,7 +885,7 @@ internal class ExperienceSurfaceHost(
                             decoderPool = videoDecoderPool, initialViewport = ai.nuxie.sdk.runtime.VideoViewport(0f, 0f, 0f, 0f))
                         videoPlayback?.setVisible(running)
                     }
-                    initialPresentationSize?.let { size -> layer.player.setLayoutSize(size.width, size.height) }
+                    initialPresentationSize?.let { size -> layer.setLayoutSizeOnLane(size.width, size.height) }
                     if (layerScreen.fitsContentHeight) {
                         // Release the native sheet's show gate with the large fallback before
                         // a surface/frame exists, including covered restores.
@@ -1416,7 +1418,7 @@ internal class ExperienceSurfaceHost(
         val layout = surfaceLayout ?: return false
         if (appliedLayout == layout) return true
         return try {
-            if (interactiveLayer != null) active.setLayoutSize(layout.widthPoints, layout.heightPoints)
+            if (interactiveLayer != null) checkNotNull(interactiveLayer).setLayoutSizeOnLane(layout.widthPoints, layout.heightPoints)
             else presentationHeight.apply(checkNotNull(file), active, fitsContentHeight, layout.widthPoints, layout.heightPoints)
             appliedLayout = layout
             layoutStepPending = true
@@ -1837,10 +1839,16 @@ internal class ExperienceSurfaceHost(
                 if (!failureReported.get()) applyRuntimeValues(finalValues)
             }.exceptionOrNull()
             // Capture on the original lane after input/exit writes and before releasing handles.
-            val snapshotFailure = retainedViewModel?.let { retained -> runCatching {
-                (interactiveLayer?.let { layer -> activeRowId?.let { layer.snapshotOnLane(it) } }
-                    ?: viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot())?.let(::retainScreenValues)
-            }.exceptionOrNull() }
+            val snapshotFailure = runCatching {
+                val page = interactiveLayer
+                if (page != null) {
+                    for ((id, retained) in layerRetainedValues) {
+                        retained.set(page.snapshotOnLane(id).withoutRootProperty("experience"))
+                    }
+                } else if (retainedViewModel != null) {
+                    (viewModelState?.snapshot() ?: artboard?.defaultViewModelSnapshot())?.let(::retainScreenValues)
+                }
+            }.exceptionOrNull()
             snapshotFailure?.let { if (firstFailure == null) firstFailure = it else firstFailure?.addSuppressed(it) }
             attached = false
             val closeHandles = listOfNotNull(

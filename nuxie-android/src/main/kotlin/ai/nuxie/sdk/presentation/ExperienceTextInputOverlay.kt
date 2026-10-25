@@ -619,14 +619,55 @@ internal class ExperienceTextInputOverlay(
 
         override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
             val connection = super.onCreateInputConnection(outAttrs) ?: return null
+            // Keep the native editor focused during a page step, while fencing
+            // even an InputConnection acquired before input was withdrawn.
+            fun acceptsEditing() = !closed && inputEnabled && this@Editor.isEnabled &&
+                bindings.any { it.editor === this@Editor }
             return object : InputConnectionWrapper(connection, false) {
+                override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean =
+                    acceptsEditing() && super.setComposingText(text, newCursorPosition)
+                @android.annotation.TargetApi(33)
+                override fun setComposingText(text: CharSequence, newCursorPosition: Int, textAttribute: android.view.inputmethod.TextAttribute?): Boolean =
+                    acceptsEditing() && super.setComposingText(text, newCursorPosition, textAttribute)
+                @android.annotation.TargetApi(33)
+                override fun setComposingRegion(start: Int, end: Int, textAttribute: android.view.inputmethod.TextAttribute?): Boolean =
+                    acceptsEditing() && super.setComposingRegion(start, end, textAttribute)
+                @android.annotation.TargetApi(34)
+                override fun replaceText(start: Int, end: Int, text: CharSequence, newCursorPosition: Int, textAttribute: android.view.inputmethod.TextAttribute?): Boolean =
+                    acceptsEditing() && super.replaceText(start, end, text, newCursorPosition, textAttribute)
+                override fun performContextMenuAction(id: Int): Boolean =
+                    acceptsEditing() && super.performContextMenuAction(id)
+                override fun setComposingRegion(start: Int, end: Int): Boolean =
+                    acceptsEditing() && super.setComposingRegion(start, end)
+                override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean =
+                    acceptsEditing() && super.deleteSurroundingText(beforeLength, afterLength)
+                @android.annotation.TargetApi(24)
+                override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean =
+                    acceptsEditing() && super.deleteSurroundingTextInCodePoints(beforeLength, afterLength)
+                override fun setSelection(start: Int, end: Int): Boolean =
+                    acceptsEditing() && super.setSelection(start, end)
+                override fun sendKeyEvent(event: android.view.KeyEvent): Boolean =
+                    acceptsEditing() && super.sendKeyEvent(event)
+                override fun commitCompletion(text: android.view.inputmethod.CompletionInfo?): Boolean =
+                    acceptsEditing() && super.commitCompletion(text)
+                override fun commitCorrection(correctionInfo: android.view.inputmethod.CorrectionInfo?): Boolean =
+                    acceptsEditing() && super.commitCorrection(correctionInfo)
+                override fun performEditorAction(editorAction: Int): Boolean =
+                    acceptsEditing() && super.performEditorAction(editorAction)
                 override fun finishComposingText(): Boolean {
+                    if (!acceptsEditing()) return false
                     limitText()
                     val accepted = super.finishComposingText()
                     onChange(false)
                     return accepted
                 }
-                override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean =
+                    commit(text) { super.commitText(it, newCursorPosition) }
+                @android.annotation.TargetApi(33)
+                override fun commitText(text: CharSequence, newCursorPosition: Int, textAttribute: android.view.inputmethod.TextAttribute?): Boolean =
+                    commit(text) { super.commitText(checkNotNull(it), newCursorPosition, textAttribute) }
+                private fun commit(text: CharSequence?, apply: (CharSequence?) -> Boolean): Boolean {
+                    if (!acceptsEditing()) return false
                     val current = this@Editor.text
                     val start = BaseInputConnection.getComposingSpanStart(current)
                     val end = BaseInputConnection.getComposingSpanEnd(current)
@@ -635,7 +676,7 @@ internal class ExperienceTextInputOverlay(
                         ExperienceTextInputLimit.composingReplacement(current.toString(), start, end,
                             text?.toString().orEmpty(), input.maxLength)
                     } else text
-                    val accepted = try { super.commitText(replacement, newCursorPosition) }
+                    val accepted = try { apply(replacement) }
                     finally { committingComposition = false }
                     limitText()
                     onChange(false)

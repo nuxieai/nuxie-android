@@ -19,6 +19,17 @@ internal class ExperienceEnvironmentBindings(private val catalog: NuxieViewModel
         return NativeViewModelWrite(NuxieViewModelMutationKind.SET_ENUM, "colorScheme", integerValue = index.toLong())
     }
 
+    /** Viewport values describe this page's logical surface, as in iOS setLayoutSizeLocked. */
+    fun viewportMutations(width: Float, height: Float): List<NativeViewModelWrite> {
+        val env = catalog.schemas.firstOrNull { it.name == "env" && it.isGlobal } ?: return emptyList()
+        return listOf("width" to width, "height" to height).mapNotNull { (path, value) ->
+            catalog.properties.firstOrNull { it.schemaIndex == env.index && it.name == path &&
+                it.kind == NuxieViewModelPropertyKind.NUMBER }?.let {
+                NativeViewModelWrite(NuxieViewModelMutationKind.SET_NUMBER, path, numberValue = value)
+            }
+        }
+    }
+
     /** A null authored index asks the runtime for the schema default, as on iOS. */
     fun themeSelection(scheme: ExperienceColorScheme): ThemeSelection? {
         val schema = catalog.schemas.firstOrNull { it.name == THEME_GLOBAL_NAME && it.isGlobal } ?: return null
