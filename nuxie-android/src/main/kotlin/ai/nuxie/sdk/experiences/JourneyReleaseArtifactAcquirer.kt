@@ -29,7 +29,27 @@ internal class AcquiredJourneyRelease(
     val artifactDigests: Set<String> = emptySet(),
     private val protection: Closeable,
 ) : Closeable {
-    override fun close() = protection.close()
+    private val ownerClosed = AtomicBoolean(false)
+    private var references = 1
+
+    /** Native work keeps its artifact lease even when its presentation waiter times out. */
+    fun retain(): Closeable {
+        synchronized(this) {
+            check(references > 0) { "Release artifacts have retired" }
+            references++
+        }
+        val closed = AtomicBoolean(false)
+        return Closeable { if (closed.compareAndSet(false, true)) releaseReference() }
+    }
+
+    override fun close() {
+        if (ownerClosed.compareAndSet(false, true)) releaseReference()
+    }
+
+    private fun releaseReference() {
+        val release = synchronized(this) { --references == 0 }
+        if (release) protection.close()
+    }
 }
 
 /** Profile-owned leases for every screen-bearing release in one admission. */
