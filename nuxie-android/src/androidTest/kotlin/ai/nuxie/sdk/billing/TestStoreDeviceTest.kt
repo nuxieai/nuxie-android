@@ -136,7 +136,7 @@ class TestStoreDeviceTest {
     fun signedJourneyCheckoutAndRestoreCompleteThroughNativeChoices() = runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
-        val fixture = instrumentation.context.assets.open("journeys/planes/test-store-orchestration.json")
+        val fixture = instrumentation.context.assets.open("test-store-page-release.json")
             .use { Json.parseToJsonElement(it.readBytes().decodeToString()).jsonObject }
         val monitor = Instrumentation.ActivityMonitor(TestStoreHostActivity::class.java.name, null, false)
         instrumentation.addMonitor(monitor)
@@ -161,6 +161,15 @@ class TestStoreDeviceTest {
                 val descriptor = Json.parseToJsonElement(android.util.Base64.decode(
                     entry.getValue("envelope").jsonObject.getValue("descriptorBytesBase64").jsonPrimitive.content,
                     android.util.Base64.NO_WRAP).decodeToString()).jsonObject
+                // Fail at authenticated admission instead of timing out on a dialog
+                // when a fixture wrapper is no longer a valid published release.
+                ai.nuxie.sdk.experiences.JourneyReleaseVerifier.authenticate(
+                    entry.getValue("envelope").toString().encodeToByteArray(),
+                    ai.nuxie.sdk.experiences.JourneyTrustRoots.keys(NuxieEnvironment.DEVELOPMENT),
+                    checkNotNull(ai.nuxie.sdk.experiences.JourneyReleaseIdentity.fromJson(locator, setOf("legId"))),
+                    locator.getValue("legId").jsonPrimitive.content,
+                    checkNotNull(ai.nuxie.sdk.core.supportedRuntimeForEmbeddedRuntime(ai.nuxie.sdk.runtime.nuxieRuntimeSourceRevision())),
+                    ai.nuxie.sdk.experiences.JourneyReleaseReplayPolicy.Active(0))
                 val render = descriptor.getValue("render").jsonObject
                 val artifacts = (render.getValue("assets").jsonArray.filter { it.jsonObject["key"] != null } + render.getValue("nux"))
                     .associate { value -> value.jsonObject.let { it.getValue("key").jsonPrimitive.content to it } }
@@ -187,6 +196,14 @@ class TestStoreDeviceTest {
                                 val bytes = instrumentation.context.assets.open("$root${request.url.path}").use { it.readBytes() }
                                 val artifact = artifacts.getValue(request.url.path.removePrefix("/"))
                                 return HttpTransport.Response(200, bytes, mapOf("Content-Type" to artifact.getValue("contentType").jsonPrimitive.content))
+                            }
+                            if (request.url.path == "/entitled") {
+                                val body = Json.parseToJsonElement(checkNotNull(request.body).decodeToString()).jsonObject
+                                return HttpTransport.Response(200, buildJsonObject {
+                                    put("customerId", body.getValue("customerId")); put("featureId", body.getValue("featureId"))
+                                    put("requiredBalance", 1); put("code", "not_entitled"); put("type", "boolean"); put("allowed", false)
+                                    put("unlimited", false); put("balance", JsonNull)
+                                }.toString().encodeToByteArray())
                             }
                             if (request.url.path == "/purchase") return HttpTransport.Response(200,
                                 """{"success":true,"features":[]}""".encodeToByteArray())
