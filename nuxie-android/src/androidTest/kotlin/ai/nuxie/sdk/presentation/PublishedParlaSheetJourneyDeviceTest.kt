@@ -133,7 +133,7 @@ class PublishedParlaSheetJourneyDeviceTest {
                 checkNotNull(layers[2].panel).height() < checkNotNull(layers[1].panel).height())
         }
         run.assertSheetChrome(savedLayers[2], handle = true)
-        assertTrue("Covering is not a hidden lifecycle edge", run.dismissed.isEmpty())
+        assertTrue("Covering emits no dismissal", run.dismissed.isEmpty())
         // The covered screens keep their own layout while Saved is prepared and shown.
         val savedTop = checkNotNull(savedLayers[2].panel).top
         run.assertSameContent("Lesson under Saved", lessonBaseline, run.content(run.lessonArea(savedLayers)))
@@ -148,7 +148,8 @@ class PublishedParlaSheetJourneyDeviceTest {
         assertSame("The same Offer screen is revealed", offerLayers[1].screen, revealedOffer[1].screen)
         assertSame(offerLayers[1].prepared, revealedOffer[1].prepared)
         run.onMain { assertFalse(checkNotNull(savedLayers[2].window).dialog.isShowing) }
-        assertEquals("Offer does not re-enter", offerAppearances, revealedOffer[1].appearances, 0.0)
+        // P5b: revealing the retained Offer enters it once for this visit.
+        assertEquals("Offer enters once on reveal", offerAppearances + 1, revealedOffer[1].appearances, 0.0)
         run.assertSameContent("Lesson after Saved closes", lessonBaseline, run.content(run.lessonArea(revealedOffer)))
         run.assertSameContent("Offer after Saved closes", offerBaseline, run.content(checkNotNull(revealedOffer[1].panel)))
 
@@ -160,13 +161,17 @@ class PublishedParlaSheetJourneyDeviceTest {
         run.expectRevealed(OFFER)
         assertEquals(Triple(SAVED, OFFER, "journey"), run.dismissed.poll(10, TimeUnit.SECONDS))
         val again = run.checkpoint("offer revealed again", layers = 2, previous = offerLayers)
+        // P5b: the second reveal is one more visit to the same retained Offer.
+        assertSame(offerLayers[1].screen, again[1].screen)
+        assertEquals("Offer enters once per reveal", offerAppearances + 2, again[1].appearances, 0.0)
 
         // A real drag on the medium Offer is a positive system dismissal back to Lesson.
         run.swipeDown(checkNotNull(again[1].panel))
         run.expectRevealed(LESSON)
         assertEquals(Triple(OFFER, LESSON, "native_sheet"), run.dismissed.poll(10, TimeUnit.SECONDS))
         val lessonAgain = run.checkpoint("lesson revealed", layers = 1, previous = lessonLayers)
-        assertEquals(lessonLayers[0].appearances, lessonAgain[0].appearances, 0.0)
+        // P5b/P7: the native sheet dismissal reveals Lesson once, closing only the top page.
+        assertEquals(lessonLayers[0].appearances + 1, lessonAgain[0].appearances, 0.0)
         run.assertSameContent("Lesson after the last sheet closes", lessonDrawn, run.content(run.lessonArea(lessonAgain)))
     }
 
@@ -179,10 +184,13 @@ class PublishedParlaSheetJourneyDeviceTest {
         run.assertSheetChrome(offerLayers[1], handle = false)
         run.swipeDown(checkNotNull(offerLayers[1].panel))
         SystemClock.sleep(1_000)
-        run.checkpoint("large offer after swipe", layers = 2, previous = offerLayers)
+        val afterSwipe = run.checkpoint("large offer after swipe", layers = 2, previous = offerLayers)
+        // P5b: a blocked dismissal reveals nothing and changes no appearance count.
+        assertEquals(offerLayers[1].appearances, afterSwipe[1].appearances, 0.0)
         run.instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
         SystemClock.sleep(1_000)
-        run.checkpoint("large offer after back", layers = 2, previous = offerLayers)
+        val afterBack = run.checkpoint("large offer after back", layers = 2, previous = offerLayers)
+        assertEquals(offerLayers[1].appearances, afterBack[1].appearances, 0.0)
         assertTrue("closedby none dismisses nothing", run.dismissed.isEmpty())
         assertNull(run.revealed.poll(500, TimeUnit.MILLISECONDS))
         // Authored controls stay live on the retained large sheet.
@@ -192,7 +200,10 @@ class PublishedParlaSheetJourneyDeviceTest {
         run.tapControl()
         run.expectRevealed(OFFER)
         assertEquals(Triple(SAVED, OFFER, "journey"), run.dismissed.poll(10, TimeUnit.SECONDS))
-        run.checkpoint("large offer revealed", layers = 2, previous = offerLayers)
+        val revealedOffer = run.checkpoint("large offer revealed", layers = 2, previous = offerLayers)
+        // P5b: authored Back reveals the retained large Offer with one new appearance.
+        assertSame(offerLayers[1].screen, revealedOffer[1].screen)
+        assertEquals(offerLayers[1].appearances + 1, revealedOffer[1].appearances, 0.0)
     }
 
     internal class LayerState(
@@ -248,14 +259,16 @@ class PublishedParlaSheetJourneyDeviceTest {
             return result
         }
 
-        /** Every layer is active, and every retained layer keeps its native geometry. */
+        /** P5/P5b: only the top page is active; covered pages retain their geometry while hidden. */
         fun checkpoint(name: String, layers: Int, previous: List<LayerState>? = null,
             extra: (List<LayerState>) -> Unit = {}): List<LayerState> {
             instrumentation.waitForIdleSync()
             // A newly revealed top screen activates just after its reveal is reported.
+            fun expectedPhase(index: Int) = if (index == layers - 1) "active" else "hidden"
             val deadline = SystemClock.uptimeMillis() + 5_000
             var current = layers()
-            while (current.any { it.phase != "active" } && SystemClock.uptimeMillis() < deadline) {
+            while (current.withIndex().any { (index, state) -> state.phase != expectedPhase(index) } &&
+                SystemClock.uptimeMillis() < deadline) {
                 SystemClock.sleep(50)
                 current = layers()
             }
@@ -263,7 +276,9 @@ class PublishedParlaSheetJourneyDeviceTest {
                 "${it.prepared.screenId} ${it.phase} x${it.appearances} surface=${it.surface} panel=${it.panel}"
             })
             assertEquals("$name layer count", layers, current.size)
-            current.forEach { assertEquals("$name: ${it.prepared.screenId} stays active", "active", it.phase) }
+            current.forEachIndexed { index, state ->
+                assertEquals("$name: ${state.prepared.screenId} page phase", expectedPhase(index), state.phase)
+            }
             previous?.let { before ->
                 for (index in 0 until minOf(before.size, current.size)) {
                     if (current[index].screen !== before[index].screen) continue
@@ -418,7 +433,10 @@ class PublishedParlaSheetJourneyDeviceTest {
                         minX = minOf(minX, rowMin); maxX = maxOf(maxX, rowMax)
                     } else {
                         // The source control is 52 points tall; its rounded ends shorten the band.
-                        if (bandStart >= 0 && y - bandStart >= 40 * density) found = (minX + maxX) / 2f to (bandStart + y - 1) / 2f
+                        if (bandStart >= 0 && y - bandStart >= 40 * density) {
+                            Log.i(TAG, "rendered control in $area: ${Rect(minX, bandStart, maxX + 1, y)}")
+                            found = (minX + maxX) / 2f to (bandStart + y - 1) / 2f
+                        }
                         bandStart = -1
                         minX = Int.MAX_VALUE; maxX = -1
                     }
