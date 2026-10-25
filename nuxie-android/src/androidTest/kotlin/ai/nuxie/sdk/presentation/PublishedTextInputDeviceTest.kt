@@ -2490,6 +2490,7 @@ class PublishedTextInputDeviceTest {
         instrumentation.addMonitor(monitor)
         val invalid = File.createTempFile("navigation-recovery", ".riv", instrumentation.targetContext.cacheDir).apply { writeText("invalid native fixture") }
         var next: Deferred<ai.nuxie.sdk.ExperienceRef>? = null
+        var originalFailure: Throwable? = null
         try {
             val initial = scope.async { service.presentJourney(testPresentationFences(), fixture.release, screenIds[0], "recover-navigation", "recover-owner",
                 service.reserveJourney("recover-owner"), acquire = { AcquiredJourneyRelease(fixture.release.identity,
@@ -2549,11 +2550,31 @@ class PublishedTextInputDeviceTest {
             assertEquals("A pushed page covers its source without dismissing it", 0, checkpoints.get())
             assertEquals(1, monitor.hits)
             assertEquals(1, destinationCloses.get())
+        } catch (failure: Throwable) {
+            originalFailure = failure
+            throw failure
         } finally {
-            runBlocking { next?.cancelAndJoin(); service.shutdownOwnedBy("recover-owner"); scope.coroutineContext[Job]?.cancelAndJoin() }
-            invalid.delete()
-            instrumentation.removeMonitor(monitor)
-            PresentationRegistry.clearForTesting()
+            var cleanupStage = "cancel destination"
+            try {
+                runBlocking {
+                    kotlinx.coroutines.withTimeout(20_000) {
+                        next?.cancelAndJoin()
+                        cleanupStage = "shutdown presentation"
+                        service.shutdownOwnedBy("recover-owner")
+                        cleanupStage = "cancel scope"
+                        scope.coroutineContext[Job]?.cancelAndJoin()
+                    }
+                }
+            } catch (failure: Throwable) {
+                throw AssertionError("Recovery cleanup failed during $cleanupStage", failure).apply {
+                    originalFailure?.let { addSuppressed(it) }
+                }
+            } finally {
+                scope.cancel()
+                invalid.delete()
+                instrumentation.removeMonitor(monitor)
+                PresentationRegistry.clearForTesting()
+            }
         }
         assertEquals(2, destinationCloses.get())
     }
@@ -2728,11 +2749,13 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
+    @org.junit.Ignore("Seats has no accessibility value and no Increase or Decrease semantic listeners from the compiler: https://universe.basis.dev/issue/UNIV-3248")
     fun signedSliderKeyboardMatchesNativeSeekBarInLtr() =
         exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, roleProbe = AuthoredRoleProbe.KEYBOARD_LTR)
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
+    @org.junit.Ignore("Seats has no accessibility value and no Increase or Decrease semantic listeners from the compiler: https://universe.basis.dev/issue/UNIV-3248")
     fun signedSliderKeyboardMatchesNativeSeekBarInRtl() =
         exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_ROLES, roleProbe = AuthoredRoleProbe.KEYBOARD_RTL)
 
