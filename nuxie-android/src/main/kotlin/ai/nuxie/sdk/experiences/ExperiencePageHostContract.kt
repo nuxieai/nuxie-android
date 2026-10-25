@@ -20,7 +20,8 @@ internal object ExperiencePageHostContract {
     const val MODEL = "\$nuxie.Page"
     const val SCREENS = "screens"
     data class Host(val artboardName: String = ARTBOARD, val listPath: String = SCREENS,
-        val modelName: String? = MODEL, val machineName: String? = if (modelName == MODEL) MACHINE else null)
+        val modelName: String? = MODEL, val machineName: String? = if (modelName == MODEL) MACHINE else null,
+        val stepNames: Map<String, String> = emptyMap())
     enum class Kind { PAGE, LAYER, CHOREOGRAPHED }
     enum class Style { MAGIC_MOVE, PUSH, FADE, NONE, CUSTOM, MODAL }
     data class Intent(val style: Style, val transitionId: String?)

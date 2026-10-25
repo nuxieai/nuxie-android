@@ -32,9 +32,8 @@ internal class ExperienceSemanticIndex {
         val byId = incoming.nodes.associateBy { it.id }
         require(byId.size == incoming.nodes.size) { "Duplicate semantic node identity" }
         require(incoming.nodes.all { it.id in 0..0xffff_ffffL }) { "Invalid semantic node identity" }
-        require(incoming.nodes.filter { it.role == NativeSemanticRole.TEXT_FIELD }.all { it.id in nativeFieldIds }) {
-            "Semantic text fields require an associated native editable control"
-        }
+        // Editable nodes are represented exclusively by declared native editors.
+        // A native fixture can contain additional fields with no published declaration.
         data class Placement(val hidden: Boolean, val represented: Boolean, val parent: Long?)
         val placements = mutableMapOf<Long, Placement>()
         // Resolve ancestors iteratively, once per node: deep authored groups must not
@@ -55,7 +54,7 @@ internal class ExperienceSemanticIndex {
                 val parentId = if (item.parentId == -1) null else item.parentId.toLong() and 0xffff_ffffL
                 val parent = parentId?.let { placements.getValue(it) }
                 val hidden = item.stateFlags and NativeSemanticState.HIDDEN != 0 || parent?.hidden == true
-                placements[item.id] = Placement(hidden, !hidden && item.id !in nativeFieldIds,
+                placements[item.id] = Placement(hidden, !hidden && item.id !in nativeFieldIds && item.role != NativeSemanticRole.TEXT_FIELD,
                     if (parent?.represented == true) parentId else parent?.parent)
             }
         }
@@ -79,7 +78,7 @@ internal class ExperienceSemanticIndex {
         orderedChildren[-1].orEmpty().asReversed().forEach(pending::addLast)
         while (pending.isNotEmpty()) {
             val node = pending.removeLast()
-            order += node.id
+            if (node.role != NativeSemanticRole.TEXT_FIELD || node.id in nativeFieldIds) order += node.id
             if (node.id != 0xffff_ffffL) {
                 orderedChildren[node.id.toInt()].orEmpty().asReversed().forEach(pending::addLast)
             }
