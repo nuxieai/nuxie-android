@@ -20,6 +20,7 @@ import android.util.Base64
 import java.io.Closeable
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.awaitCancellation
@@ -758,6 +759,153 @@ class ExperiencePresentationServiceTest {
             assertEquals(1, launched.size)
         } finally {
             next.cancelAndJoin()
+            service.dismissFromHost("customer-1")
+        }
+    }
+
+    @Test
+    fun `cancelled page step on a blocked lane reaches abort and releases navigation`() = runTest {
+        val release = renderedJourneyRelease("text-input-navigation.json")
+        val launched = mutableListOf<String>()
+        val service = service(this, launch = launched::add)
+        val sourceLease = Lease()
+        val destinationLease = Lease()
+        val initial = async {
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { acquired(release.identity, sourceLease) }, onOutcome = {})
+        }
+        runCurrent()
+        val id = launched.single()
+        PresentationRegistry.reportFirstFrame(id)
+        initial.await()
+
+        val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
+        val descriptor = Json.parseToJsonElement("""{"render":{"screens":[{"id":"a"},{"id":"b"}]}}""").jsonObject
+        val source = PreparedPresentation(checkNotNull(PresentationRegistry.resolve(id)).sceneFile,
+            "A", 0, PresentationShell.FullScreen(), "a", descriptor)
+        val mounted = ExperienceMountedScreen(activity.get(), source, object : ExperienceSurfaceHost.Listener {
+            override fun onFirstFrame() = Unit
+            override fun onFailure(error: ExperiencePresentationException) = Unit
+        }, {})
+        val lane = ExperienceMountedScreen::class.java.getDeclaredField("lane").apply { isAccessible = true }
+            .get(mounted) as ai.nuxie.sdk.runtime.NuxieRuntimeLane
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val unblock = java.util.concurrent.CountDownLatch(1)
+        val ownerReleased = AtomicBoolean(false)
+        val stepStarted = CompletableDeferred<Unit>()
+        var stepFailure: Throwable? = null
+        var aborted = false
+        val host = object : PresentationScreenHandle {
+            override fun requestCloseFromService(reason: CloseReason) = true
+            override fun screenCloseReason(): CloseReason? = null
+            override fun finishAfterServiceClose() = PresentationRegistry.detach(id, this)
+            override suspend fun prepareNavigation(id: String, content: PreparedPresentation): PreparedScreenNavigation? {
+                if (aborted) return null
+                return object : PreparedScreenNavigation {
+                    override suspend fun awaitExit() {
+                        stepStarted.complete(Unit)
+                        try { mounted.navigateLayer(source.copy(screenId = "b"), false) }
+                        catch (error: Throwable) { stepFailure = error; throw error }
+                    }
+                    override fun activate() = Unit
+                    override suspend fun abort() { aborted = true }
+                }
+            }
+        }
+        assertTrue(PresentationRegistry.attach(id, host))
+        lane.enqueue { entered.countDown(); check(unblock.await(30, java.util.concurrent.TimeUnit.SECONDS)) }
+        assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        val next = async {
+            service.presentJourney(testPresentationFences(), release, "screen_details", "journey-1", "customer-1", null,
+                acquire = { acquired(release.identity, destinationLease) }, onOutcome = {})
+        }
+        try {
+            stepStarted.await()
+            next.cancel()
+            runCurrent()
+            // Native ownership must survive the caller giving up on the stalled lane.
+            lane.afterTermination { ownerReleased.set(true) }
+            advanceTimeBy(4_999)
+            runCurrent()
+            assertFalse("Cleanup retains its five-second retirement budget", aborted)
+            advanceTimeBy(2)
+            runCurrent()
+            assertTrue("Page-step cancellation must reach Navigation.abort within five seconds", aborted)
+            assertTrue("presentJourney must finish cancellation", next.isCompleted)
+            assertTrue("The page step must preserve cancellation", stepFailure is CancellationException)
+            val failure = stepFailure!!.suppressed.single() as ExperiencePresentationException
+            assertEquals(ExperiencePresentationException.Reason.HOST_FAILED, failure.reason)
+            assertTrue(failure.cause is kotlinx.coroutines.TimeoutCancellationException)
+            val gate = ExperiencePresentationService::class.java.getDeclaredField("layerNavigation")
+                .apply { isAccessible = true }.get(service) as kotlinx.coroutines.sync.Mutex
+            assertFalse("The cancelled page step must release layerNavigation", gate.isLocked)
+            assertFalse(ownerReleased.get())
+            assertFalse(sourceLease.closed.get())
+            assertTrue(destinationLease.closed.get())
+
+            val later = async {
+                service.presentJourney(testPresentationFences(), release, "screen_details", "journey-1", "customer-1", null,
+                    acquire = { acquired(release.identity, Lease()) }, onOutcome = {})
+            }
+            runCurrent()
+            assertEquals("A later presentation must start while the old lane remains blocked", 2, launched.size)
+            PresentationRegistry.reportFirstFrame(launched.last())
+            later.await()
+        } finally {
+            unblock.countDown()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(5_000))
+            next.cancelAndJoin()
+            mounted.close(false) {}
+            activity.pause().stop().destroy()
+            service.dismissFromHost("customer-1")
+        }
+        assertTrue(ownerReleased.get())
+    }
+
+    @Test
+    fun `cancelled acquisition releases admission after a stalled shell detach`() = runTest {
+        val release = renderedJourneyRelease()
+        val launched = mutableListOf<String>()
+        val service = service(this, launch = launched::add)
+        val started = CompletableDeferred<Unit>()
+        var failure: Throwable? = null
+        val pending = async {
+            runCatching {
+                service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
+                    service.reserveJourney("customer-1"), acquire = { started.complete(Unit); awaitCancellation() }, onOutcome = {})
+            }.exceptionOrNull().also { failure = it }
+        }
+        started.await()
+        val id = launched.single()
+        val shell = AttachedHost()
+        assertTrue(PresentationRegistry.attach(id, shell))
+        try {
+            pending.cancel()
+            runCurrent()
+            advanceTimeBy(5_001)
+            runCurrent()
+            assertTrue("A stalled shell cannot retain presentation admission", pending.isCompleted)
+            assertTrue("Acquisition must preserve cancellation", failure is CancellationException)
+            val cleanupFailure = failure!!.suppressed.single() as ExperiencePresentationException
+            assertEquals(ExperiencePresentationException.Reason.HOST_FAILED, cleanupFailure.reason)
+            assertTrue(cleanupFailure.cause is kotlinx.coroutines.TimeoutCancellationException)
+            assertNotNull("The native shell remains owned until it detaches", PresentationRegistry.observe(id))
+            val gate = ExperiencePresentationService::class.java.getDeclaredField("layerNavigation")
+                .apply { isAccessible = true }.get(service) as kotlinx.coroutines.sync.Mutex
+            assertFalse(gate.isLocked)
+            val reservation = checkNotNull(service.reserveJourney("customer-1"))
+            val later = async {
+                service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
+                    reservation, acquire = { acquired(release.identity, Lease()) }, onOutcome = {})
+            }
+            runCurrent()
+            assertEquals(2, launched.size)
+            PresentationRegistry.reportFirstFrame(launched.last())
+            later.await()
+        } finally {
+            PresentationRegistry.detach(id, shell)
+            pending.cancelAndJoin()
             service.dismissFromHost("customer-1")
         }
     }

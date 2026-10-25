@@ -588,7 +588,7 @@ internal class NuxieExperienceActivity : Activity() {
                 candidate
             }
         } catch (error: Throwable) {
-            pending?.abort()
+            runPresentationCleanup(error) { pending?.abort() }
             throw error
         }
     }
@@ -721,12 +721,12 @@ internal class NuxieExperienceActivity : Activity() {
         dismissible = true
     }
 
-    private suspend fun retireNativeAttempt(id: String, content: PresentationContentState.Ready) {
+    private suspend fun retireNativeAttempt(id: String, content: PresentationContentState.Ready) = awaitPresentationRetirement {
         val progress = checkNotNull(content.progress)
         ensureNativeRecoveryShell(id, content.content)
         val old = currentScreen
         val pending = AcquiringScreen(id)
-        if (!PresentationRegistry.attach(id, pending)) return
+        if (!PresentationRegistry.attach(id, pending)) return@awaitPresentationRetirement
         acquiringScreen?.let { PresentationRegistry.detach(id, it) }
         acquiringScreen = pending
         dismissible = true
@@ -740,10 +740,11 @@ internal class NuxieExperienceActivity : Activity() {
             screens.remove(it)
             if (currentScreen === it) currentScreen = null
         }
-        if (isFinishing || isDestroyed) return
+        if (isFinishing || isDestroyed) return@awaitPresentationRetirement
         content.content.screenLifecycle.resetUnrevealedAttempt()
         content.content.textInputState.resetUnrevealedAttempt()
         PresentationRegistry.nativeRetired(id, progress.generation)
+        Unit
     }
 
     private fun updateNativeRecovery(id: String, prepared: PreparedPresentation, progress: AcquisitionProgress) {
@@ -943,26 +944,28 @@ internal class NuxieExperienceActivity : Activity() {
             val accepted = source.prepared.closeLayer?.invoke(object : PreparedLayerReveal {
                 override val method = method
                 override val pagesToClose = pageCount
-                override suspend fun prepare() = withContext(Dispatchers.Main.immediate) {
-                    check(layers.lastOrNull() === layer && !isFinishing && !isDestroyed)
-                    val retired = layers.takeLast(pageCount)
-                    layers.subList(layers.size - pageCount, layers.size).clear()
-                    retired.forEach { page ->
-                        page.sheet?.retire()
-                        if (page.pushed) (page.root.parent as? android.view.ViewGroup)?.removeView(page.root)
-                        page.screen.close(false)
-                        screens.remove(page.screen)
+                override suspend fun prepare() = awaitPresentationRetirement {
+                    withContext(Dispatchers.Main.immediate) {
+                        check(layers.lastOrNull() === layer && !isFinishing && !isDestroyed)
+                        val retired = layers.takeLast(pageCount)
+                        layers.subList(layers.size - pageCount, layers.size).clear()
+                        retired.forEach { page ->
+                            page.sheet?.retire()
+                            if (page.pushed) (page.root.parent as? android.view.ViewGroup)?.removeView(page.root)
+                            page.screen.close(false)
+                            screens.remove(page.screen)
+                        }
+                        val lower = layers.last()
+                        lower.root.visibility = View.VISIBLE
+                        lower.root.translationX = 0f
+                        currentScreen = lower.screen
+                        contentRoot = lower.root
+                        // Unchanged heights are not delivered again by the surface on reveal.
+                        publishPageHeight(lower)
+                        intent.putExtra(EXTRA_PRESENTATION_ID, lower.screen.id)
+                        observePresentation(lower.screen.id, checkNotNull(PresentationRegistry.observe(lower.screen.id)))
+                        Unit
                     }
-                    val lower = layers.last()
-                    lower.root.visibility = View.VISIBLE
-                    lower.root.translationX = 0f
-                    currentScreen = lower.screen
-                    contentRoot = lower.root
-                    // Unchanged heights are not delivered again by the surface on reveal.
-                    publishPageHeight(lower)
-                    intent.putExtra(EXTRA_PRESENTATION_ID, lower.screen.id)
-                    observePresentation(lower.screen.id, checkNotNull(PresentationRegistry.observe(lower.screen.id)))
-                    Unit
                 }
                 override fun activate() {
                     runOnUiThread {
