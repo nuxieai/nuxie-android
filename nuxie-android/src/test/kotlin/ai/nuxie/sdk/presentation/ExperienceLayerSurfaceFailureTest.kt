@@ -14,6 +14,39 @@ import org.robolectric.RuntimeEnvironment
 @RunWith(RobolectricTestRunner::class)
 @OptIn(ExperimentalCoroutinesApi::class)
 class ExperienceLayerSurfaceFailureTest {
+    @Test fun `stalled submission retirement bounds lane and completion waits`() = runTest {
+        for (phase in listOf(false, true)) withSurface { surface, _, _, lane ->
+            val entered = java.util.concurrent.CountDownLatch(1)
+            val unblock = java.util.concurrent.CountDownLatch(1)
+            lane.enqueue { entered.countDown(); check(unblock.await(30, java.util.concurrent.TimeUnit.SECONDS)) }
+            assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            val operation = async {
+                runCatching {
+                    if (phase) surface.applyLayerTransition(250) { error("Cancelled phase must not mutate the page") }
+                    else surface.layerOperation { error("Cancelled operation must not mutate the page") }
+                }.exceptionOrNull()
+            }
+            try {
+                runCurrent()
+                advanceTimeBy(251)
+                runCurrent()
+                assertFalse(operation.isCompleted)
+                advanceTimeBy(5_001)
+                runCurrent()
+                assertTrue("Stalled retirement must stop waiting on the lane", operation.isCompleted)
+                val failure = operation.await() as ExperiencePresentationException
+                assertEquals(ExperiencePresentationException.Reason.HOST_FAILED, failure.reason)
+                assertTrue(failure.cause is TimeoutCancellationException)
+            } finally {
+                unblock.countDown()
+                operation.cancelAndJoin()
+            }
+        }
+    }
+
+    // A real native handoff must drain before runTest can auto-advance a retirement deadline.
+    private fun <T> NuxieRuntimeLane.blockingCall(work: () -> T): T = runBlocking { call(work) }
+
     private suspend fun withSurface(globals: Boolean = false, prepareTarget: Boolean = true, body: suspend (ExperienceSurfaceHost, ExperienceInteractivePage,
         ExperienceInteractivePageTest.RecordingNative, NuxieRuntimeLane) -> Unit) {
         val native = ExperienceInteractivePageTest.RecordingNative().apply { this.globals = globals }
@@ -24,7 +57,7 @@ class ExperienceLayerSurfaceFailureTest {
         val layer = ExperienceInteractivePage.open(lane, NuxieRuntime(native), file, descriptor, null)
         val surface = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native), usesSystemFrameCallbacks = false)
         try {
-            lane.call {
+            lane.blockingCall {
                 layer.prepareOnLane("a"); layer.insertOnLane("a", 0); if (prepareTarget) layer.prepareOnLane("b")
                 set(surface, "interactiveLayer", layer); set(surface, "artboard", layer.artboard)
                 set(surface, "player", layer.player); set(surface, "activeRowId", "a"); set(surface, "file", file)
@@ -34,7 +67,7 @@ class ExperienceLayerSurfaceFailureTest {
             }
             body(surface, layer, native, lane)
         } finally {
-            surface.release(); lane.call {}; layer.close(); lane.call { file.close() }
+            surface.release(); lane.blockingCall {}; runBlocking { layer.close() }; lane.blockingCall { file.close() }
             lane.shutdown(); assertTrue(lane.awaitQuiescence(5_000))
         }
     }
@@ -43,7 +76,7 @@ class ExperienceLayerSurfaceFailureTest {
         withSurface { surface, page, native, lane ->
             val commands = mutableListOf<String>()
             val events = mutableListOf<String>()
-            lane.call {
+            lane.blockingCall {
                 set(surface, "firstFrameComposed", true)
                 set(surface, "listener", object : ExperienceSurfaceHost.Listener {
                     override fun onFirstFrame() = Unit
@@ -77,7 +110,7 @@ class ExperienceLayerSurfaceFailureTest {
 
     @Test fun `page commands share active B snapshot saves and row effects exactly once`() = runBlocking {
         for (removed in listOf(false, true)) withSurface { surface, page, native, lane ->
-            lane.call {
+            lane.blockingCall {
                 page.insertOnLane("b", 1)
                 set(surface, "activeRowId", "b")
                 set(surface, "saveDescriptor", Json.parseToJsonElement("""{"responses":{"feedback":{"model":"B",
@@ -143,14 +176,14 @@ class ExperienceLayerSurfaceFailureTest {
 
     private fun assertLateCommands(activeId: String) = runBlocking {
         withSurface { surface, page, _, lane ->
-            lane.call {
+            lane.blockingCall {
                 page.insertOnLane("b", 1)
                 page.beginOnLane("b", "pair"); page.endOnLane("b", "pair")
                 page.removeOnLane("a")
                 set(surface, "activeRowId", activeId)
             }
             val late = page.stepFromRow("a")
-            lane.call {
+            lane.blockingCall {
                 val received = mutableListOf<String>()
                 set(surface, "listener", object : ExperienceSurfaceHost.Listener {
                     override fun onFirstFrame() = Unit
@@ -178,7 +211,7 @@ class ExperienceLayerSurfaceFailureTest {
 
     @Test fun `ordinary layer frames avoid catalog queries and save frames still capture answers`() = runBlocking {
         withSurface { surface, layer, native, lane ->
-            lane.call {
+            lane.blockingCall {
                 set(surface, "saveDescriptor", Json.parseToJsonElement("""{"responses":{"feedback":{"model":"B",
                     "fields":[{"key":"keptValue","type":"number"}]}}}""").jsonObject)
                 layer.insertOnLane("b", 1)
@@ -227,14 +260,14 @@ class ExperienceLayerSurfaceFailureTest {
             val report = surface.javaClass.getDeclaredMethod("reportFailure", ExperiencePresentationException.Reason::class.java,
                 String::class.java, Throwable::class.java).apply { isAccessible = true }
             report.invoke(surface, ExperiencePresentationException.Reason.HOST_FAILED, "failed frame", failure)
-            lane.call {}
+            lane.blockingCall {}
             assertEquals(failure.message, runCatching { waiter.await() }.exceptionOrNull()?.message)
             var retired = 0
             var completed = 0
             val retirement = ExperienceScreenRetirement { completed++ }
-            surface.release(onMediaReleased = { retired++; retirement.mediaReleased() }); lane.call {}
+            surface.release(onMediaReleased = { retired++; retirement.mediaReleased() }); lane.blockingCall {}
             retirement.nativeReleased()
-            surface.release(onMediaReleased = { retired++; retirement.mediaReleased() }); lane.call {}
+            surface.release(onMediaReleased = { retired++; retirement.mediaReleased() }); lane.blockingCall {}
             assertEquals("Media retirement must unblock Screen retirement", 1, retired)
             assertEquals(1, completed)
             assertEquals(1, native.freed.count { it == "player" })
@@ -256,18 +289,18 @@ class ExperienceLayerSurfaceFailureTest {
                 override fun onFailure(error: ExperiencePresentationException) { failures += error }
             })
             val waiter = layer.registerCompletion("a", "done")
-            lane.call { set(surface, "running", running); native.failWrites = true }
+            lane.blockingCall { set(surface, "running", running); native.failWrites = true }
             val write = async { runCatching { surface.applyLayerTransition {
                 if (inserting) it.insertOnLane("b", 1)
                 else it.setPhasesOnLane(listOf("a" to ExperienceScreenLifecycle.Phase.EXITING))
             } } }
-            runCurrent(); lane.call {}
-            if (running) lane.call {
+            runCurrent(); lane.blockingCall {}
+            if (running) lane.blockingCall {
                 runCatching { surface.javaClass.getDeclaredMethod("applyNextTransitionWrite").apply { isAccessible = true }.invoke(surface) }
             }
             // Native failure cleanup crosses the lane, coroutine dispatcher and UI queue.
             repeat(4) {
-                lane.call {}; runCurrent()
+                lane.blockingCall {}; runCurrent()
                 org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
             }
             try {
@@ -281,17 +314,17 @@ class ExperienceLayerSurfaceFailureTest {
 
     @Test fun `phase barrier without a window finishes within the watchdog and settles mutations`() = runTest {
         withSurface { surface, layer, _, lane ->
-            lane.call { set(surface, "running", true) }
+            lane.blockingCall { set(surface, "running", true) }
             val phase = async { surface.applyLayerTransition {
                 it.setPhasesOnLane(listOf("a" to ExperienceScreenLifecycle.Phase.EXITING))
             } }
-            runCurrent(); lane.call {}
-            advanceTimeBy(251); runCurrent(); lane.call {}; runCurrent()
+            runCurrent(); lane.blockingCall {}
+            advanceTimeBy(251); runCurrent(); lane.blockingCall {}; runCurrent()
             try {
                 assertTrue("A missing window must not hold navigation before its watchdog", phase.isCompleted)
                 phase.await()
                 assertEquals(NuxieViewModelScalarValue.StringValue("exiting"), layer.lifecycle("a")["screen/phase"])
-                surface.layerOperation { it.insertOnLane("b", 1) }
+                runBlocking { surface.layerOperation { it.insertOnLane("b", 1) } }
             } finally { phase.cancelAndJoin() }
         }
     }
@@ -300,7 +333,7 @@ class ExperienceLayerSurfaceFailureTest {
         withSurface { surface, layer, native, lane ->
             val renderer = NuxieAndroidVulkanRenderer(900, native)
             val window = NuxieRuntimeWindow(901, native)
-            lane.call {
+            lane.blockingCall {
                 set(surface, "running", true); set(surface, "renderer", renderer); set(surface, "window", window)
                 repeat(3) { assertEquals(4, renderer.renderAndPresent(layer.player, window, 0, 1f)) }
                 set(surface, "pendingPresentation", true)
@@ -309,15 +342,15 @@ class ExperienceLayerSurfaceFailureTest {
                 it.insertOnLane("b", 1)
                 it.setPhasesOnLane(listOf("a" to ExperienceScreenLifecycle.Phase.EXITING, "b" to ExperienceScreenLifecycle.Phase.ENTERING))
             } }
-            runCurrent(); lane.call {}
-            advanceTimeBy(251); runCurrent(); lane.call {}; runCurrent()
+            runCurrent(); lane.blockingCall {}
+            advanceTimeBy(251); runCurrent(); lane.blockingCall {}; runCurrent()
             try {
                 assertTrue("Healthy pending renders must not hold the phase barrier forever", phase.isCompleted)
                 phase.await()
                 assertEquals(1, native.detaches)
                 assertFalse(field(surface, "pendingPresentation") as Boolean)
                 assertEquals(listOf("a", "b"), layer.mountedScreenIds())
-                surface.removeLayerRow("a")
+                runBlocking { surface.removeLayerRow("a") }
                 assertEquals(listOf("b"), layer.mountedScreenIds())
             } finally { phase.cancelAndJoin() }
         }
@@ -345,15 +378,15 @@ class ExperienceLayerSurfaceFailureTest {
             set(mounted, "surface", surface)
             var navigation: Deferred<Unit>? = null
             try {
-                mounted.prepareRow(target, listener)
-                lane.call { set(surface, "running", true) }
+                runBlocking { mounted.prepareRow(target, listener) }
+                lane.blockingCall { set(surface, "running", true) }
                 navigation = async { mounted.navigateLayer(target, false) }
                 // Drain real lane handoffs between virtual clock increments. No frame is supplied.
                 repeat(32) {
-                    repeat(4) { runCurrent(); lane.call {} }
+                    repeat(4) { runCurrent(); lane.blockingCall {} }
                     advanceTimeBy(25)
                 }
-                repeat(4) { runCurrent(); lane.call {} }
+                repeat(4) { runCurrent(); lane.blockingCall {} }
                 assertTrue("The mounted $style step must activate despite missing phase frames", navigation.isCompleted)
                 navigation.await()
                 assertEquals(listOf("b"), layer.mountedScreenIds())
@@ -453,7 +486,7 @@ class ExperienceLayerSurfaceFailureTest {
             try {
                 mounted.prepareRow(source, listener)
                 assertEquals(listOf("a"), page.mountedScreenIds())
-                lane.call {
+                lane.blockingCall {
                     page.stepOnLane(0.0)
                     native.traceListMutations = true
                     native.trace.clear()
@@ -493,7 +526,7 @@ class ExperienceLayerSurfaceFailureTest {
             set(mounted, "surface", surface)
             try {
                 mounted.prepareRow(source, listener)
-                lane.call {
+                lane.blockingCall {
                     page.insertOnLane("b", 1)
                     page.setPhasesOnLane(listOf("a" to ExperienceScreenLifecycle.Phase.HIDDEN,
                         "b" to ExperienceScreenLifecycle.Phase.HIDDEN))
@@ -510,11 +543,11 @@ class ExperienceLayerSurfaceFailureTest {
                     assertTrue(native.trace.any { it.startsWith("end:") })
                 }
                 mounted.enterPage()
-                lane.call {}
+                lane.blockingCall {}
                 val count = (before as NuxieViewModelScalarValue.NumberValue).value
                 assertEquals(NuxieViewModelScalarValue.NumberValue(count + 1), page.lifecycle(id)["screen/appearances"])
                 mounted.activate()
-                lane.call {}
+                lane.blockingCall {}
                 assertEquals(NuxieViewModelScalarValue.StringValue("active"), page.lifecycle(id)["screen/phase"])
                 assertEquals(NuxieViewModelScalarValue.NumberValue(count + 1), page.lifecycle(id)["screen/appearances"])
             } finally {
@@ -613,7 +646,7 @@ class ExperienceLayerSurfaceFailureTest {
                         })
                 } finally {
                     withContext(NonCancellable) {
-                        lane.call { assertNull(field(page, "liveStep")); native.trace.clear() }
+                        lane.blockingCall { assertNull(field(page, "liveStep")); native.trace.clear() }
                         surface.restoreLayerRow("a", "b", keepTarget)
                     }
                 }
@@ -690,7 +723,7 @@ class ExperienceLayerSurfaceFailureTest {
                 withTimeout(5_000) {
                     while (page.mountedScreenIds() != listOf("a")) delay(1)
                 }
-                lane.call { assertEquals("a" to "back", field(page, "liveStep")) }
+                lane.blockingCall { assertEquals("a" to "back", field(page, "liveStep")) }
                 assertTrue(navigation.isActive)
                 assertTrue(native.freed.contains("values:$oldSource"))
                 native.writes.clear()
@@ -739,8 +772,8 @@ class ExperienceLayerSurfaceFailureTest {
             val scene = java.io.File.createTempFile("layer-prepare", ".riv")
             val target = PreparedPresentation(scene, "B", 0, PresentationShell.FullScreen(), "b")
             val preparation = async { surface.prepareLayerRow(target) }
-            runCurrent(); lane.call {}
-            advanceTimeBy(251); runCurrent(); lane.call {}; runCurrent()
+            runCurrent(); lane.blockingCall {}
+            advanceTimeBy(251); runCurrent(); lane.blockingCall {}; runCurrent()
             try {
                 assertTrue("Preparation must reach the transition even if no submission presents", preparation.isCompleted)
                 preparation.await()
@@ -763,8 +796,8 @@ class ExperienceLayerSurfaceFailureTest {
                 try { surface.prepareLayerRow(target); prepared = true }
                 finally { withContext(NonCancellable) { runCatching { surface.restoreLayerRow("a", "b") }.onSuccess { restored = true } } }
             }
-            navigation.cancel(); runCurrent(); lane.call {}
-            advanceTimeBy(251); repeat(4) { runCurrent(); lane.call {} }
+            navigation.cancel(); runCurrent(); lane.blockingCall {}
+            advanceTimeBy(251); repeat(4) { runCurrent(); lane.blockingCall {} }
             try {
                 assertTrue("Abort must finish while its parent is cancelled", navigation.isCompleted)
                 assertTrue(restored)
@@ -774,9 +807,11 @@ class ExperienceLayerSurfaceFailureTest {
                 assertFalse("Cancelled row preparation must never run late", prepared)
                 assertEquals(1, native.detaches)
                 assertEquals(listOf("a"), layer.mountedScreenIds())
-                surface.prepareLayerRow(target)
-                surface.layerOperation { it.insertOnLane("b", 1) }
-                surface.restoreLayerRow("a", "b")
+                runBlocking {
+                    surface.prepareLayerRow(target)
+                    surface.layerOperation { it.insertOnLane("b", 1) }
+                    surface.restoreLayerRow("a", "b")
+                }
             } finally { retireAndDrain(surface, lane); navigation.cancelAndJoin(); scene.delete() }
         }
     }
@@ -785,22 +820,22 @@ class ExperienceLayerSurfaceFailureTest {
         withSurface(globals = true) { surface, layer, native, lane ->
             installPendingSubmission(surface, native, lane)
             val update = surface.updateRuntimeValues(mapOf("env/reduceMotion" to NuxieViewModelScalarValue.BooleanValue(true)))
-            lane.call {}
+            lane.blockingCall {}
             assertFalse(update.isCompleted)
             val phase = async { surface.applyLayerTransition {
                 it.setPhasesOnLane(listOf("a" to ExperienceScreenLifecycle.Phase.EXITING))
             } }
-            runCurrent(); lane.call {}
+            runCurrent(); lane.blockingCall {}
             var reducedAtStep = false
             native.onStep = { reducedAtStep = native.writes.any { it.first == 500L && it.second.path == "reduceMotion" && it.second.boolValue } }
-            lane.call {
+            lane.blockingCall {
                 val layout = checkNotNull(ExperienceSurfaceLayout.create(100, 100, 1f))
                 set(surface, "surfaceLayout", layout); set(surface, "appliedLayout", layout)
                 set(surface, "pendingPresentation", false); set(surface, "attached", true)
                 native.presentation = 1
             }
             surface.doFrame(1_000_000_000L)
-            lane.call {}; runCurrent()
+            lane.blockingCall {}; runCurrent()
             try {
                 assertTrue("The queued update must complete with the phase frame", update.isCompleted)
                 assertTrue(update.await())
@@ -811,7 +846,7 @@ class ExperienceLayerSurfaceFailureTest {
         }
     }
 
-    @Test fun `prepared Screen owns the lifecycle of retained and reinserted rows`() = runTest {
+    @Test fun `prepared Screen owns the lifecycle of retained and reinserted rows`() = runBlocking {
         withSurface { surface, layer, _, lane ->
             val scene = java.io.File.createTempFile("layer-lifecycle", ".riv")
             val source = ExperienceScreenLifecycle().apply {
@@ -848,7 +883,7 @@ class ExperienceLayerSurfaceFailureTest {
         }
     }
 
-    @Test fun `stale preparation lifecycle cannot reset a retained row appearance history`() = runTest {
+    @Test fun `stale preparation lifecycle cannot reset a retained row appearance history`() = runBlocking {
         withSurface { surface, layer, _, _ ->
             val scene = java.io.File.createTempFile("layer-retained-lifecycle", ".riv")
             try {
@@ -869,7 +904,7 @@ class ExperienceLayerSurfaceFailureTest {
 
     private suspend fun installPendingSubmission(surface: ExperienceSurfaceHost,
         native: ExperienceInteractivePageTest.RecordingNative, lane: NuxieRuntimeLane) {
-        lane.call {
+        lane.blockingCall {
             val renderer = NuxieAndroidVulkanRenderer(900, native)
             val window = NuxieRuntimeWindow(901, native)
             set(surface, "renderer", renderer); set(surface, "window", window)
@@ -880,7 +915,7 @@ class ExperienceLayerSurfaceFailureTest {
         }
     }
 
-    private suspend fun retireAndDrain(surface: ExperienceSurfaceHost, lane: NuxieRuntimeLane) = lane.call {
+    private suspend fun retireAndDrain(surface: ExperienceSurfaceHost, lane: NuxieRuntimeLane) = lane.blockingCall {
         surface.javaClass.getDeclaredMethod("retireSubmission").apply { isAccessible = true }.invoke(surface)
         surface.javaClass.getDeclaredMethod("drainTextWrites").apply { isAccessible = true }.invoke(surface)
     }

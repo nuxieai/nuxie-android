@@ -225,6 +225,7 @@ internal class ExperienceMountedScreen(
             val waiter = if (!reduceMotionEnabled) exit.event?.let { name ->
                 surface.layerOperation { it.registerCompletionOnLane(id, name) }
             } else null
+            var failure: Throwable? = null
             try {
                 val write: (ExperienceInteractivePage) -> Unit = {
                     it.setPhasesOnLane(listOf(id to ExperienceScreenLifecycle.Phase.EXITING), exitReason = reason)
@@ -234,7 +235,18 @@ internal class ExperienceMountedScreen(
                     else surface.applyLayerTransition(budget, write)
                 if (!presented) logPresentationTimeout(budget)
                 if (presented && waiter != null && exit.watchdogMs != null) kotlinx.coroutines.withTimeoutOrNull(exit.watchdogMs) { waiter.await() }
-            } finally { if (waiter != null) surface.layerOperation { it.removeCompletionOnLane(id, waiter) } }
+            } catch (error: Throwable) {
+                failure = error
+                throw error
+            } finally {
+                if (waiter != null) kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                    runPresentationCleanup(failure) {
+                        awaitPresentationRetirement {
+                            surface.layerOperation { it.removeCompletionOnLane(id, waiter) }
+                        }
+                    }
+                }
+            }
             return
         }
         val render = prepared.descriptor?.get("render") as? JsonObject
@@ -309,6 +321,7 @@ internal class ExperienceMountedScreen(
         var loggedPresentationTimeout = false
         val mutations = mutableListOf<(ExperienceInteractivePage) -> Unit>()
         var collecting = false
+        var failure: Throwable? = null
         try {
             ExperiencePageStep.perform(sourceId, targetId, style, isBack, plan, layerExit(prepared), reduceMotionEnabled || covered,
                 object : ExperiencePageStep.Operations {
@@ -364,9 +377,16 @@ internal class ExperienceMountedScreen(
                         surface.selectLayerRow(targetId)
                     }
                 })
+        } catch (error: Throwable) {
+            failure = error
+            throw error
         } finally {
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
-                surface.layerOperation { layer -> waiters.forEach { (id, waiter) -> layer.removeCompletionOnLane(id, waiter) } }
+                runPresentationCleanup(failure) {
+                    awaitPresentationRetirement {
+                        surface.layerOperation { layer -> waiters.forEach { (id, waiter) -> layer.removeCompletionOnLane(id, waiter) } }
+                    }
+                }
             }
         }
     }

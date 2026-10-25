@@ -149,12 +149,15 @@ internal class ExperienceSurfaceHost(
         } finally { completion.cancel() }
     }
 
-    private suspend fun retireStalledLayerSubmission(completion: kotlinx.coroutines.Deferred<*>) = lane.call {
-        if (!completion.isCompleted) {
-            check(retireSubmission()) { "Experience layer submission retirement failed" }
-            drainTextWrites()
-            settleHiddenTransitions(force = true)
+    private suspend fun retireStalledLayerSubmission(completion: kotlinx.coroutines.Deferred<*>) = awaitPresentationRetirement {
+        lane.call {
+            if (!completion.isCompleted) {
+                check(retireSubmission()) { "Experience layer submission retirement failed" }
+                drainTextWrites()
+                settleHiddenTransitions(force = true)
+            }
         }
+        completion.await()
     }
 
     internal suspend fun prepareLayerRow(prepared: PreparedPresentation) = layerOperation { layer ->
