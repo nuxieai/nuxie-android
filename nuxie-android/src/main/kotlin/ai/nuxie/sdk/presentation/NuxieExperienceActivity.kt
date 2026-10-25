@@ -209,9 +209,11 @@ internal class NuxieExperienceActivity : Activity() {
                 }
             }
         }
-        override suspend fun retireForRetry() = withContext(Dispatchers.Main.immediate) {
-            close(true)
-            closed.await()
+        override suspend fun retireForRetry() = awaitPresentationRetirement {
+            withContext(Dispatchers.Main.immediate) {
+                close(true)
+                closed.await()
+            }
         }
         override suspend fun dismissLayerFromJourney(): Boolean = withContext(Dispatchers.Main.immediate) {
             // A native close of this same layer is already running. It reports the dismissal
@@ -401,6 +403,11 @@ internal class NuxieExperienceActivity : Activity() {
 
         fun cancel() { animation?.cancel() }
 
+        override suspend fun awaitExit(beforePageStep: suspend () -> Boolean) {
+            if (reusesLayer && !beforePageStep()) return
+            awaitExit()
+        }
+
         override suspend fun awaitExit() = withContext(Dispatchers.Main.immediate) {
             check(navigation === this@Navigation && currentScreen === source && !isFinishing && !isDestroyed) {
                 "Navigation source is no longer active"
@@ -518,24 +525,28 @@ internal class NuxieExperienceActivity : Activity() {
             }
         }
 
-        override suspend fun abort() = withContext(NonCancellable + Dispatchers.Main.immediate) {
-            animation?.restoreSource()
-            if (reusesLayer && currentScreen === source && source.screenCloseReason() == null) {
-                runCatching { source.mounted?.restoreRow(source.prepared, checkNotNull(target.prepared.screenId)) }
-                    .onFailure { source.fail(it) }
+        override suspend fun abort() = withContext(NonCancellable) {
+            awaitPresentationRetirement {
+                withContext(Dispatchers.Main.immediate) {
+                    animation?.restoreSource()
+                    if (reusesLayer && currentScreen === source && source.screenCloseReason() == null) {
+                        runCatching { source.mounted?.restoreRow(source.prepared, checkNotNull(target.prepared.screenId)) }
+                            .onFailure { source.fail(it) }
+                    }
+                    restoreInput()
+                    if (navigation === this@Navigation) navigation = null
+                    if (!reusesLayer) target.view?.let { (it.parent as? android.view.ViewGroup)?.removeView(it) }
+                    target.close(false)
+                    screens.remove(target)
+                    if (currentScreen === source) {
+                        if (source.screenCloseReason() != null) finish()
+                        else if (closingLayer == null && !target.prepared.opensLayer) source.mounted?.activate()
+                    }
+                    target.closed.await()
+                    if (currentScreen === source && source.screenCloseReason() == null && !isFinishing && !isDestroyed) drainQueuedBack()
+                    else queuedBack.clear()
+                }
             }
-            restoreInput()
-            if (navigation === this@Navigation) navigation = null
-            if (!reusesLayer) target.view?.let { (it.parent as? android.view.ViewGroup)?.removeView(it) }
-            target.close(false)
-            screens.remove(target)
-            if (currentScreen === source) {
-                if (source.screenCloseReason() != null) finish()
-                else if (closingLayer == null && !target.prepared.opensLayer) source.mounted?.activate()
-            }
-            target.closed.await()
-            if (currentScreen === source && source.screenCloseReason() == null && !isFinishing && !isDestroyed) drainQueuedBack()
-            else queuedBack.clear()
         }
     }
 
