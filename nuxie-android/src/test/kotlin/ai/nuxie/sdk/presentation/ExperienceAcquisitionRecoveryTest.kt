@@ -4,6 +4,7 @@ import ai.nuxie.sdk.fixtures.FixtureRunner
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
@@ -107,6 +108,34 @@ class ExperienceAcquisitionRecoveryTest {
         result.cancel()
         result.join()
         assertEquals(1, closed)
+    }
+
+    @Test fun `cancelled late resource keeps release timeout suppressed`() = runTest {
+        val recovery = ExperienceAcquisitionRecovery<Int>({}, { testScheduler.currentTime })
+        val lateResource = CompletableDeferred<Unit>()
+        val cancellation = kotlinx.coroutines.CancellationException("owner cancelled")
+        var failure: Throwable? = null
+        val result = async {
+            runCatching {
+                recovery.acquire(prepare = { withContext(NonCancellable) { lateResource.await() }; 1 },
+                    release = {
+                        withContext(NonCancellable) {
+                            awaitPresentationRetirement { kotlinx.coroutines.awaitCancellation() }
+                        }
+                    }, recoverable = { false }, onFailure = { fail("Cancellation must not enter recovery") })
+            }.exceptionOrNull().also { failure = it }
+        }
+        runCurrent()
+        result.cancel(cancellation)
+        lateResource.complete(Unit)
+        runCurrent()
+        advanceTimeBy(5_001)
+        runCurrent()
+        assertTrue(result.isCompleted)
+        assertTrue(failure is kotlinx.coroutines.CancellationException)
+        val cleanupFailure = failure!!.suppressed.single() as ExperiencePresentationException
+        assertEquals(ExperiencePresentationException.Reason.HOST_FAILED, cleanupFailure.reason)
+        assertTrue(cleanupFailure.cause is kotlinx.coroutines.TimeoutCancellationException)
     }
 
 }

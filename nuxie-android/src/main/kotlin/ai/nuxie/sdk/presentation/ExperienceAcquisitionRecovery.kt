@@ -1,11 +1,13 @@
 package ai.nuxie.sdk.presentation
 
 import android.os.SystemClock
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CompletableJob
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 
 internal data class AcquisitionProgress(val generation: Long, val startedAtMillis: Long, val phase: Phase) {
@@ -75,9 +77,12 @@ internal class ExperienceAcquisitionRecovery<T : Any>(
                 } catch (error: Throwable) {
                     failure = error
                 } finally {
-                    try { if (!transferred) acquired?.let { release(it) } }
+                    try { runPresentationCleanup(failure) { if (!transferred) acquired?.let { release(it) } } }
                     finally { attempt.job.complete() }
                 }
+                // Keep the attempt's cancellation and its suppressed cleanup error. A fresh
+                // ensureActive exception from the owner would discard that diagnostic.
+                if (failure is CancellationException && !currentCoroutineContext().isActive) throw failure
                 currentCoroutineContext().ensureActive()
                 failure?.let { error ->
                     if (!attempt.retry.isCompleted) {

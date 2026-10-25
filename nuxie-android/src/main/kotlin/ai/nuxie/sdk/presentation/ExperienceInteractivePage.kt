@@ -129,7 +129,9 @@ internal class ExperienceInteractivePage private constructor(
 
     suspend fun begin(screenId: String, transition: String?) = lane.call { beginOnLane(screenId, transition) }
     suspend fun end(screenId: String, transition: String?) = lane.call { endOnLane(screenId, transition) }
-    suspend fun retire(reachable: Set<String>, active: String) = lane.call { retireOnLane(reachable, active) }
+    suspend fun retire(reachable: Set<String>, active: String) = awaitPresentationRetirement {
+        lane.call { retireOnLane(reachable, active) }
+    }
 
     internal fun beginOnLane(screenId: String, transition: String?) = checked {
         check(liveStep == null) { "Page step already active" }
@@ -313,7 +315,9 @@ internal class ExperienceInteractivePage private constructor(
     }
 
     /** A watchdog retires its waiters explicitly before removing the outgoing row. */
-    suspend fun removeCompletion(screenId: String, completion: Deferred<Unit>) = lane.call { removeCompletionOnLane(screenId, completion) }
+    suspend fun removeCompletion(screenId: String, completion: Deferred<Unit>) = awaitPresentationRetirement {
+        lane.call { removeCompletionOnLane(screenId, completion) }
+    }
 
     internal fun removeCompletionOnLane(screenId: String, completion: Deferred<Unit>) {
         // Cleanup must not replace the original failure after the player has failed or closed.
@@ -322,7 +326,9 @@ internal class ExperienceInteractivePage private constructor(
         }
     }
 
-    suspend fun remove(screenId: String, correlationId: ULong = 0uL): Step = lane.call { removeOnLane(screenId, correlationId) }
+    suspend fun remove(screenId: String, correlationId: ULong = 0uL): Step = awaitPresentationRetirement {
+        lane.call { removeOnLane(screenId, correlationId) }
+    }
 
     internal fun removeOnLane(screenId: String, correlationId: ULong = 0uL): Step = checked {
         val index = mounted.indexOf(screenId)
@@ -398,7 +404,7 @@ internal class ExperienceInteractivePage private constructor(
 
     internal fun layoutSizeOnLane(): Pair<Float, Float> = checked { player.layoutSize() }
 
-    suspend fun close() = lane.call { closeOnLane() }
+    suspend fun close() = awaitPresentationRetirement { lane.call { closeOnLane() } }
 
     internal fun closeOnLane() {
         if (!closed) {
