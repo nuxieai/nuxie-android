@@ -1083,6 +1083,7 @@ internal class ExperiencePresentationService(
             var navigationRecoveryOwner: String? = null
             val navigationRecoveryToken = UUID.randomUUID().toString()
             val nativePreparationFinished = CompletableDeferred<Unit>()
+            var preparationFailure: Throwable? = null
             try {
                 val existing = synchronized(stateLock) {
                     if (!attempt.job.isActive || !isCurrentIdentity(request) || !canPresent()) {
@@ -1258,14 +1259,18 @@ internal class ExperiencePresentationService(
                                     checkOwnership()
                                     Destination(source, content, provisional)
                                 } catch (error: Throwable) {
-                                    withContext(NonCancellable) {
-                                        try { provisional?.abort() } finally { acquired?.acquired?.close() }
+                                    runPresentationCleanup(error) {
+                                        withContext(NonCancellable) {
+                                            try { awaitPresentationRetirement { provisional?.abort() } }
+                                            finally { acquired?.acquired?.close() }
+                                        }
                                     }
                                     throw error
                                 }
                             },
                             release = { retired -> withContext(NonCancellable) {
-                                try { retired.navigation?.abort() } finally { retired.source.acquired.close() }
+                                try { awaitPresentationRetirement { retired.navigation?.abort() } }
+                                finally { retired.source.acquired.close() }
                             } },
                             recoverable = { error -> error !is ExperiencePresentationException || error.reason in setOf(
                                 ExperiencePresentationException.Reason.ACQUISITION_FAILED,
@@ -1331,14 +1336,14 @@ internal class ExperiencePresentationService(
                     }
                     if (dismissal == JourneyScreenDismissalResult.COMPLETED ||
                         dismissal == JourneyScreenDismissalResult.REJECTED) {
-                        navigation?.abort()
+                        awaitPresentationRetirement { navigation?.abort() }
                         navigation = null
                     }
                     if (!opensLayer) outgoing.textInputsByScreen[outgoing.screenId]?.detach()
                     if (!opensLayer || dismissal != JourneyScreenDismissalResult.HANDLED) {
                         PresentationRegistry.dismiss(it.id, CloseReason.JourneyNavigation)
                         attemptOutcome(it, CloseReason.JourneyNavigation)
-                        if (navigation == null) it.finished.await()
+                        if (navigation == null) awaitPresentationRetirement { it.finished.await() }
                     }
                     when (dismissal) {
                         JourneyScreenDismissalResult.COMPLETED ->
@@ -1426,42 +1431,52 @@ internal class ExperiencePresentationService(
                 pending
             } catch (error: Throwable) {
                 withContext(NonCancellable) {
-                    runCatching { navigation?.abort() }.exceptionOrNull()?.let(error::addSuppressed)
+                    runPresentationCleanup(error) { awaitPresentationRetirement { navigation?.abort() } }
                 }
                 runCatching { unownedAcquisition?.close() }.exceptionOrNull()?.let(error::addSuppressed)
-                if (error is CancellationException && !attempt.job.isActive &&
+                val failure = if (error is CancellationException && !attempt.job.isActive &&
                     currentCoroutineContext()[Job]?.isActive == true) {
-                    acquiringFailure.get()?.let { failure ->
-                        throw (failure as? ExperiencePresentationException ?: ExperiencePresentationException(
-                            ExperiencePresentationException.Reason.HOST_FAILED, "Authenticated shell failed", failure,
-                        ))
+                    val shellFailure = acquiringFailure.get()
+                    if (shellFailure != null) {
+                        shellFailure as? ExperiencePresentationException ?: ExperiencePresentationException(
+                            ExperiencePresentationException.Reason.HOST_FAILED, "Authenticated shell failed", shellFailure,
+                        )
+                    } else {
+                        // Owned withdrawal is a presentation result, not cancellation of the Journey worker.
+                        ExperiencePresentationException(
+                            if (attempt.layerDismissed.get()) ExperiencePresentationException.Reason.LAYER_DISMISSED
+                            else ExperiencePresentationException.Reason.SUPERSEDED,
+                            "Presentation preparation was withdrawn", error,
+                        )
                     }
-                    // Owned withdrawal is a presentation result, not cancellation of the Journey worker.
-                    throw ExperiencePresentationException(
-                        if (attempt.layerDismissed.get()) ExperiencePresentationException.Reason.LAYER_DISMISSED
-                        else ExperiencePresentationException.Reason.SUPERSEDED,
-                        "Presentation preparation was withdrawn", error,
-                    )
-                }
-                throw error
+                } else error
+                preparationFailure = failure
+                throw failure
             } finally {
-                navigationRecoveryOwner?.let { PresentationRegistry.endNavigationRecovery(it, navigationRecoveryToken) }
-                if (!published) withContext(NonCancellable) {
-                    acquiringId?.let { PresentationRegistry.dismiss(it, CloseReason.HostDismissed) }
-                    acquiringDetached?.await()
-                }
-                synchronized(stateLock) {
-                    if (preparation === attempt) preparation = null
-                    if (transitionClaimed) {
-                        transitionInProgress = false
-                        if (!published && reservationId != null && pendingReservation?.id == reservationId) {
-                            pendingReservation = null
+                try {
+                    navigationRecoveryOwner?.let { PresentationRegistry.endNavigationRecovery(it, navigationRecoveryToken) }
+                    if (!published) withContext(NonCancellable) {
+                        runPresentationCleanup(preparationFailure) {
+                            awaitPresentationRetirement {
+                                acquiringId?.let { PresentationRegistry.dismiss(it, CloseReason.HostDismissed) }
+                                acquiringDetached?.await()
+                            }
                         }
                     }
+                } finally {
+                    synchronized(stateLock) {
+                        if (preparation === attempt) preparation = null
+                        if (transitionClaimed) {
+                            transitionInProgress = false
+                            if (!published && reservationId != null && pendingReservation?.id == reservationId) {
+                                pendingReservation = null
+                            }
+                        }
+                    }
+                    attempt.job.complete()
+                    nativePreparationFinished.complete(Unit)
+                    attempt.finished.complete(Unit)
                 }
-                attempt.job.complete()
-                nativePreparationFinished.complete(Unit)
-                attempt.finished.complete(Unit)
             }
         }
         val nativeGeneration = PresentationRegistry.nativeProgress(active.id)?.generation
@@ -1494,7 +1509,7 @@ internal class ExperiencePresentationService(
             preparation?.takeIf { transitionInProgress }?.also { it.layerDismissed.set(true) }
         }
         pending?.job?.cancel()
-        pending?.finished?.await()
+        awaitPresentationRetirement { pending?.finished?.await() }
         val count = reveal.pagesToClose
         val (outgoing, incoming, coveredToRetire) = synchronized(stateLock) {
             val outgoing = current ?: return false
@@ -1534,7 +1549,7 @@ internal class ExperiencePresentationService(
                 PresentationRegistry.dismiss(retired.id, CloseReason.JourneyNavigation)
                 attemptOutcome(retired, CloseReason.JourneyNavigation)
             }
-            reveal.prepare()
+            awaitPresentationRetirement { reveal.prepare() }
             fun ownsIncoming() = synchronized(stateLock) {
                 current === incoming && incoming.outcomeReason.get() == null && incoming.journey.fences.isCurrent()
             }
