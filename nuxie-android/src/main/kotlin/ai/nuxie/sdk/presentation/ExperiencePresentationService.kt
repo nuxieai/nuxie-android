@@ -107,6 +107,7 @@ internal data class PreparedPresentation(
     val isPushPage: Boolean = false,
     val pageHistory: List<String> = emptyList(),
     val isBack: Boolean = false,
+    val artifactLease: AcquiredJourneyRelease? = null,
     // Explicit native fixture injection; signed production preparations always use the fixed page contract.
     val pageHost: ExperiencePageHostContract.Host = ExperiencePageHostContract.Host(),
     val initializePageFixture: ((ai.nuxie.sdk.runtime.NuxieRuntimeArtboard) -> Unit)? = null,
@@ -152,6 +153,8 @@ internal sealed interface PresentationShell {
 /** Screen-scoped close operations and access to its hosting Activity. */
 internal interface PreparedScreenNavigation {
     suspend fun awaitExit() = Unit
+    /** A page draws its destination during the step, so its checkpoint must settle first. */
+    suspend fun awaitExit(beforePageStep: suspend () -> Boolean) = awaitExit()
     fun activate()
     suspend fun abort()
 }
@@ -1179,7 +1182,7 @@ internal class ExperiencePresentationService(
                         } == true),
                         pageHistory = if (opensLayer || existing == null) listOf(journey.screenId)
                             else back?.history?.screens ?: existing.journey.layerHistory.visit(journey.screenId, transition).screens,
-                        isBack = back != null)
+                        isBack = back != null, artifactLease = source.acquired)
                 }
                 data class Destination(val source: PreparedSource, val content: PreparedPresentation, val navigation: PreparedScreenNavigation?)
                 suspend fun acquireInitial(): PreparedSource = try {
@@ -1245,7 +1248,12 @@ internal class ExperiencePresentationService(
                                         PresentationRegistry.currentScreen(existing.id)?.prepareNavigation(id, content).also { provisional = it }
                                     }
                                     check(!opensLayer || provisional != null) { "Modal navigation requires its current native host" }
-                                    provisional?.awaitExit()
+                                    provisional?.awaitExit {
+                                        val dismissal = if (opensLayer) JourneyScreenDismissalResult.HANDLED
+                                            else dismissForNavigation(existing.journey, journey.screenId)
+                                        checkOwnership()
+                                        dismissal == JourneyScreenDismissalResult.HANDLED
+                                    }
                                     currentCoroutineContext().ensureActive()
                                     checkOwnership()
                                     Destination(source, content, provisional)
@@ -1869,14 +1877,14 @@ internal class ExperiencePresentationService(
         }
     }
 
-    suspend fun dismissFromHost(initiatingDistinctId: String) {
+    suspend fun dismissFromHost(initiatingDistinctId: String) = awaitPresentationRetirement {
         val (active, attempt) = synchronized(stateLock) {
             preparation?.job?.cancel()
             current to preparation
         }
         if (active == null) {
             attempt?.finished?.await()
-            return
+            return@awaitPresentationRetirement
         }
         val teardownReason = if (active.ownerDistinctId == initiatingDistinctId) {
             CloseReason.HostDismissed
@@ -1899,7 +1907,7 @@ internal class ExperiencePresentationService(
      * Tears down a presentation owned by the departing customer and attempts
      * an owner-attributed identity terminal transition without a close fact.
      */
-    suspend fun shutdownOwnedBy(ownerDistinctId: String) {
+    suspend fun shutdownOwnedBy(ownerDistinctId: String) = awaitPresentationRetirement {
         val (active, attempt) = synchronized(stateLock) {
             val departing = current?.takeIf { it.ownerDistinctId == ownerDistinctId }
             identityEpochByOwner[ownerDistinctId] =
@@ -1913,7 +1921,7 @@ internal class ExperiencePresentationService(
         }
         if (active == null) {
             attempt?.finished?.await()
-            return
+            return@awaitPresentationRetirement
         }
         val retainedLayers = synchronized(stateLock) { coveredLayers.toList() }
         PresentationRegistry.dismiss(active.id, CloseReason.IdentityChanged)
@@ -1926,7 +1934,7 @@ internal class ExperiencePresentationService(
     }
 
     /** Closes only the terminal Journey surface without injecting another outcome. */
-    suspend fun shutdownJourney(ownerDistinctId: String, journeyId: String) {
+    suspend fun shutdownJourney(ownerDistinctId: String, journeyId: String) = awaitPresentationRetirement {
         val (active, attempt) = synchronized(stateLock) {
             val pending = preparation?.takeIf {
                 it.request.ownerDistinctId == ownerDistinctId && it.journeyId == journeyId
@@ -1935,7 +1943,7 @@ internal class ExperiencePresentationService(
         }
         if (active == null) {
             attempt?.finished?.await()
-            return
+            return@awaitPresentationRetirement
         }
         val covered = synchronized(stateLock) { coveredLayers.toList().also { coveredLayers.clear() } }
         covered.forEach {

@@ -120,8 +120,10 @@ internal class ExperienceMountedScreen(
         },
     )
     private var reducedMotion: ExperienceReducedMotion? = null
+    private var artifactLease: java.io.Closeable? = null
 
     fun mount(entering: Boolean = true): View {
+        artifactLease = prepared.artifactLease?.retain()
         lifecycle.updateFontScale(activity.resources.configuration.fontScale)
         if (isLayer) surface.updateRuntimeValues(lifecycle.snapshot().filterKeys { it == "env/fontScale" })
         surface.updateRuntimeValues(prepared.commerceValues.get())
@@ -427,7 +429,10 @@ internal class ExperienceMountedScreen(
         textOverlay = null
         val finalState = if (changingConfigurations) lifecycle.snapshot()
             else lifecycle.move(ExperienceScreenLifecycle.Phase.HIDDEN, exitReason = ExperienceScreenLifecycle.ExitReason.NONE)
-        val retirement = ExperienceScreenRetirement(completion)
+        val nativeArtifacts = artifactLease.also { artifactLease = null }
+        val retirement = ExperienceScreenRetirement {
+            try { nativeArtifacts?.close() } finally { completion() }
+        }
         surface.release(if (isLayer) emptyMap() else finalState, retirement::mediaReleased)
         if (runValues != null) runValues.releaseScreen(retirement::nativeReleased)
         else lane.shutdown(retirement::nativeReleased)

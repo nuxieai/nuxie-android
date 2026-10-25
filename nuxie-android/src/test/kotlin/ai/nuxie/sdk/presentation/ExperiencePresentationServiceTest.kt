@@ -411,6 +411,63 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun `page navigation waits for the durable checkpoint before drawing its destination`() = runTest {
+        for (result in JourneyScreenDismissalResult.entries) {
+            val release = renderedJourneyRelease("text-input-navigation.json")
+            val launched = mutableListOf<String>()
+            val service = service(this, launch = launched::add)
+            val checkpoint = CompletableDeferred<JourneyScreenDismissalResult>()
+            var checkpoints = 0
+            val first = async {
+                service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
+                    service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) },
+                    onScreenDismissed = { _, _, _ -> checkpoints++; checkpoint.await() }, onOutcome = {})
+            }
+            runCurrent()
+            val sourceId = launched.single()
+            PresentationRegistry.reportFirstFrame(sourceId)
+            first.await()
+            var stepped = false
+            val host = object : PresentationScreenHandle {
+                var reason: CloseReason? = null
+                override fun requestCloseFromService(reason: CloseReason): Boolean { this.reason = reason; return true }
+                override fun screenCloseReason() = reason
+                override fun finishAfterServiceClose() {
+                    if (reason != CloseReason.JourneyNavigation || !stepped) PresentationRegistry.detach(sourceId, this)
+                }
+                override suspend fun prepareNavigation(id: String, content: PreparedPresentation): PreparedScreenNavigation {
+                    val source = this
+                    return object : PreparedScreenNavigation {
+                        override suspend fun awaitExit(beforePageStep: suspend () -> Boolean) {
+                            if (beforePageStep()) stepped = true
+                        }
+                        override fun activate() {
+                            PresentationRegistry.detach(sourceId, source)
+                            PresentationRegistry.reportFirstFrame(id)
+                        }
+                        override suspend fun abort() = Unit
+                    }
+                }
+            }
+            PresentationRegistry.attach(sourceId, host)
+            val next = async { runCatching {
+                service.presentJourney(testPresentationFences(), release, "screen_details", "journey-1", "customer-1", null,
+                    acquire = { acquired(release.identity, Lease()) }, onOutcome = {})
+            } }
+            runCurrent()
+            assertEquals(1, checkpoints)
+            assertFalse("Prepared page must retain its outgoing pixels while the checkpoint waits", stepped)
+            assertFalse(next.isCompleted)
+            checkpoint.complete(result)
+            val navigation = next.await()
+            assertEquals(result == JourneyScreenDismissalResult.HANDLED, stepped)
+            assertEquals(navigation.exceptionOrNull()?.stackTraceToString(), result == JourneyScreenDismissalResult.HANDLED, navigation.isSuccess)
+            assertEquals("The already settled checkpoint must not be delivered twice", 1, checkpoints)
+            service.shutdownOwnedBy("customer-1")
+        }
+    }
+
+    @Test
     fun `authored exit wait is outside first frame timeout and precedes dismissal checkpoint`() = runTest {
         val release = renderedJourneyRelease("text-input-navigation.json")
         val launched = mutableListOf<String>()
@@ -2172,6 +2229,50 @@ class ExperiencePresentationServiceTest {
         assertTrue(lease.closed.get())
         assertNull(PresentationRegistry.resolve(launched.single()))
         assertEquals(listOf(SystemEventNames.EXPERIENCE_SHOWN), emitted)
+    }
+
+    @Test
+    fun `shutdown reports a stalled native retirement and preserves the lease until late detach`() = runTest {
+        for (operation in listOf("host", "identity", "journey")) {
+            val release = renderedJourneyRelease()
+            val launched = mutableListOf<String>()
+            val lease = Lease()
+            val service = service(this, launch = launched::add)
+            val presentation = async {
+                service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
+                    service.reserveJourney("customer-1"), acquire = { acquired(release.identity, lease) }, onOutcome = {})
+            }
+            runCurrent()
+            val id = launched.single()
+            val host = AttachedHost()
+            assertTrue(PresentationRegistry.attach(id, host))
+            PresentationRegistry.reportFirstFrame(id)
+            presentation.await()
+            val shutdown = async {
+                runCatching {
+                    when (operation) {
+                        "host" -> service.dismissFromHost("customer-1")
+                        "identity" -> service.shutdownOwnedBy("customer-1")
+                        else -> service.shutdownJourney("customer-1", "journey-1")
+                    }
+                }.exceptionOrNull()
+            }
+            try {
+                runCurrent()
+                advanceTimeBy(5_001)
+                runCurrent()
+                assertTrue("$operation must report stalled retirement within five seconds", shutdown.isCompleted)
+                val failure = shutdown.await() as ExperiencePresentationException
+                assertEquals(ExperiencePresentationException.Reason.HOST_FAILED, failure.reason)
+                assertTrue(failure.message!!.contains("retirement"))
+                assertFalse("Native work still owns its artifacts", lease.closed.get())
+            } finally {
+                PresentationRegistry.detach(id, host)
+                runCurrent()
+                shutdown.await()
+            }
+            assertEquals(1, lease.closeCount.get())
+        }
     }
 
     @Test
