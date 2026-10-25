@@ -37,6 +37,77 @@ import org.junit.Test
  * decides which authored control fires.
  */
 class PublishedParlaSheetJourneyDeviceTest {
+    @Test fun nativePublishedLayoutKeepsLessonControlInsideViewport() = runBlocking {
+        assertTrue("The pinned native runtime loads", NuxieRuntime.shared.isAvailable)
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val prefix = "journeys/parla-sheets/"
+        fun read(path: String) = instrumentation.context.assets.open(prefix + path).use { it.readBytes() }
+        val descriptor = Json.parseToJsonElement(read("descriptor.json").decodeToString()).jsonObject
+        val render = descriptor.getValue("render").jsonObject
+        val bytes = read(render.getValue("nux").jsonObject.getValue("key").jsonPrimitive.content)
+        val directory = File(instrumentation.targetContext.cacheDir, "parla-native-${System.nanoTime()}").apply { mkdirs() }
+        val artifacts = render.getValue("assets").jsonArray.associate { asset ->
+            val key = asset.jsonObject.getValue("key").jsonPrimitive.content
+            key to File(directory, key.substringAfterLast('/')).apply { writeBytes(read(key)) }
+        }
+        val runtime = NuxieRuntime.shared
+        val imports = ExperienceAssetImportBuilder.build(descriptor, artifacts, checkNotNull(runtime.inspectFileAssets(bytes)))
+        val failures = mutableListOf<String>()
+        try {
+            // The first case has the iOS fixture's exact authored dimensions and
+            // integer scale. Both cases initialize layout before inserting the row.
+            for ((width, height, density) in listOf(Triple(402f, 874f, 3f), Triple(1080f / 2.625f, 2400f / 2.625f, 2.625f))) {
+                val lane = NuxieRuntimeLane()
+                val renderer = lane.call { checkNotNull(runtime.newAndroidVulkanRenderer((width * density).toInt(), (height * density).toInt())) }
+                try {
+                    val file = lane.call { checkNotNull(runtime.importFile(renderer, bytes, imports.expectedAssets, imports.externalAssets)) }
+                    try {
+                        lane.call {
+                            // Drive the same C API root/row operations without the SDK page actor.
+                            val root = checkNotNull(file.newArtboard("\$nuxie.page"))
+                            var player: NuxieRuntimePlayer? = null
+                            var environment: NuxieRuntimeViewModelState? = null
+                            var row: NuxieRuntimeViewModelState? = null
+                            try {
+                                root.bindDefaultViewModel("\$nuxie.Page")
+                                val active = checkNotNull(root.newPlayer()).also { player = it }
+                                active.requireStateMachine("\$nuxie.page")
+                                val env = checkNotNull(file.newGlobalViewModel("env")).also { environment = it }
+                                active.bindGlobalViewModel("env", env)
+                                active.setLayoutSize(width, height)
+                                for ((path, value) in mapOf("fontScale" to 1.0, "safeArea/top" to 62.0,
+                                    "safeArea/bottom" to 34.0, "width" to width.toDouble(), "height" to height.toDouble()))
+                                    env.setValue(path, NuxieViewModelScalarValue.NumberValue(value))
+                                val screen = checkNotNull(file.newArtboard(render.getValue("screens").jsonArray.single { it.jsonObject.getValue("id").jsonPrimitive.content == LESSON }.jsonObject.getValue("artboardName").jsonPrimitive.content))
+                                val schema = try { screen.defaultSchemaIndex() } finally { screen.close() }
+                                val values = file.newSchemaViewModel(schema).also { row = it }
+                                values.setValue("screen/phase", NuxieViewModelScalarValue.StringValue("entering"))
+                                root.insertDefaultListItem("screens", 0, values)
+                                active.enableSemantics()
+                                active.stepTyped(elapsedSeconds = 0.0)
+                                renderer.renderToCpuFrame(active, 0xff000000.toInt(), density)
+                                values.setValue("screen/phase", NuxieViewModelScalarValue.StringValue("active"))
+                                active.stepTyped(elapsedSeconds = 1.0)
+                                renderer.renderToCpuFrame(active, 0xff000000.toInt(), density)
+                                assertEquals(2L, values.snapshot().resolveEnumOrdinal("screen/phase"))
+                                val capture = active.captureSemantics()
+                                try {
+                                    val button = capture.tree.nodes.single { it.label == "Explore Parla Plus" }
+                                    val observation = "viewport=${width}x$height scale=$density button=$button"
+                                    Log.i(TAG, "native layout: $observation")
+                                    if (button.minX < 0 || button.minY < 0 || button.maxX > width || button.maxY > height) failures += observation
+                                } finally { capture.close() }
+                            } finally {
+                                player?.close(); row?.close(); environment?.close(); root.close()
+                            }
+                        }
+                    } finally { lane.call { file.close() } }
+                } finally { lane.call { renderer.close() }; lane.shutdown(); assertTrue(lane.awaitQuiescence(5_000)) }
+            }
+            assertTrue("Native Parla control must fit without SDK windows: $failures", failures.isEmpty())
+        } finally { directory.deleteRecursively() }
+    }
+
     @Test fun backToLearningClosesSavedAndRevealsTheSameOfferOnce() = parla(large = false) { run ->
         // Lesson as drawn before any sheet opens, so a reflow when the first sheet takes focus or
         // after the last one closes shows against it.
