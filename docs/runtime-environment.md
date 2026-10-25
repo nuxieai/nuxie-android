@@ -12,7 +12,7 @@ is `dark` only when the screen context's configuration reports
 `UI_MODE_NIGHT_YES`; `UI_MODE_NIGHT_NO` and an unspecified mode use `light`.
 Enum writes use the label's index in the artifact's own label order.
 
-An Experience with dark colour tokens carries a global schema named `Theme`.
+An Experience with dark color tokens carries a global schema named `Theme`.
 Before the first player advance, including entry and layout measurement, the
 host binds its authored instance named `dark` or `light` on every state-machine
 player. If that name is absent, it creates the schema default, which uses the
