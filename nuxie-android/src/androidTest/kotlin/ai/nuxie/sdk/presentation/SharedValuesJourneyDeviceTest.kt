@@ -509,7 +509,20 @@ class SharedValuesJourneyDeviceTest {
                 surface = find(activity.window.decorView)
             }
             val host = checkNotNull(surface)
-            var point = 121f to 1f
+            var point = if (background) 0f to 0f else withTimeout(10_000) {
+                var point: Pair<Float, Float>? = null
+                while (point == null) {
+                    point = host.layerOperation {
+                        val capture = ExperienceSurfaceHost::class.java.getDeclaredField("semanticSnapshot")
+                            .apply { isAccessible = true }.get(host) as? NuxieSemanticSnapshot
+                        capture?.tree?.nodes?.singleOrNull { it.label == "Send" }?.let {
+                            (it.minX + it.maxX) / 2f to (it.minY + it.maxY) / 2f
+                        }
+                    }
+                    if (point == null) delay(20)
+                }
+                checkNotNull(point)
+            }
             if (background) {
                 val lane = ExperienceSurfaceHost::class.java.getDeclaredField("lane").apply { isAccessible = true }.get(host) as NuxieRuntimeLane
                 val pendingFrame = ExperienceSurfaceHost::class.java.getDeclaredField("pendingPresentation").apply { isAccessible = true }
@@ -681,7 +694,7 @@ class SharedValuesJourneyDeviceTest {
             fun lane(host: ExperienceSurfaceHost) = ExperienceSurfaceHost::class.java.getDeclaredField("lane").apply { isAccessible = true }.get(host) as NuxieRuntimeLane
             fun row(host: ExperienceSurfaceHost) = host.fixtureActivePageRowOnLane()
             val first = checkNotNull(surface())
-            val firstId = lane(first).call {
+            val firstId = first.layerOperation {
                 val root = row(first)
                 if (published) assertEquals(NuxieViewModelScalarValue.NumberValue(PublishedRunValuesFixture.expectations
                     .getValue("tap").jsonObject.getValue("before").jsonPrimitive.double),
