@@ -12,6 +12,8 @@ pool = importlib.util.module_from_spec(spec); spec.loader.exec_module(pool)
 class PoolRoutingTests(unittest.TestCase):
     def setUp(self):
         # Bazel invokes tests from runfiles; these fixtures model SDK callers.
+        context = patch.dict(os.environ, {'GRADLE_USER_HOME':''})
+        context.start(); self.addCleanup(context.stop)
         previous = Path.cwd()
         os.chdir(pool.ROOT)
         self.addCleanup(os.chdir, previous)
@@ -52,6 +54,10 @@ class PoolRoutingTests(unittest.TestCase):
         with patch.object(pool.Path,'cwd',return_value=Path('/caller/other-project')):
             self.assertTrue(pool.caller_gradle_context(['test']))
             self.assertFalse(pool.caller_gradle_context(['-p',str(pool.ROOT),'test']))
+
+    def test_explicit_environment_cache_stays_local(self):
+        with patch.dict(os.environ, {'GRADLE_USER_HOME':'/caller/cache'}):
+            self.assertTrue(pool.caller_gradle_context(['test']))
 
     def test_portable_and_platform_requirements(self):
         platform, tools = pool.selection('sdk', ['test'])

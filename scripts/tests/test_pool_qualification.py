@@ -37,8 +37,8 @@ class CompleteQualificationRoutingTests(unittest.TestCase):
         pool=importlib.util.module_from_spec(spec);spec.loader.exec_module(pool)
         with tempfile.TemporaryDirectory() as temporary:
             home=Path(temporary);helper=home/'.local/share/nuxie-homelab/sdk-task.py';helper.parent.mkdir(parents=True)
-            helper.write_text("def route(root,args,**kwargs):\n assert all(isinstance(name,str) for name in kwargs['input_files'])\n assert not any(name.startswith('./') for name in kwargs['outputs'])\n assert not any(a != b and a.startswith(b + '/') for a in kwargs['outputs'] for b in kwargs['outputs'])\n return 17\n")
-            with patch.object(pool.Path,'home',return_value=home),patch.dict(os.environ,{'NUXIE_HOMELAB':'1','NUXIE_EXECUTION':'pool','_NUXIE_POOL_NESTED':'0','NUXIE_CI_RUNNER_POLICY_VERSION':'0'}):
+            helper.write_text("def route(root,args,**kwargs):\n assert all(isinstance(name,str) for name in kwargs['input_files'])\n assert 'nuxie-lint/build/libs' in kwargs['outputs']\n assert not any(name.startswith('./') for name in kwargs['outputs'])\n assert not any(a != b and a.startswith(b + '/') for a in kwargs['outputs'] for b in kwargs['outputs'])\n return 17\n")
+            with patch.object(pool.Path,'home',return_value=home),patch.dict(os.environ,{'NUXIE_HOMELAB':'1','NUXIE_EXECUTION':'pool','_NUXIE_POOL_NESTED':'0','NUXIE_CI_RUNNER_POLICY_VERSION':'0','GRADLE_USER_HOME':''}):
                 self.assertEqual(pool.dispatch('gradle',['-p',str(ROOT),'test']),17)
 
 

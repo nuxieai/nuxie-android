@@ -102,6 +102,7 @@ def gradle_worker_arguments(arguments):
 
 
 def caller_gradle_context(arguments):
+    if os.environ.get('GRADLE_USER_HOME'): return True
     # These options select caller-owned configuration, caches or persistent
     # daemon/watch operations, rather than the SDK's declared build inputs.
     local = {'--system-prop', '--init-script', '--settings-file', '--build-file', '--gradle-user-home',
@@ -157,7 +158,7 @@ def _dispatch(mode, arguments, *, output=None, command=None, input_files=None, e
     input_files = dict(input_files or {}); environment = dict(environment or {})
     for project in ([] if focused_outputs else ROOT.iterdir()):
         if project.is_dir() and (project / 'build.gradle.kts').is_file():
-            for directory in ('outputs', 'reports', 'test-results'):
+            for directory in ('outputs', 'reports', 'test-results', 'libs'):
                 names[project.name + '/build/' + directory] = project / 'build' / directory
     if mode == 'gradle':
         if os.environ.get('NUXIE_SIGNING_KEY') and any('publish' in a.lower() for a in args):
@@ -180,7 +181,7 @@ def _dispatch(mode, arguments, *, output=None, command=None, input_files=None, e
             for file in selected.rglob('*'):
                 if file.is_file() and not any(p in ('build', '.gradle') for p in file.relative_to(selected).parts):
                     input_files[(Path(relative) / file.relative_to(selected)).as_posix()] = file
-            for directory in ('outputs', 'reports', 'test-results'):
+            for directory in ('outputs', 'reports', 'test-results', 'libs'):
                 names[relative + '/build/' + directory] = selected / 'build' / directory
             if argument in ('-p', '--project-dir'): args[index + 1] = str(selected)
             else: args[index] = '--project-dir=' + str(selected)
