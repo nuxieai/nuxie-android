@@ -29,9 +29,15 @@ class PoolRoutingTests(unittest.TestCase):
 
     def test_caller_cache_operations_remain_local(self):
         with patch.dict(os.environ, {'_NUXIE_POOL_NESTED':'0','NUXIE_HOMELAB':'1','NUXIE_EXECUTION':'pool','NUXIE_CI_RUNNER_POLICY_VERSION':'0'}),patch.object(pool.Path,'home',side_effect=AssertionError('caller-local operation')):
+            self.assertIsNone(pool.dispatch('gradle',['clean',':example-app:assembleDebug']))
+            self.assertIsNone(pool.dispatch('gradle',[':nuxie-android:cleanTestDebugUnitTest']))
             self.assertIsNone(pool.dispatch('gradle',['test','--init-script','/caller/init.gradle']))
             self.assertIsNone(pool.dispatch('gradle',['--offline','test']))
             self.assertIsNone(pool.dispatch('gradle',[':nuxie-android:publishToMavenLocal']))
+
+    def test_excluded_device_tasks_do_not_require_a_connected_device(self):
+        self.assertEqual(pool.selection('gradle',['check','-x',':nuxie-android:connectedDebugAndroidTest']),('portable',['android','java17']))
+        self.assertEqual(pool.selection('gradle',['check','--exclude-task',':nuxie-android:hostRenderSmoke']),('portable',['android','java17']))
 
     def test_portable_and_platform_requirements(self):
         platform, tools = pool.selection('sdk', ['test'])

@@ -58,11 +58,11 @@ def selection(mode, arguments, command=None, selected_platform=None, selected_de
     if (mode == 'gradle' or (mode == 'check' and 'android' in requirements)
             or (SDK == 'android' and mode == 'sdk' and command in ('check', 'lint', 'api-check', 'providers'))):
         requirements.add('java17')
-    if mode == 'gradle' and any(any(word in a.rsplit(':', 1)[-1].lower() for word in ('connected', 'installdebug', 'installrelease', 'uninstall')) for a in arguments if not a.startswith('-')):
+    if mode == 'gradle' and any(any(word in a.rsplit(':', 1)[-1].lower() for word in ('connected', 'installdebug', 'installrelease', 'uninstall')) for a in gradle_tasks(arguments)):
         serial = os.environ.get('ANDROID_SERIAL')
         if not serial: raise ValueError('ANDROID_SERIAL is required for connected pool tests')
         requirements.add('android-device@' + serial)
-    if SDK == 'android' and (command in ('host-render', 'host-render-smoke') or (mode == 'gradle' and any('hostrender' in a.lower() for a in arguments))):
+    if SDK == 'android' and (command in ('host-render', 'host-render-smoke') or (mode == 'gradle' and any('hostrender' in a.lower() for a in gradle_tasks(arguments)))):
         requirements.add('native-host@' + sys.platform + '-' + os.uname().machine)
         return ('macos' if sys.platform == 'darwin' else 'linux'), sorted(requirements)
     if mode.startswith('script-'):
@@ -111,6 +111,7 @@ def _dispatch(mode, arguments, *, output=None, command=None, input_files=None, e
             or os.environ.get('NUXIE_EXECUTION') == 'local' or os.environ.get('NUXIE_CI_RUNNER_POLICY_VERSION') == '2' or '--help' in arguments or '-h' in arguments): return None
     if mode == 'gradle':
         tasks = gradle_tasks(arguments)
+        if any(task.lower().startswith('clean') for task in tasks): return None
         if any(value in ('-I', '--init-script', '-c', '--settings-file') or value.startswith(('--init-script=', '--settings-file=')) or (value.startswith(('-I', '-c')) and len(value) > 2) for value in arguments): return None
         # These explicitly address the caller's dependency cache or Maven home.
         if '--offline' in arguments or any(task.endswith('ToMavenLocal') for task in tasks): return None
@@ -174,7 +175,7 @@ def _dispatch(mode, arguments, *, output=None, command=None, input_files=None, e
             names['runtime/prebuilt'] = ROOT / 'runtime/prebuilt'
         if any(a.rsplit(':', 1)[-1] == 'apiDump' for a in args):
             names['nuxie-android/api/nuxie-android.api'] = ROOT / 'nuxie-android/api/nuxie-android.api'
-        if any('hostrender' in a.lower() for a in args):
+        if any('hostrender' in a.lower() for a in gradle_tasks(arguments)):
             spec = importlib.util.spec_from_file_location('sdk_host_pool', ROOT / 'scripts/bazel/sdk.py')
             host = importlib.util.module_from_spec(spec); spec.loader.exec_module(host)
             files, variables = _stack.enter_context(host.host_inputs())
