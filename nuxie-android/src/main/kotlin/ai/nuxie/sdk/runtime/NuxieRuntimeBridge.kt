@@ -11,8 +11,9 @@ import java.io.File
  *
  * The handle-based, owned-result contract mirrors the iOS adapter: every
  * `native*` call returns a status or an owned handle the caller must free,
- * all calls are confined to the [NuxieRuntimeLane], and panics never cross
- * the boundary (the shim converts them to error statuses).
+ * scene operations are confined to the [NuxieRuntimeLane], and panics never
+ * cross the boundary (the shim converts them to error statuses). Executor
+ * retain/release, submission, close and wait are thread-safe.
  *
  * The engine `.so` is a pinned prebuilt artifact (spec section 7). When it
  * is absent or fails to load, the SDK degrades per section 16 decision 3:
@@ -80,6 +81,15 @@ internal object NuxieRuntimeBridge {
     }
 
     private external fun nativeHostScriptingProbe(): Int
+
+    // Thread-safe executor handles; scene handles below remain lane-confined.
+    external fun nativeExecutorNew(): Long
+    external fun nativeExecutorRetain(executor: Long)
+    external fun nativeExecutorRelease(executor: Long)
+    external fun nativeExecutorSubmit(executor: Long, job: Runnable): Boolean
+    external fun nativeExecutorOnTerminated(executor: Long, job: Runnable): Boolean
+    external fun nativeExecutorClose(executor: Long)
+    external fun nativeExecutorWait(executor: Long, timeoutMs: Long): Boolean
 
     // MARK: portable core (nux_capi)
 

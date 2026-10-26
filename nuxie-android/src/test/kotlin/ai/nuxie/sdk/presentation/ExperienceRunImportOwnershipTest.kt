@@ -1,5 +1,7 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.TestRuntimeLane
+
 import ai.nuxie.sdk.runtime.*
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
@@ -23,7 +25,7 @@ class ExperienceRunImportOwnershipTest {
             override fun freeFile(handle: Long) { closes++ }
             override fun freeRenderer(handle: Long) = Unit
         }
-        val run = ExperienceRunValues()
+        val run = ExperienceRunValues(lane = TestRuntimeLane())
         try {
             run.lane.call {
                 val first = run.prepare(byteArrayOf(1), null, emptyMap(), NuxieRuntime(native))
@@ -52,7 +54,7 @@ class ExperienceRunImportOwnershipTest {
             override fun freeFile(handle: Long) { closedFiles += handle }
             override fun freeRenderer(handle: Long) { closedRenderers += handle }
         }
-        val run = ExperienceRunValues()
+        val run = ExperienceRunValues(lane = TestRuntimeLane())
         val screens = mutableListOf<ExperienceRunValues.Native>()
         try {
             run.lane.call {

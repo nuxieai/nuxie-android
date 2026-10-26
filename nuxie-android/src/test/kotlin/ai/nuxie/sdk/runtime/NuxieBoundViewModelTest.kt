@@ -10,7 +10,7 @@ class NuxieBoundViewModelTest {
     @Test
     fun `enum writes resolve the exact authored label to its ABI ordinal`() = runBlocking {
         val native = RecordingNative()
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val bound = NuxieBoundViewModel(
             lane = lane,
             nativeHandle = 42,
@@ -40,7 +40,7 @@ class NuxieBoundViewModelTest {
     @Test
     fun `typed writes preserve ABI values and reject lossy numbers`() = runBlocking {
         val native = RecordingNative()
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val bound = NuxieBoundViewModel(lane, 42, 0, catalog(), native)
 
         try {
@@ -76,7 +76,7 @@ class NuxieBoundViewModelTest {
     @Test
     fun `invalid paths kinds native statuses and closed writes stay typed`() = runBlocking {
         val native = RecordingNative()
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val bound = NuxieBoundViewModel(lane, 42, 0, catalog(), native)
 
         try {

@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.journey
 
+import ai.nuxie.sdk.runtime.testRunValues
 import ai.nuxie.sdk.LogLevel
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.events.EventLog
@@ -342,6 +343,7 @@ class JourneyRefetchEventHoldTest {
             replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
             awaitEventsDrained = eventLog::awaitBarrier,
             fixedStorageScope = JourneyStorageScope(authority),
+            createNativeValues = ::testRunValues,
         )
         private var publication = 0L
 

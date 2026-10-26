@@ -182,6 +182,7 @@ val compileHostRenderBridge by tasks.registering(Exec::class) {
   group = "host render"
   description = "Compiles the host JVM JNI adapter against scripting-enabled NUXIE_HOST_CAPI_LIB."
   inputs.file("src/main/cpp/nuxie_runtime_android.c")
+  inputs.file("src/main/cpp/nuxie_executor_jni.c")
   inputs.file("src/main/cpp/nuxie_host_installs.h")
   inputs.file(rootProject.file("runtime/prebuilt/include/nux_capi.generated.h"))
   hostCapiLibrary.orNull?.let { inputs.file(it) }
@@ -238,6 +239,7 @@ val compileHostRenderBridge by tasks.registering(Exec::class) {
       "-I${javaHome.resolve("include/$platformInclude")}",
       "-I${rootProject.file("runtime/prebuilt/include")}",
       file("src/main/cpp/nuxie_runtime_android.c"),
+      file("src/main/cpp/nuxie_executor_jni.c"),
       capi,
       "-Wl,-rpath,${capi.parentFile}",
     )

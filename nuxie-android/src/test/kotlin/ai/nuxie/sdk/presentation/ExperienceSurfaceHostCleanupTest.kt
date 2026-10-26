@@ -1,5 +1,7 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.TestRuntimeLane
+
 import ai.nuxie.sdk.runtime.ExpectedFileAsset
 import ai.nuxie.sdk.runtime.NativeCallResult
 import ai.nuxie.sdk.runtime.NativeViewModelCatalog
@@ -27,7 +29,7 @@ class ExperienceSurfaceHostCleanupTest {
     fun `view model cleanup failure still frees all other owners once and preserves first error`() {
         ai.nuxie.sdk.logging.NuxieLog.configure(ai.nuxie.sdk.LogLevel.WARN, redactSensitiveData = false)
         val native = RecordingNative()
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val host = ExperienceSurfaceHost(
             RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native),
         )

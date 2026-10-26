@@ -22,8 +22,10 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 
 /** One run's file, renderer domain and authored values, confined to one native lane. */
-internal class ExperienceRunValues(private val restoredSnapshot: ExperienceRunSnapshot? = null) {
-    val lane = NuxieRuntimeLane()
+internal class ExperienceRunValues(
+    private val restoredSnapshot: ExperienceRunSnapshot? = null,
+    val lane: NuxieRuntimeLane = NuxieRuntimeLane(),
+) {
     private val admission = Any()
     private val retired = AtomicBoolean(false)
     private var nativeRetired = false

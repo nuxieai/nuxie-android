@@ -27,7 +27,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 
-class HostRenderSmokeTest {
+class HostRenderSmokeTest : ai.nuxie.sdk.runtime.RuntimeExecutorContract() {
     @Test
     fun `dismissal animates before native completion while navigation skips and the final pose stays hidden`() {
         assertTrue("Native proof requires the configured host C API", !System.getenv("NUXIE_HOST_CAPI_LIB").isNullOrBlank())

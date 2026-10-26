@@ -1,5 +1,7 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.TestRuntimeLane
+
 import android.os.Looper
 import ai.nuxie.sdk.experiences.SystemFontCache
 import ai.nuxie.sdk.experiences.SystemFontException
@@ -74,7 +76,7 @@ class ExperienceSurfaceHostFontFailureTest {
         cache: SystemFontCache,
         block: (ExperienceSurfaceHost, NuxieRuntimeLane, MutableList<ExperiencePresentationException>, MutableList<Boolean>) -> Unit,
     ) {
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val failures = mutableListOf<ExperiencePresentationException>()
         val loaded = mutableListOf<Boolean>()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane,

@@ -552,7 +552,10 @@ val runtimeBoundary by tasks.registering {
         "([A-Za-z_][A-Za-z0-9_]*)\\s*$",
     )
     val cSymbolPattern = Regex("\\bnux_[A-Za-z0-9_]+\\b")
-    val runtimeShim = file("nuxie-android/src/main/cpp/nuxie_runtime_android.c").canonicalFile
+    val runtimeShims = setOf(
+      file("nuxie-android/src/main/cpp/nuxie_runtime_android.c").canonicalFile,
+      file("nuxie-android/src/main/cpp/nuxie_executor_jni.c").canonicalFile,
+    )
 
     val violations = buildList {
       for (source in sources.files.sortedBy { it.relativeTo(rootDir).path }) {
@@ -561,7 +564,7 @@ val runtimeBoundary by tasks.registering {
         val extension = source.extension.lowercase()
 
         if (extension in setOf("c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx")) {
-          if (source.canonicalFile != runtimeShim) {
+          if (source.canonicalFile !in runtimeShims) {
             val lines = text.lineSequence().mapIndexedNotNull { index, line ->
               (index + 1).takeIf { cSymbolPattern.containsMatchIn(line) }
             }.toList()

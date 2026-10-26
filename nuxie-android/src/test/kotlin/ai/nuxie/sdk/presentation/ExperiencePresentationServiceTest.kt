@@ -1,5 +1,7 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.TestRuntimeLane
+
 import ai.nuxie.sdk.ExperienceRef
 import ai.nuxie.sdk.events.SystemEventNames
 import ai.nuxie.sdk.experiences.AcquiredJourneyRelease
@@ -2388,7 +2390,7 @@ class ExperiencePresentationServiceTest {
             val nestedReports = mutableListOf<String>()
             val batches = mutableListOf<JourneyScreenEmissionBatch>()
             val emitted = mutableListOf<String>()
-            val sharedValues = ExperienceRunValues()
+            val sharedValues = ExperienceRunValues(lane = TestRuntimeLane())
             var heldNavigation: CompletableDeferred<Unit>? = null
             var refuseClose = false
             var raceNativeClose = false

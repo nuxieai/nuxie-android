@@ -14,7 +14,7 @@ set_target_properties(nux_capi PROPERTIES
     # absolute host path as DT_NEEDED and dlopen fails on device.
     IMPORTED_NO_SONAME TRUE)
 
-add_library(nuxie_runtime_android SHARED nuxie_runtime_android.c)
+add_library(nuxie_runtime_android SHARED nuxie_runtime_android.c nuxie_executor_jni.c)
 target_include_directories(nuxie_runtime_android PRIVATE "${NUXIE_PREBUILT_DIR}/include")
 target_compile_definitions(nuxie_runtime_android PRIVATE
     $<$<CONFIG:Debug>:NUXIE_FONT_TESTING>
