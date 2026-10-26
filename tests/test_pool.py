@@ -10,6 +10,11 @@ pool = importlib.util.module_from_spec(spec); spec.loader.exec_module(pool)
 
 
 class PoolRoutingTests(unittest.TestCase):
+    def test_cleanup_options_do_not_become_tasks(self):
+        self.assertEqual(pool.gradle_tasks(['-p', 'android-plugin', '--console', 'plain', 'clean']), ['clean'])
+        with patch.dict(os.environ, {'_NUXIE_POOL_NESTED':'0','NUXIE_HOMELAB':'1','NUXIE_EXECUTION':'pool','NUXIE_CI_RUNNER_POLICY_VERSION':'0'}), patch.object(pool.Path, 'home', side_effect=AssertionError('cleanup remains local')):
+            self.assertIsNone(pool.dispatch('gradle', ['-p', 'android-plugin', 'clean']))
+
     def test_portable_and_platform_requirements(self):
         platform, tools = pool.selection('sdk', ['test'])
         self.assertEqual(platform, 'portable')
