@@ -418,6 +418,11 @@ def main():
     device.add_argument("--serial", required=True)
     device.add_argument("--class", dest="test_class")
     args = parser.parse_args()
+    sys.path.insert(0, str(ROOT / 'scripts'))
+    from pool import dispatch
+    status = dispatch('sdk', sys.argv[1:], output=args.output if args.command == "prepare" else None)
+    if status is not None:
+        raise SystemExit(status)
     if args.command == "prepare":
         prepare(args)
     elif args.command == "doctor":
@@ -460,6 +465,11 @@ def main():
         else:
             label = {"build": "//:sdk_aar", "example": "//:example_app_debug", "instrumentation": "//:sdk_instrumentation_apk"}[args.command]
             bazel("build", label)
+            product = artifact(label, filename=None if args.command == "build" else label.split(":", 1)[1] + ".apk")
+            destination = ROOT / "build/bazel-sdk/products" / product.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(product, destination)
+            print(destination)
 
 
 if __name__ == "__main__":

@@ -31,3 +31,7 @@ runtime/prebuilt/
 /.bazel-cache.*.tmp
 /output/
 __pycache__/
+
+# Pool evidence belongs to this checkout, never to SDK source.
+/.nuxie/
+/scripts/__pycache__/

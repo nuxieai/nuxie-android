@@ -86,6 +86,11 @@ APP_BASE_NAME=${0##*/}
 # Discard cd standard output in case $CDPATH is set (https://github.com/gradle/gradle/issues/25036)
 APP_HOME=$( cd "${APP_HOME:-./}" > /dev/null && pwd -P ) || exit
 
+# Keep the standard Gradle entrypoint while executing on a compatible pool host.
+if [ "${_NUXIE_POOL_NESTED:-0}" != 1 ] && [ "${NUXIE_HOMELAB:-1}" != 0 ] && [ "${NUXIE_EXECUTION:-}" != local ] && [ -f "$HOME/.config/nuxie/homelab-cluster.json" ]; then
+    exec python3 "$APP_HOME/scripts/pool.py" gradle "$@"
+fi
+
 # Use the maximum available, or set MAX_FD != -1 to use that value.
 MAX_FD=maximum
 
