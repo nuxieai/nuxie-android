@@ -14,13 +14,14 @@ sdk=importlib.util.module_from_spec(spec);spec.loader.exec_module(sdk)
 class DriverInputTests(unittest.TestCase):
     def test_icd_library_is_relocated_and_temporary_metadata_is_cleaned(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root=Path(temporary);capi=root/'capi.dylib';capi.write_bytes(b'capi')
+            root=Path(temporary);capi=root/'libnux_capi.dylib';capi.write_bytes(b'capi')
             binary=root/'lib/libVk.dylib';binary.parent.mkdir();binary.write_bytes(b'driver')
             icd=root/'share/vulkan/icd.d/driver.json';icd.parent.mkdir(parents=True)
             for reference in ('../../../lib/libVk.dylib',str(binary)):
                 icd.write_text(json.dumps({'file_format_version':'1.0.0','ICD':{'library_path':reference,'api_version':'1.3.0'}}))
                 with patch.object(sdk,'ROOT',root),patch.dict(os.environ,{'NUXIE_HOST_CAPI_LIB':str(capi),'VK_ICD_FILENAMES':str(icd)},clear=True):
                     with sdk.host_inputs() as (files,environment):
+                        self.assertEqual(files['.nuxie/sdk-inputs/host-runtime/libnux_capi.dylib'],capi.resolve())
                         descriptor=Path(environment['VK_ICD_FILENAMES'])
                         data=json.loads(descriptor.read_text())
                         self.assertEqual(data['ICD']['library_path'],'./libVk.dylib')
