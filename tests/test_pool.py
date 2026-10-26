@@ -50,7 +50,7 @@ class PoolRoutingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             home=Path(temp);helper=home/'.local/share/nuxie-homelab/sdk-task.py';helper.parent.mkdir(parents=True)
             helper.write_text("def route(root, args, **kwargs):\n assert args == ['test', '--configuration', 'Debug']\n assert kwargs['platform'] == 'portable'\n assert kwargs['frontend'] == 'scripts/bazel/sdk.py'\n assert all(p.is_absolute() for p in kwargs['outputs'].values())\n return 17\n")
-            with patch.object(pool.Path,'home',return_value=home),patch.dict(os.environ,{'_NUXIE_POOL_NESTED':'0'}):
+            with patch.object(pool.Path,'home',return_value=home),patch.dict(os.environ,{'_NUXIE_POOL_NESTED':'0','NUXIE_HOMELAB':'1','NUXIE_EXECUTION':'pool'}):
                 self.assertEqual(pool.dispatch('sdk',['test','--configuration','Debug']),17)
 
 
