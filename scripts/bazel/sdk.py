@@ -455,7 +455,7 @@ def pool_dispatch(args):
                 if argument == '--output': arguments[index + 1] = str(output)
                 elif argument.startswith('--output='): arguments[index] = '--output=' + str(output)
         return dispatch('sdk', arguments, command=args.command, output=output, input_files=files, environment=env)
-    return dispatch('sdk', sys.argv[1:], command=args.command)
+    return dispatch('sdk', sys.argv[1:], command=args.command, selected_device=getattr(args, 'serial', None))
 
 
 def publish_prepared(args, incoming, identity):

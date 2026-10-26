@@ -15,7 +15,7 @@ class CompleteQualificationRoutingTests(unittest.TestCase):
             home=Path(temporary);helper=home/'.local/share/nuxie-homelab/sdk-task.py';helper.parent.mkdir(parents=True)
             helper.write_text("import json,os\ndef route(root,args,**kwargs):\n open(os.environ['RECORDED'],'w').write(json.dumps({'args':args,'tools':kwargs['requirements']}))\n return 17\n")
             environment=dict(os.environ,HOME=str(home),RECORDED=str(home/'record.json'),NUXIE_HOMELAB='1',NUXIE_EXECUTION='pool',_NUXIE_POOL_NESTED='0')
-            for script,arguments,device in [('test-maven-consumer.py',['--version','0.2.0'],None),
+            for script,arguments,device in [('test-maven-consumer.py',['--version','0.2.0','--repository=https://repo.example.invalid'],None),
                     ('test-startup-process-death.py',['--device','emulator-5558'],'emulator-5558')]:
                 result=subprocess.run([sys.executable,str(ROOT/'scripts'/script),*arguments],env=environment,capture_output=True,text=True)
                 self.assertEqual(result.returncode,17,result.stderr)

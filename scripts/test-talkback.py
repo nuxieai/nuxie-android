@@ -24,7 +24,7 @@ def main():
     parser.add_argument("--scenario", choices=("native-retry", "native-close", "navigation-retry", "navigation-close", "recovery-retry", "recovery-close", "entry", "entry-after-editor", "home-return", "virtual-home-return", "roles", "activation", "activation-error", "native-slider", "virtual-slider"), default="roles")
     args = parser.parse_args()
     from pool import dispatch
-    status = dispatch('script-test-talkback', sys.argv[1:])
+    status = dispatch('script-test-talkback', sys.argv[1:], selected_device=args.serial)
     if status is not None: raise SystemExit(status)
 
     if not re.fullmatch(r"emulator-[0-9]+", args.serial):

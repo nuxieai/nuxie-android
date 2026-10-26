@@ -20,7 +20,7 @@ def option(arguments, name):
     return selected
 
 
-def selection(mode, arguments, command=None, selected_platform=None):
+def selection(mode, arguments, command=None, selected_platform=None, selected_device=None):
     selected = 'android' if mode == 'prepare-native' and SDK in ('react-native', 'unity') else 'all'
     for i, arg in enumerate(arguments):
         if arg == '--platform' and i + 1 < len(arguments): selected = arguments[i + 1]
@@ -51,7 +51,7 @@ def selection(mode, arguments, command=None, selected_platform=None):
                 'godot': ['godot'], 'unity': ['unity'], 'ue': ['unreal']}.get(SDK, []))
     if mode == 'sdk' and command == 'instrumentation-run':
         serial = next((arguments[i + 1] for i, a in enumerate(arguments[:-1]) if a in ('--serial', '--device')), None)
-        serial = serial or next((a.split('=', 1)[1] for a in arguments if a.startswith('--serial=')), None)
+        serial = selected_device or serial or next((a.split('=', 1)[1] for a in arguments if a.startswith('--serial=')), None)
         if not serial: raise ValueError('Android device serial is required')
         requirements.add('android-device@' + serial)
     if (mode == 'gradle' or (mode == 'check' and 'android' in requirements)
@@ -69,6 +69,7 @@ def selection(mode, arguments, command=None, selected_platform=None):
         if mode in ('script-test-talkback', 'script-test-minified-font-fallback', 'script-test-minified-native-logging', 'script-test-startup-process-death'):
             serial = option(arguments, '--serial') or option(arguments, '--device')
             if mode == 'script-test-minified-native-logging' and arguments: serial = arguments[0]
+            serial = selected_device or serial
             if not serial: raise ValueError('A device serial is required for this pool qualification')
             requirements.add('android-device@' + serial)
     if mode == 'prove-runtime-install-recovery': requirements.add('java17')
@@ -76,7 +77,7 @@ def selection(mode, arguments, command=None, selected_platform=None):
     return ('macos' if apple else 'portable'), sorted(requirements)
 
 
-def dispatch(mode, arguments, *, output=None, command=None, input_files=None, environment=None, selected_platform=None):
+def dispatch(mode, arguments, *, output=None, command=None, input_files=None, environment=None, selected_platform=None, selected_device=None):
     if (os.environ.get('_NUXIE_POOL_NESTED') == '1' or os.environ.get('NUXIE_HOMELAB') == '0'
             or os.environ.get('NUXIE_EXECUTION') == 'local' or '--help' in arguments or '-h' in arguments): return None
     helper = Path.home() / '.local/share/nuxie-homelab/sdk-task.py'
@@ -87,7 +88,7 @@ def dispatch(mode, arguments, *, output=None, command=None, input_files=None, en
         return None
     spec = importlib.util.spec_from_file_location('pool_sdk_task', helper)
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-    platform, requirements = selection(mode, arguments, command, selected_platform)
+    platform, requirements = selection(mode, arguments, command, selected_platform, selected_device)
     names = {name: ROOT / name for name in OUTPUTS}
     if output is not None:
         names['build/pool-prepared'] = Path(output).resolve()

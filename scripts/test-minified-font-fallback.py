@@ -32,7 +32,7 @@ def main():
             if argument == '--apk': arguments[index + 1] = str(selected)
             elif argument.startswith('--apk='): arguments[index] = '--apk=' + str(selected)
     files = {} if args.skip_install else {'.nuxie/sdk-inputs/font-fallback.apk': selected}
-    status = dispatch('script-test-minified-font-fallback', arguments, input_files=files, output=args.output.resolve() if args.output else None)
+    status = dispatch('script-test-minified-font-fallback', arguments, input_files=files, output=args.output.resolve() if args.output else None, selected_device=args.serial)
     if status is not None: raise SystemExit(status)
 
 
