@@ -11,6 +11,7 @@ pool = importlib.util.module_from_spec(spec); spec.loader.exec_module(pool)
 
 class PoolRoutingTests(unittest.TestCase):
     def test_cleanup_options_do_not_become_tasks(self):
+        self.assertEqual(pool.gradle_tasks(['--tests','connectedHostRenderOptionsTest','--args','clean old','test']),['test'])
         self.assertEqual(pool.gradle_tasks(['-p', 'android-plugin', '--console', 'plain', '-P', 'example=value', '-D', 'flag=value', '--project-prop', 'other=value', 'clean']), ['clean'])
         with patch.dict(os.environ, {'_NUXIE_POOL_NESTED':'0','NUXIE_HOMELAB':'1','NUXIE_EXECUTION':'pool','NUXIE_CI_RUNNER_POLICY_VERSION':'0'}), patch.object(pool.Path, 'home', side_effect=AssertionError('cleanup remains local')):
             self.assertIsNone(pool.dispatch('gradle', ['-p', 'android-plugin', 'clean']))
@@ -37,6 +38,7 @@ class PoolRoutingTests(unittest.TestCase):
             self.assertIsNone(pool.dispatch('gradle',[':nuxie-android:publishToMavenLocal']))
 
     def test_excluded_device_tasks_do_not_require_a_connected_device(self):
+        self.assertEqual(pool.selection('gradle',[':nuxie-android:testDebugUnitTest','--tests','ai.nuxie.sdk.hostrender.HostRenderOptionsTest']),('portable',['android','java17']))
         self.assertEqual(pool.selection('gradle',['check','-x',':nuxie-android:connectedDebugAndroidTest']),('portable',['android','java17']))
         self.assertEqual(pool.selection('gradle',['check','--exclude-task',':nuxie-android:hostRenderSmoke']),('portable',['android','java17']))
 
