@@ -167,11 +167,23 @@ def _dispatch(mode, arguments, *, output=None, command=None, input_files=None, e
                 args[position] = ('' if argument == '--args' else '--args=') + shlex.join(values)
 
     if mode.startswith('script-'):
+        # ADB is a worker-local SDK tool, never a caller executable path.
+        for index in range(len(args) - 1, -1, -1):
+            if args[index].startswith('--adb='): del args[index]
+            elif args[index] == '--adb': del args[index:index + 2]
         for name in ('build/maven-repository', 'nuxie-android/build/outputs/aar/nuxie-android-release.aar'):
             if (ROOT / name).exists(): input_files[name] = ROOT / name
         for directory in ('maven-consumer', 'test-store-lint-consumer', 'minified-native-logging-consumer'):
             for suffix in ('build/outputs', 'build/reports', 'build/test-results', 'qualification.log'):
                 name = 'build/' + directory + '/' + suffix; names[name] = ROOT / name
+        diagnostic_files = {
+            'maven-consumer': ('unsafe-test-store.log', 'missing-selected-repository.log'),
+            'test-store-lint-consumer': ('unsafe-literal.log', 'safe-debug-gate.log', 'unsafe-kotlin-property.log', 'safe-kotlin-debug-gate.log'),
+            'minified-native-logging-consumer': ('build.log', 'disabled.log', 'redacted.log', 'raw.log'),
+        }
+        for directory, files in diagnostic_files.items():
+            for filename in files:
+                name = 'build/' + directory + '/' + filename; names[name] = ROOT / name
         for directory in ('maven-signing-test', 'process-death'):
             names['build/' + directory] = ROOT / 'build' / directory
         repository = option(args, '--repository')
