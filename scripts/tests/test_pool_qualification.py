@@ -24,6 +24,9 @@ class CompleteQualificationRoutingTests(unittest.TestCase):
                 if device:
                     self.assertIn('android-device@'+device,recorded['tools'])
                     self.assertNotIn('/caller/sdk/adb',recorded['args'])
+                if not device:
+                    self.assertNotIn('build/bazel-sdk',recorded['outputs'])
+                    self.assertNotIn('build/maven-repository',recorded['outputs'])
                 self.assertIn('build/maven-consumer/unsafe-test-store.log',recorded['outputs'])
                 self.assertIn('build/minified-native-logging-consumer/raw.log',recorded['outputs'])
 

@@ -112,8 +112,8 @@ def _dispatch(mode, arguments, *, output=None, command=None, input_files=None, e
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     platform, requirements = selection(mode, arguments, command, selected_platform, selected_device)
     names = {name: ROOT / name for name in OUTPUTS}
-    only_render = (mode == 'script-test-minified-font-fallback' or (mode == 'sdk' and command in ('host-render', 'host-render-smoke')))
-    if only_render: names = {}
+    focused_outputs = (mode in ('script-test-minified-font-fallback', 'script-test-maven-consumer') or (mode == 'sdk' and command in ('host-render', 'host-render-smoke')))
+    if focused_outputs: names = {}
     if output is not None:
         names['build/pool-prepared'] = Path(output).resolve()
         names.pop('build/bazel-sdk', None)
@@ -126,7 +126,7 @@ def _dispatch(mode, arguments, *, output=None, command=None, input_files=None, e
     if output is not None and not any(a == '--output' or a.startswith('--output=') for a in args):
         args += ['--output', str(output)]
     input_files = dict(input_files or {}); environment = dict(environment or {})
-    for project in ([] if only_render else ROOT.iterdir()):
+    for project in ([] if focused_outputs else ROOT.iterdir()):
         if project.is_dir() and (project / 'build.gradle.kts').is_file():
             for directory in ('outputs', 'reports', 'test-results'):
                 names[project.name + '/build/' + directory] = project / 'build' / directory
