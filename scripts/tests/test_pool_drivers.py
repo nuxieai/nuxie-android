@@ -12,6 +12,19 @@ sdk=importlib.util.module_from_spec(spec);spec.loader.exec_module(sdk)
 
 
 class DriverInputTests(unittest.TestCase):
+    def test_loader_directory_preserves_external_symlink_names_as_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);library=root/'libnux_capi.dylib';library.write_bytes(b'capi')
+            target=root/'Cellar/tool/lib/library.1.dylib';target.parent.mkdir(parents=True);target.write_bytes(b'library')
+            directory=root/'lib';directory.mkdir();(directory/'library.dylib').symlink_to(target)
+            with patch.object(sdk,'ROOT',root),patch.dict(os.environ,{'NUXIE_HOST_CAPI_LIB':str(library),'DYLD_LIBRARY_PATH':str(directory)},clear=True):
+                with sdk.host_inputs() as (files,environment):
+                    staged=Path(environment['DYLD_LIBRARY_PATH'])
+                    self.assertEqual((staged/'library.dylib').read_bytes(),b'library')
+                    self.assertFalse((staged/'library.dylib').is_symlink())
+                    self.assertIn(staged,files.values())
+                self.assertFalse(staged.exists())
+
     def test_icd_library_is_relocated_and_temporary_metadata_is_cleaned(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);capi=root/'libnux_capi.dylib';capi.write_bytes(b'capi')

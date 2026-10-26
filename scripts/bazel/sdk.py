@@ -438,8 +438,16 @@ def host_inputs():
                 directories = []
                 for index, directory in enumerate(os.environ[name].split(os.pathsep)):
                     selected = Path(directory).expanduser().resolve(strict=True)
-                    files['.nuxie/sdk-inputs/' + name.lower() + '-' + str(index)] = selected
-                    directories.append(str(selected))
+                    staged_directory = Path(temporary) / (name.lower() + '-' + str(index))
+                    staged_directory.mkdir()
+                    # Loader search paths inspect this directory, not its children.
+                    # Homebrew aliases often point outside lib/ into Cellar; copy
+                    # their resolved payload while keeping the loader-visible name.
+                    for candidate in selected.iterdir():
+                        if candidate.is_file() and (candidate.name.endswith('.dylib') or '.so' in candidate.name):
+                            shutil.copy2(candidate.resolve(strict=True), staged_directory / candidate.name)
+                    files['.nuxie/sdk-inputs/' + name.lower() + '-' + str(index)] = staged_directory
+                    directories.append(str(staged_directory))
                 env[name] = os.pathsep.join(directories)
         yield files, env
 
