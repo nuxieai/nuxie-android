@@ -102,7 +102,7 @@ def gradle_worker_arguments(arguments):
 
 
 def caller_gradle_context(arguments):
-    if os.environ.get('GRADLE_USER_HOME'): return True
+    if any(os.environ.get(name) for name in ('GRADLE_USER_HOME', 'GRADLE_OPTS', 'JAVA_OPTS', 'JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', '_JAVA_OPTIONS')): return True
     # These options select caller-owned configuration, caches or persistent
     # daemon/watch operations, rather than the SDK's declared build inputs.
     local = {'--system-prop', '--init-script', '--settings-file', '--build-file', '--gradle-user-home',
@@ -127,7 +127,8 @@ def _dispatch(mode, arguments, *, output=None, command=None, input_files=None, e
             or os.environ.get('NUXIE_EXECUTION') == 'local' or os.environ.get('NUXIE_CI_RUNNER_POLICY_VERSION') == '2' or '--help' in arguments or '-h' in arguments): return None
     if mode == 'gradle':
         tasks = gradle_tasks(arguments)
-        if any(task.lower().startswith('clean') for task in tasks): return None
+        # Gradle permits clean/cl and camel-case clean-task abbreviations.
+        if any(task.lower().startswith('clean') or task.lower() in ('c', 'cl', 'cle', 'clea') or any(task.startswith(prefix) and len(task) > len(prefix) and task[len(prefix)].isupper() for prefix in ('c', 'cl', 'cle', 'clea')) for task in tasks): return None
         if caller_gradle_context(arguments): return None
         # These explicitly address the caller's dependency cache or Maven home.
         if '--offline' in arguments or any(task.endswith('ToMavenLocal') for task in tasks): return None

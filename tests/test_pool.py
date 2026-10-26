@@ -12,7 +12,7 @@ pool = importlib.util.module_from_spec(spec); spec.loader.exec_module(pool)
 class PoolRoutingTests(unittest.TestCase):
     def setUp(self):
         # Bazel invokes tests from runfiles; these fixtures model SDK callers.
-        context = patch.dict(os.environ, {'GRADLE_USER_HOME':''})
+        context = patch.dict(os.environ, {name:'' for name in ('GRADLE_USER_HOME','GRADLE_OPTS','JAVA_OPTS','JAVA_TOOL_OPTIONS','JDK_JAVA_OPTIONS','_JAVA_OPTIONS')})
         context.start(); self.addCleanup(context.stop)
         previous = Path.cwd()
         os.chdir(pool.ROOT)
@@ -38,6 +38,8 @@ class PoolRoutingTests(unittest.TestCase):
 
     def test_caller_cache_operations_remain_local(self):
         with patch.dict(os.environ, {'_NUXIE_POOL_NESTED':'0','NUXIE_HOMELAB':'1','NUXIE_EXECUTION':'pool','NUXIE_CI_RUNNER_POLICY_VERSION':'0'}),patch.object(pool.Path,'home',side_effect=AssertionError('caller-local operation')):
+            for task in ('cl','cle','c','clTDUT','cTDUT'):
+                self.assertIsNone(pool.dispatch('gradle',[task,':example-app:assembleDebug']))
             self.assertIsNone(pool.dispatch('gradle',['clean',':example-app:assembleDebug']))
             self.assertIsNone(pool.dispatch('gradle',[':nuxie-android:cleanTestDebugUnitTest']))
             for arguments in (['test','--init-script','/caller/init.gradle'],['-b','/caller/build.gradle','tasks'],['--build-file=/caller/build.gradle','tasks'],['-g/caller/cache','test'],['--gradle-user-home','/caller/cache','test'],['--project-cache-dir=/caller/cache','test'],['--include-build','/caller/other','test'],['-Dorg.gradle.java.home=/caller/java','test'],['-p','/caller/other','test'],['--system-prop','org.gradle.java.home=/caller/java','test'],['--system-prop=org.gradle.java.home=/caller/java','test'],['--status'],['--continuous','test']):
@@ -56,8 +58,9 @@ class PoolRoutingTests(unittest.TestCase):
             self.assertFalse(pool.caller_gradle_context(['-p',str(pool.ROOT),'test']))
 
     def test_explicit_environment_cache_stays_local(self):
-        with patch.dict(os.environ, {'GRADLE_USER_HOME':'/caller/cache'}):
-            self.assertTrue(pool.caller_gradle_context(['test']))
+        for name in ('GRADLE_USER_HOME','GRADLE_OPTS','JAVA_OPTS','JAVA_TOOL_OPTIONS','JDK_JAVA_OPTIONS','_JAVA_OPTIONS'):
+            with patch.dict(os.environ, {name:'/caller/selected-context'}):
+                self.assertTrue(pool.caller_gradle_context(['test']),name)
 
     def test_portable_and_platform_requirements(self):
         platform, tools = pool.selection('sdk', ['test'])
