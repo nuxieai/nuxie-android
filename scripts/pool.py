@@ -91,6 +91,16 @@ def gradle_tasks(arguments):
     return tasks
 
 
+def gradle_worker_arguments(arguments):
+    values = iter(arguments); result = []; workers = int(os.environ.get('NUXIE_BAZEL_CPU', '2'))
+    for value in values:
+        if value == '--max-workers': workers = min(workers, int(next(values)))
+        elif value.startswith('--max-workers='): workers = min(workers, int(value.split('=', 1)[1]))
+        elif value not in ('--daemon', '--no-daemon'): result.append(value)
+    if workers < 1: raise ValueError('Gradle worker count must be positive')
+    return [*result, '--no-daemon', '--max-workers=' + str(workers)]
+
+
 def dispatch(mode, arguments, *, output=None, command=None, input_files=None, environment=None, selected_platform=None, selected_device=None):
     with contextlib.ExitStack() as stack:
         return _dispatch(mode, arguments, output=output, command=command, input_files=input_files, environment=environment, selected_platform=selected_platform, selected_device=selected_device, _stack=stack)
@@ -138,7 +148,7 @@ def _dispatch(mode, arguments, *, output=None, command=None, input_files=None, e
             args += ['--project-dir', str(Path.cwd().resolve())]
 
         for index, argument in enumerate(args):
-            project = args[index + 1] if argument in ('-p', '--project-dir') and index + 1 < len(args) else argument.split('=', 1)[1] if argument.startswith('--project-dir=') else argument[2:] if argument.startswith('-p') and len(argument) > 2 else None
+            project = args[index + 1] if argument in ('-p', '--project-dir') and index + 1 < len(args) else argument.split('=', 1)[1] if argument.startswith('--project-dir=') else argument[2:].removeprefix('=') if argument.startswith('-p') and len(argument) > 2 else None
             if not project: continue
             selected = Path(project).expanduser().resolve(strict=True)
             # Generated consumers use source paths from their owning script.
@@ -217,7 +227,7 @@ def main():
     if mode == 'gradle':
         command = [str(ROOT / 'gradlew'), *arguments]
         if os.environ.get('_NUXIE_POOL_NESTED') == '1':
-            command += ['--no-daemon', '--max-workers=' + os.environ.get('NUXIE_BAZEL_CPU', '2')]
+            command = [str(ROOT / 'gradlew'), *gradle_worker_arguments(arguments)]
     elif mode.startswith('script-'):
         command = [sys.executable, 'scripts/' + mode.removeprefix('script-') + '.py', *arguments]
     elif mode == 'prove-runtime-install-recovery':
