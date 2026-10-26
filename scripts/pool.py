@@ -90,11 +90,11 @@ def dispatch(mode, arguments, *, output=None, command=None, input_files=None, en
     input_files = dict(input_files or {}); environment = dict(environment or {})
     if mode == 'gradle':
         if os.environ.get('ANDROID_SERIAL'): environment['ANDROID_SERIAL'] = os.environ['ANDROID_SERIAL']
-        if not any(a in ('-p', '--project-dir') or a.startswith('--project-dir=') for a in args):
+        if not any(a in ('-p', '--project-dir') or a.startswith('--project-dir=') or (a.startswith('-p') and len(a) > 2) for a in args):
             args += ['--project-dir', str(Path.cwd().resolve())]
 
         for index, argument in enumerate(args):
-            project = args[index + 1] if argument in ('-p', '--project-dir') and index + 1 < len(args) else argument.split('=', 1)[1] if argument.startswith('--project-dir=') else None
+            project = args[index + 1] if argument in ('-p', '--project-dir') and index + 1 < len(args) else argument.split('=', 1)[1] if argument.startswith('--project-dir=') else argument[2:] if argument.startswith('-p') and len(argument) > 2 else None
             if not project: continue
             selected = Path(project).expanduser().resolve(strict=True)
             # Generated consumers use source paths from their owning script.
