@@ -10,6 +10,12 @@ pool = importlib.util.module_from_spec(spec); spec.loader.exec_module(pool)
 
 
 class PoolRoutingTests(unittest.TestCase):
+    def setUp(self):
+        # Bazel invokes tests from runfiles; these fixtures model SDK callers.
+        previous = Path.cwd()
+        os.chdir(pool.ROOT)
+        self.addCleanup(os.chdir, previous)
+
     def test_cleanup_options_do_not_become_tasks(self):
         self.assertEqual(pool.gradle_tasks(['--tests','connectedHostRenderOptionsTest','--args','clean old','test']),['test'])
         self.assertEqual(pool.gradle_tasks(['-p', 'android-plugin', '--console', 'plain', '-P', 'example=value', '-D', 'flag=value', '--project-prop', 'other=value', 'clean']), ['clean'])
