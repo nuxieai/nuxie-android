@@ -3,9 +3,14 @@
 import importlib.util
 import os
 from pathlib import Path
+import sys
 import shutil
 import subprocess
 import tempfile
+
+from pool import dispatch
+status = dispatch('script-test-maven-signing', sys.argv[1:])
+if status is not None: raise SystemExit(status)
 
 root = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('bundle_release', root / 'scripts/bundle-maven-release.py')

@@ -7,6 +7,7 @@ recorded by this run of ai.nuxie.sdk.test, after verifying package ownership.
 import argparse
 import json
 from pathlib import Path
+import sys
 import re
 import shutil
 import subprocess
@@ -20,6 +21,10 @@ def main():
     parser.add_argument('--boundary', choices=['pending-profile', 'active-screen', 'parked'], default='pending-profile')
     parser.add_argument('--adb', default=shutil.which('adb'))
     args = parser.parse_args()
+    from pool import dispatch
+    status = dispatch('script-test-startup-process-death', sys.argv[1:])
+    if status is not None: raise SystemExit(status)
+
     if not args.adb:
         parser.error('adb is not on PATH; pass --adb')
     adb = [args.adb, '-s', args.device]

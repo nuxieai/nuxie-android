@@ -3,6 +3,7 @@
 import argparse
 import os
 from pathlib import Path
+import sys
 import re
 import shlex
 import subprocess
@@ -22,6 +23,10 @@ def main():
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--scenario", choices=("native-retry", "native-close", "navigation-retry", "navigation-close", "recovery-retry", "recovery-close", "entry", "entry-after-editor", "home-return", "virtual-home-return", "roles", "activation", "activation-error", "native-slider", "virtual-slider"), default="roles")
     args = parser.parse_args()
+    from pool import dispatch
+    status = dispatch('script-test-talkback', sys.argv[1:])
+    if status is not None: raise SystemExit(status)
+
     if not re.fullmatch(r"emulator-[0-9]+", args.serial):
         parser.error("Use a dedicated rooted emulator, not a physical or user device")
     if not re.fullmatch(r"/dev/input/event[0-9]+", args.input_device):

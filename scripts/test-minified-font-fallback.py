@@ -8,6 +8,7 @@ On API 26+, its published fixture must draw ordinary color emoji through the C h
 import argparse
 import os
 from pathlib import Path
+import sys
 import shutil
 import subprocess
 import time
@@ -22,6 +23,10 @@ def main():
     parser.add_argument("--output", type=Path, help="Save the focused qualification log")
     parser.add_argument("--skip-install", action="store_true", help="Repeat against the APK already installed")
     args = parser.parse_args()
+    from pool import dispatch
+    status = dispatch('script-test-minified-font-fallback', sys.argv[1:])
+    if status is not None: raise SystemExit(status)
+
 
     def adb(*command):
         return subprocess.check_output([args.adb, "-s", args.serial, *command], text=True, stderr=subprocess.STDOUT)
