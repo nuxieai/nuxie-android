@@ -14,6 +14,10 @@ import tomllib
 import uuid
 import zipfile
 
+from pool import dispatch
+status = dispatch('script-test-minified-native-logging', sys.argv[1:])
+if status is not None: raise SystemExit(status)
+
 root = Path(__file__).resolve().parents[1]
 serial = sys.argv[1]
 versions = tomllib.loads((root / 'gradle/libs.versions.toml').read_text())['versions']

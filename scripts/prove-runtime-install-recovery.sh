@@ -3,6 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+if [[ "${_NUXIE_POOL_NESTED:-0}" != 1 && "${NUXIE_HOMELAB:-1}" != 0 && "${NUXIE_EXECUTION:-}" != local && -f "$HOME/.config/nuxie/homelab-cluster.json" ]]; then
+  exec python3 "${SCRIPT_DIR}/pool.py" prove-runtime-install-recovery "$@"
+fi
 CASE="${1:-all}"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/nuxie-runtime-recovery.XXXXXX")"
 WORKSPACE="${TEST_ROOT}/repo"

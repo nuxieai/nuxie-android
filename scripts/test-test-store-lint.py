@@ -6,10 +6,15 @@ Run :nuxie-android:assembleRelease first. Fixtures and logs stay under build/.
 import io
 import os
 from pathlib import Path
+import sys
 import subprocess
 import tomllib
 import zipfile
 import xml.etree.ElementTree as ET
+
+from pool import dispatch
+status = dispatch('script-test-test-store-lint', sys.argv[1:])
+if status is not None: raise SystemExit(status)
 
 root = Path(__file__).resolve().parents[1]
 aar = root / 'nuxie-android/build/outputs/aar/nuxie-android-release.aar'
