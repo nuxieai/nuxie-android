@@ -12,6 +12,10 @@ SDK = 'android'
 OUTPUTS = ['build/bazel-sdk', 'nuxie-android/build/outputs', 'nuxie-android/build/reports', 'nuxie-android/build/test-results', 'example-app/build/outputs', 'build/maven-repository', 'build/reports', 'build/test-results', 'build/outputs']
 
 
+def option(arguments, name):
+    return next((arguments[i + 1] for i, value in enumerate(arguments[:-1]) if value == name), None) or next((value.split('=', 1)[1] for value in arguments if value.startswith(name + '=')), None)
+
+
 def selection(mode, arguments, command=None):
     selected = 'android' if mode == 'prepare-native' and SDK in ('react-native', 'unity') else 'all'
     for i, arg in enumerate(arguments):
@@ -58,7 +62,7 @@ def selection(mode, arguments, command=None):
     if mode.startswith('script-'):
         requirements.add('java17')
         if mode in ('script-test-talkback', 'script-test-minified-font-fallback', 'script-test-minified-native-logging', 'script-test-startup-process-death'):
-            serial = next((arguments[i+1] for i,a in enumerate(arguments[:-1]) if a in ('--serial', '--device')), None)
+            serial = option(arguments, '--serial') or option(arguments, '--device')
             if mode == 'script-test-minified-native-logging' and arguments: serial = arguments[0]
             if not serial: raise ValueError('A device serial is required for this pool qualification')
             requirements.add('android-device@' + serial)
@@ -85,6 +89,10 @@ def dispatch(mode, arguments, *, output=None, command=None, input_files=None, en
         names.pop('build/bazel-sdk', None)
     frontend = 'scripts/bazel/sdk.py' if mode == 'sdk' else 'scripts/pool.py'
     args = list(arguments) if mode == 'sdk' else [mode, *arguments]
+    if output is not None:
+        for index, argument in enumerate(args):
+            if argument == '--output' and index + 1 < len(args): args[index + 1] = str(Path(output).resolve())
+            elif argument.startswith('--output='): args[index] = '--output=' + str(Path(output).resolve())
     if output is not None and not any(a == '--output' or a.startswith('--output=') for a in args):
         args += ['--output', str(output)]
     input_files = dict(input_files or {}); environment = dict(environment or {})
