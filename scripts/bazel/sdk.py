@@ -400,6 +400,107 @@ def prepare(args):
     print(output / "sdk-artifacts.json")
 
 
+def pool_dispatch(args):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from pool import dispatch
+    if os.environ.get('_NUXIE_POOL_NESTED') == '1': return None
+    if args.command == 'prepare':
+        identity = source_identity(args.maven_version, args.sign)
+        state = ROOT / '.nuxie'; state.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=state, prefix='sdk-prepare-') as temporary:
+            incoming = Path(temporary) / 'maven'
+            status = dispatch('sdk', ['prepare', '--output', str(incoming), '--maven-version', args.maven_version],
+                              command='prepare', output=incoming)
+            if status is None or status != 0: return status
+            publish_prepared(args, incoming, identity)
+            return 0
+    if args.command in ('host-render', 'host-render-smoke'):
+        library = Path(os.environ.get('NUXIE_HOST_CAPI_LIB', '')).expanduser().resolve()
+        if not library.is_file(): raise ValueError('NUXIE_HOST_CAPI_LIB must name a prepared host library')
+        files = {'.nuxie/sdk-inputs/host-runtime' + library.suffix: library}
+        env = {'NUXIE_HOST_CAPI_LIB': str(library)}
+        for name in ('NUXIE_MOLTENVK_LIBRARY', 'VK_ICD_FILENAMES'):
+            if os.environ.get(name):
+                # Copy containing driver metadata/libraries together so relative
+                # ICD paths retain their declared relationship.
+                selected = Path(os.environ[name]).expanduser().resolve()
+                files['.nuxie/sdk-inputs/' + name.lower()] = selected.parent
+                env[name] = str(selected)
+        for name in ('DYLD_LIBRARY_PATH', 'LD_LIBRARY_PATH'):
+            if os.environ.get(name):
+                directories = []
+                for index, directory in enumerate(os.environ[name].split(os.pathsep)):
+                    selected = Path(directory).expanduser().resolve(strict=True)
+                    files['.nuxie/sdk-inputs/' + name.lower() + '-' + str(index)] = selected
+                    directories.append(str(selected))
+                env[name] = os.pathsep.join(directories)
+        arguments = list(sys.argv[1:])
+        output = None
+        if args.command == 'host-render':
+            source = Path(args.input).expanduser().resolve(strict=True)
+            files['.nuxie/sdk-inputs/render-input'] = source
+            for index, argument in enumerate(arguments):
+                if argument == '--input': arguments[index + 1] = str(source)
+                elif argument.startswith('--input='): arguments[index] = '--input=' + str(source)
+            output = Path(args.output).expanduser().resolve()
+        return dispatch('sdk', arguments, command=args.command, output=output, input_files=files, environment=env)
+    return dispatch('sdk', sys.argv[1:], command=args.command)
+
+
+def publish_prepared(args, incoming, identity):
+    """Publish one verified Maven coordinate; signing never leaves the caller."""
+    receipt = json.loads((incoming / 'sdk-artifacts.json').read_text())
+    if (receipt.get('sourceRevision'), receipt.get('sourceDirty')) != identity:
+        raise ValueError('Prepared SDK source identity mismatch')
+    if receipt.get('maven', {}).get('version') != args.maven_version:
+        raise ValueError('Prepared Maven version mismatch')
+    if args.sign and receipt.get('runtime', {}).get('mode') != 'published':
+        raise ValueError('Signed releases must use the published pinned runtime')
+    coordinate = Path('ai/nuxie/nuxie-android') / args.maven_version
+    for item in receipt['artifacts']:
+        relative = Path(item['path'])
+        if relative.is_absolute() or '..' in relative.parts: raise ValueError('Invalid prepared artifact path')
+        file = incoming / relative
+        if not file.is_file() or file.stat().st_size != item['size'] or sha256(file) != item['sha256']:
+            raise ValueError('Prepared SDK artifact mismatch')
+    if source_identity(args.maven_version, args.sign) != identity:
+        raise ValueError('SDK source identity changed during preparation')
+    output = args.output.resolve(); destination = output / coordinate
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=destination.parent, prefix='.nuxie-pool-publish-') as temporary:
+        staging = Path(temporary) / 'version'; shutil.copytree(incoming / coordinate, staging)
+        if args.sign:
+            stem = ARTIFACT + '-' + args.maven_version
+            products = [staging / (stem + suffix) for suffix in ('.aar', '-sources.jar', '-javadoc.jar', '.pom', '.module')]
+            sign(staging, products)
+            for file in staging.glob('*.asc'):
+                for algorithm in ('md5', 'sha1', 'sha256', 'sha512'):
+                    (staging / (file.name + '.' + algorithm)).write_text(hashlib.new(algorithm, file.read_bytes()).hexdigest())
+        with (output / '.sdk-prepare.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            publish_directory(staging, destination)
+            license_file = output / 'licenses/LICENSE'; license_file.parent.mkdir(exist_ok=True)
+            publish_file(incoming / 'licenses/LICENSE', license_file)
+            receipt['artifacts'] = [dict(kind='maven', path=file.relative_to(output).as_posix(), sha256=sha256(file), size=file.stat().st_size)
+                                    for file in sorted(destination.iterdir()) if file.is_file()]
+            receipt['artifacts'].append(dict(kind='license', path='licenses/LICENSE', sha256=sha256(license_file), size=license_file.stat().st_size))
+            pending = output / '.sdk-artifacts.json.tmp'
+            pending.write_text(json.dumps(receipt, indent=2) + '\n'); pending.replace(output / 'sdk-artifacts.json')
+    print(output / 'sdk-artifacts.json')
+
+
+def publish_file(source, destination):
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
+        pending = Path(stream.name)
+    try:
+        shutil.copyfile(source, pending)
+        pending.chmod(0o644)
+        pending.replace(destination)
+    finally:
+        pending.unlink(missing_ok=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -418,9 +519,7 @@ def main():
     device.add_argument("--serial", required=True)
     device.add_argument("--class", dest="test_class")
     args = parser.parse_args()
-    sys.path.insert(0, str(ROOT / 'scripts'))
-    from pool import dispatch
-    status = dispatch('sdk', sys.argv[1:], output=args.output if args.command == "prepare" else None)
+    status = pool_dispatch(args)
     if status is not None:
         raise SystemExit(status)
     if args.command == "prepare":
@@ -468,7 +567,7 @@ def main():
             product = artifact(label, filename=None if args.command == "build" else label.split(":", 1)[1] + ".apk")
             destination = ROOT / "build/bazel-sdk/products" / product.name
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(product, destination)
+            publish_file(product, destination)
             print(destination)
 
 

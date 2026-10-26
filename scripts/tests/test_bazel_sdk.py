@@ -32,6 +32,8 @@ semantic = module("semantic_fixture")
 
 class BazelSdkPackagingTests(unittest.TestCase):
     def setUp(self):
+        guard = patch.object(sdk, "pool_dispatch", return_value=None)
+        guard.start(); self.addCleanup(guard.stop)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)

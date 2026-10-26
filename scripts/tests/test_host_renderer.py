@@ -25,6 +25,8 @@ verifier = module("verify_host_tests")
 
 class HostRendererTests(unittest.TestCase):
     def setUp(self):
+        guard = patch.object(sdk, "pool_dispatch", return_value=None)
+        guard.start(); self.addCleanup(guard.stop)
         self.temporary = tempfile.TemporaryDirectory(prefix="host render test ")
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
