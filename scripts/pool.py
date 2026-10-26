@@ -215,7 +215,9 @@ def main():
     status = dispatch(mode, arguments)
     if status is not None: return status
     if mode == 'gradle':
-        command = [str(ROOT / 'gradlew'), *arguments, '--no-daemon', '--max-workers=' + os.environ.get('NUXIE_BAZEL_CPU', '2')]
+        command = [str(ROOT / 'gradlew'), *arguments]
+        if os.environ.get('_NUXIE_POOL_NESTED') == '1':
+            command += ['--no-daemon', '--max-workers=' + os.environ.get('NUXIE_BAZEL_CPU', '2')]
     elif mode.startswith('script-'):
         command = [sys.executable, 'scripts/' + mode.removeprefix('script-') + '.py', *arguments]
     elif mode == 'prove-runtime-install-recovery':
