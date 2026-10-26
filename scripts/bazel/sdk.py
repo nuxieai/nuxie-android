@@ -408,7 +408,7 @@ def host_inputs():
     state = ROOT / '.nuxie'; state.mkdir(exist_ok=True)
     if state.is_symlink(): raise ValueError('SDK driver staging must stay inside the checkout')
     with tempfile.TemporaryDirectory(dir=state, prefix='sdk-drivers-') as temporary:
-        files = {'.nuxie/sdk-inputs/host-runtime' + library.suffix: library}
+        files = {'.nuxie/sdk-inputs/host-runtime/' + library.name: library}
         env = {'NUXIE_HOST_CAPI_LIB': str(library)}
         if os.environ.get('NUXIE_MOLTENVK_LIBRARY'):
             selected = Path(os.environ['NUXIE_MOLTENVK_LIBRARY']).expanduser().resolve(strict=True)

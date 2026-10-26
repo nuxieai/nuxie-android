@@ -449,3 +449,7 @@ Products return to the checkout's declared artifact paths. Logs, test diagnostic
 and request timings are retained under `.nuxie/homelab/` and
 `.nuxie/homelab-timings/`. A failed remote test remains a failure and does not
 fall back to local compilation. See the [SDK pool operations guide](https://github.com/nuxieai/nuxie-dev/blob/main/docs/operations/sdk-bazel-build.md#shared-pool-execution-for-every-sdk).
+
+Gradle `--offline`, Maven-local publication and cleanup explicitly address the
+caller's own cache/output directories and retain local execution. Normal builds
+and tests use automatic pool placement.
