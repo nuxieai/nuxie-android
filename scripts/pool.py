@@ -78,6 +78,13 @@ def selection(mode, arguments, command=None, selected_platform=None, selected_de
     return ('macos' if apple else 'portable'), sorted(requirements)
 
 
+def host_render_argument_path(value, *, exists=False):
+    selected = Path(value).expanduser()
+    # JavaExec defaults to the project that owns hostRenderHarness.
+    if not selected.is_absolute(): selected = ROOT / 'nuxie-android' / selected
+    return selected.resolve(strict=exists)
+
+
 def gradle_tasks(arguments):
     values = iter(arguments)
     tasks = []
@@ -203,10 +210,10 @@ def _dispatch(mode, arguments, *, output=None, command=None, input_files=None, e
                 values = shlex.split(args[position] if argument == '--args' else argument.split('=', 1)[1])
                 for item, value in enumerate(values[:-1]):
                     if value == '--input':
-                        selected = Path(values[item + 1]).expanduser().resolve(strict=True)
+                        selected = host_render_argument_path(values[item + 1], exists=True)
                         input_files['.nuxie/sdk-inputs/render-input'] = selected; values[item + 1] = str(selected)
                     elif value == '--output':
-                        selected = Path(values[item + 1]).expanduser().resolve()
+                        selected = host_render_argument_path(values[item + 1])
                         names['build/pool-host-frames'] = selected; values[item + 1] = str(selected)
                 args[position] = ('' if argument == '--args' else '--args=') + shlex.join(values)
 
