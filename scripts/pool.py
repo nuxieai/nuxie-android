@@ -13,7 +13,11 @@ OUTPUTS = ['build/bazel-sdk', 'nuxie-android/build/outputs', 'nuxie-android/buil
 
 
 def option(arguments, name):
-    return next((arguments[i + 1] for i, value in enumerate(arguments[:-1]) if value == name), None) or next((value.split('=', 1)[1] for value in arguments if value.startswith(name + '=')), None)
+    selected = None
+    for index, value in enumerate(arguments):
+        if value == name and index + 1 < len(arguments): selected = arguments[index + 1]
+        elif value.startswith(name + '='): selected = value.split('=', 1)[1]
+    return selected
 
 
 def selection(mode, arguments, command=None, selected_platform=None):
