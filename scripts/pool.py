@@ -8,7 +8,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 SDK = 'android'
-OUTPUTS = ['build/bazel-sdk', 'nuxie-android/build/outputs', 'nuxie-android/build/reports', 'nuxie-android/build/test-results', 'example-app/build/outputs']
+OUTPUTS = ['build/bazel-sdk', 'nuxie-android/build/outputs', 'nuxie-android/build/reports', 'nuxie-android/build/test-results', 'example-app/build/outputs', 'build/maven-repository']
 
 
 def selection(mode, arguments, command=None):
@@ -47,7 +47,11 @@ def selection(mode, arguments, command=None):
     if (mode == 'gradle' or (mode == 'check' and 'android' in requirements)
             or (SDK == 'android' and mode == 'sdk' and command in ('check', 'lint', 'api-check', 'providers'))):
         requirements.add('java17')
-    if SDK == 'android' and command in ('host-render', 'host-render-smoke'):
+    if mode == 'gradle' and any('connected' in a.lower() for a in arguments if not a.startswith('-')):
+        serial = os.environ.get('ANDROID_SERIAL')
+        if not serial: raise ValueError('ANDROID_SERIAL is required for connected pool tests')
+        requirements.add('android-device@' + serial)
+    if SDK == 'android' and (command in ('host-render', 'host-render-smoke') or (mode == 'gradle' and any('hostrender' in a.lower() for a in arguments))):
         requirements.add('native-host@' + sys.platform + '-' + os.uname().machine)
         return ('macos' if sys.platform == 'darwin' else 'linux'), sorted(requirements)
     if apple: requirements.add('xcode')
@@ -73,8 +77,39 @@ def dispatch(mode, arguments, *, output=None, command=None, input_files=None, en
     args = list(arguments) if mode == 'sdk' else [mode, *arguments]
     if output is not None and not any(a == '--output' or a.startswith('--output=') for a in args):
         args += ['--output', str(output)]
+    input_files = dict(input_files or {}); environment = dict(environment or {})
+    if mode == 'gradle':
+        if os.environ.get('ANDROID_SERIAL'): environment['ANDROID_SERIAL'] = os.environ['ANDROID_SERIAL']
+        for index, argument in enumerate(args):
+            project = args[index + 1] if argument in ('-p', '--project-dir') and index + 1 < len(args) else argument.split('=', 1)[1] if argument.startswith('--project-dir=') else None
+            if not project: continue
+            selected = Path(project).expanduser().resolve(strict=True)
+            # Generated consumers use source paths from their owning script.
+            # Relocate the project itself and its local Maven repository.
+            if not selected.is_relative_to(ROOT): raise ValueError('Generated pool Gradle projects must be inside the SDK checkout')
+            relative = selected.relative_to(ROOT).as_posix()
+            for file in selected.rglob('*'):
+                if file.is_file() and not any(p in ('build', '.gradle') for p in file.relative_to(selected).parts):
+                    input_files[(Path(relative) / file.relative_to(selected)).as_posix()] = file
+            names[relative + '/build'] = selected / 'build'
+            if argument in ('-p', '--project-dir'): args[index + 1] = str(selected)
+            else: args[index] = '--project-dir=' + str(selected)
+        repository = ROOT / 'build/maven-repository'
+        if repository.is_dir(): input_files['build/maven-repository'] = repository
+        for project in ROOT.iterdir():
+            if project.is_dir() and (project / 'build.gradle.kts').is_file():
+                for directory in ('outputs', 'reports', 'test-results'):
+                    names[project.name + '/build/' + directory] = project / 'build' / directory
+        if any(a.rsplit(':', 1)[-1] == 'apiDump' for a in args):
+            names['nuxie-android/api/nuxie-android.api'] = ROOT / 'nuxie-android/api/nuxie-android.api'
+        if any('hostrender' in a.lower() for a in args):
+            spec = importlib.util.spec_from_file_location('sdk_host_pool', ROOT / 'scripts/bazel/sdk.py')
+            host = importlib.util.module_from_spec(spec); spec.loader.exec_module(host)
+            files, variables = host.host_inputs()
+            input_files.update(files); environment.update(variables)
     return module.route(ROOT, args, frontend=frontend, platform=platform,
-                        requirements=requirements, outputs=names, input_files=input_files, environment=environment)
+                        requirements=requirements, outputs=names, input_files=input_files, environment=environment,
+                        merge_outputs=[name for name in names if not (SDK == 'react-native' and name == 'dist')])
 
 
 def main():

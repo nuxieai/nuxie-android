@@ -400,6 +400,32 @@ def prepare(args):
     print(output / "sdk-artifacts.json")
 
 
+def host_inputs():
+    library = Path(os.environ.get('NUXIE_HOST_CAPI_LIB', '')).expanduser().resolve()
+    if not library.is_file(): raise ValueError('NUXIE_HOST_CAPI_LIB must name a prepared host library')
+    files = {'.nuxie/sdk-inputs/host-runtime' + library.suffix: library}
+    env = {'NUXIE_HOST_CAPI_LIB': str(library)}
+    for name in ('NUXIE_MOLTENVK_LIBRARY', 'VK_ICD_FILENAMES'):
+        if os.environ.get(name):
+            # Copy containing driver metadata/libraries together so relative
+            # ICD paths retain their declared relationship.
+            selected_paths = []
+            for index, value in enumerate(os.environ[name].split(os.pathsep)):
+                selected = Path(value).expanduser().resolve(strict=True)
+                files['.nuxie/sdk-inputs/' + name.lower() + '-' + str(index)] = selected.parent
+                selected_paths.append(str(selected))
+            env[name] = os.pathsep.join(selected_paths)
+    for name in ('DYLD_LIBRARY_PATH', 'LD_LIBRARY_PATH'):
+        if os.environ.get(name):
+            directories = []
+            for index, directory in enumerate(os.environ[name].split(os.pathsep)):
+                selected = Path(directory).expanduser().resolve(strict=True)
+                files['.nuxie/sdk-inputs/' + name.lower() + '-' + str(index)] = selected
+                directories.append(str(selected))
+            env[name] = os.pathsep.join(directories)
+    return files, env
+
+
 def pool_dispatch(args):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from pool import dispatch
@@ -415,25 +441,7 @@ def pool_dispatch(args):
             publish_prepared(args, incoming, identity)
             return 0
     if args.command in ('host-render', 'host-render-smoke'):
-        library = Path(os.environ.get('NUXIE_HOST_CAPI_LIB', '')).expanduser().resolve()
-        if not library.is_file(): raise ValueError('NUXIE_HOST_CAPI_LIB must name a prepared host library')
-        files = {'.nuxie/sdk-inputs/host-runtime' + library.suffix: library}
-        env = {'NUXIE_HOST_CAPI_LIB': str(library)}
-        for name in ('NUXIE_MOLTENVK_LIBRARY', 'VK_ICD_FILENAMES'):
-            if os.environ.get(name):
-                # Copy containing driver metadata/libraries together so relative
-                # ICD paths retain their declared relationship.
-                selected = Path(os.environ[name]).expanduser().resolve()
-                files['.nuxie/sdk-inputs/' + name.lower()] = selected.parent
-                env[name] = str(selected)
-        for name in ('DYLD_LIBRARY_PATH', 'LD_LIBRARY_PATH'):
-            if os.environ.get(name):
-                directories = []
-                for index, directory in enumerate(os.environ[name].split(os.pathsep)):
-                    selected = Path(directory).expanduser().resolve(strict=True)
-                    files['.nuxie/sdk-inputs/' + name.lower() + '-' + str(index)] = selected
-                    directories.append(str(selected))
-                env[name] = os.pathsep.join(directories)
+        files, env = host_inputs()
         arguments = list(sys.argv[1:])
         output = None
         if args.command == 'host-render':
@@ -443,6 +451,9 @@ def pool_dispatch(args):
                 if argument == '--input': arguments[index + 1] = str(source)
                 elif argument.startswith('--input='): arguments[index] = '--input=' + str(source)
             output = Path(args.output).expanduser().resolve()
+            for index, argument in enumerate(arguments):
+                if argument == '--output': arguments[index + 1] = str(output)
+                elif argument.startswith('--output='): arguments[index] = '--output=' + str(output)
         return dispatch('sdk', arguments, command=args.command, output=output, input_files=files, environment=env)
     return dispatch('sdk', sys.argv[1:], command=args.command)
 
