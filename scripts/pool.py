@@ -108,6 +108,17 @@ def gradle_worker_arguments(arguments):
     return [*result, '--no-daemon', '--max-workers=' + str(workers)]
 
 
+def caller_gradle_operation(task):
+    # Publication mutates a selected repository; cleanup mutates caller output.
+    # Preserve Gradle's camel-case abbreviations for these caller operations.
+    for verb in ('clean', 'publish'):
+        if task.lower().startswith(verb): return True
+        for length in range(1, len(verb)):
+            prefix = verb[:length]
+            if task.lower() == prefix or (task.startswith(prefix) and len(task) > length and task[length].isupper()): return True
+    return False
+
+
 def caller_gradle_context(arguments):
     if any(os.environ.get(name) for name in ('GRADLE_USER_HOME', 'GRADLE_OPTS', 'JAVA_OPTS', 'JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS', '_JAVA_OPTIONS')): return True
     # These options select caller-owned configuration, caches or persistent
@@ -135,7 +146,7 @@ def _dispatch(mode, arguments, *, output=None, command=None, input_files=None, e
     if mode == 'gradle':
         tasks = gradle_tasks(arguments)
         # Gradle permits clean/cl and camel-case clean-task abbreviations.
-        if any(task.lower().startswith('clean') or task.lower() in ('c', 'cl', 'cle', 'clea') or any(task.startswith(prefix) and len(task) > len(prefix) and task[len(prefix)].isupper() for prefix in ('c', 'cl', 'cle', 'clea')) for task in tasks): return None
+        if any(caller_gradle_operation(task) for task in tasks): return None
         if caller_gradle_context(arguments): return None
         # These explicitly address the caller's dependency cache or Maven home.
         if '--offline' in arguments or any(task.endswith('ToMavenLocal') for task in tasks): return None
@@ -200,6 +211,7 @@ def _dispatch(mode, arguments, *, output=None, command=None, input_files=None, e
         if any(a.rsplit(':', 1)[-1] == 'apiDump' for a in args):
             names['nuxie-android/api/nuxie-android.api'] = ROOT / 'nuxie-android/api/nuxie-android.api'
         if any(a.lower() in ('hostrenderharness', 'hostrendersmoke', 'compilehostrenderbridge') for a in gradle_tasks(arguments)):
+            names['nuxie-android/build/host-render/native'] = ROOT / 'nuxie-android/build/host-render/native'
             spec = importlib.util.spec_from_file_location('sdk_host_pool', ROOT / 'scripts/bazel/sdk.py')
             host = importlib.util.module_from_spec(spec); spec.loader.exec_module(host)
             files, variables = _stack.enter_context(host.host_inputs())

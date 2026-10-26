@@ -38,7 +38,7 @@ class PoolRoutingTests(unittest.TestCase):
 
     def test_caller_cache_operations_remain_local(self):
         with patch.dict(os.environ, {'_NUXIE_POOL_NESTED':'0','NUXIE_HOMELAB':'1','NUXIE_EXECUTION':'pool','NUXIE_CI_RUNNER_POLICY_VERSION':'0'}),patch.object(pool.Path,'home',side_effect=AssertionError('caller-local operation')):
-            for task in ('cl','cle','c','clTDUT','cTDUT'):
+            for task in ('cl','cle','c','clTDUT','cTDUT','pTML','pubTML','publishToMavenLocal'):
                 self.assertIsNone(pool.dispatch('gradle',[task,':example-app:assembleDebug']))
             self.assertIsNone(pool.dispatch('gradle',['clean',':example-app:assembleDebug']))
             self.assertIsNone(pool.dispatch('gradle',[':nuxie-android:cleanTestDebugUnitTest']))
@@ -70,6 +70,17 @@ class PoolRoutingTests(unittest.TestCase):
                 self.assertEqual(pool.host_render_argument_path('input.riv',exists=True),fixture)
                 self.assertEqual(pool.host_render_argument_path('build/frames'),project/'build/frames')
                 self.assertEqual(pool.host_render_argument_path(str(fixture),exists=True),fixture)
+
+    def test_explicit_jni_bridge_returns_its_native_product(self):
+        import json
+        with tempfile.TemporaryDirectory() as temporary:
+            home=Path(temporary).resolve();root=home/'sdk';scripts=root/'scripts/bazel';scripts.mkdir(parents=True)
+            (scripts/'sdk.py').write_text("import contextlib\n@contextlib.contextmanager\ndef host_inputs():\n yield {}, {}\n")
+            helper=home/'.local/share/nuxie-homelab/sdk-task.py';helper.parent.mkdir(parents=True);record=home/'record.json'
+            helper.write_text("from pathlib import Path\nimport os,json\ndef route(root,args,**kwargs):\n Path(os.environ['RECORD']).write_text(json.dumps(list(kwargs['outputs'])))\n return 17\n")
+            with patch.object(pool,'ROOT',root),patch.object(pool.Path,'home',return_value=home),patch.dict(os.environ,{'_NUXIE_POOL_NESTED':'0','NUXIE_CI_RUNNER_POLICY_VERSION':'0','NUXIE_HOMELAB':'1','NUXIE_EXECUTION':'pool','RECORD':str(record)}):
+                self.assertEqual(pool.dispatch('gradle',['-p',str(root),':nuxie-android:compileHostRenderBridge']),17)
+                self.assertIn('nuxie-android/build/host-render/native',json.loads(record.read_text()))
 
     def test_portable_and_platform_requirements(self):
         platform, tools = pool.selection('sdk', ['test'])
