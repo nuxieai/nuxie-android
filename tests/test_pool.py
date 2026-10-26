@@ -62,6 +62,15 @@ class PoolRoutingTests(unittest.TestCase):
             with patch.dict(os.environ, {name:'/caller/selected-context'}):
                 self.assertTrue(pool.caller_gradle_context(['test']),name)
 
+    def test_relative_render_paths_use_the_harness_project(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary).resolve();project=root/'nuxie-android';project.mkdir()
+            fixture=project/'input.riv';fixture.write_bytes(b'input')
+            with patch.object(pool,'ROOT',root):
+                self.assertEqual(pool.host_render_argument_path('input.riv',exists=True),fixture)
+                self.assertEqual(pool.host_render_argument_path('build/frames'),project/'build/frames')
+                self.assertEqual(pool.host_render_argument_path(str(fixture),exists=True),fixture)
+
     def test_portable_and_platform_requirements(self):
         platform, tools = pool.selection('sdk', ['test'])
         self.assertEqual(platform, 'portable')
