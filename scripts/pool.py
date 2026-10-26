@@ -96,7 +96,13 @@ def dispatch(mode, arguments, *, output=None, command=None, input_files=None, en
     if output is not None and not any(a == '--output' or a.startswith('--output=') for a in args):
         args += ['--output', str(output)]
     input_files = dict(input_files or {}); environment = dict(environment or {})
+    for project in ROOT.iterdir():
+        if project.is_dir() and (project / 'build.gradle.kts').is_file():
+            for directory in ('outputs', 'reports', 'test-results'):
+                names[project.name + '/build/' + directory] = project / 'build' / directory
     if mode == 'gradle':
+        if os.environ.get('NUXIE_SIGNING_KEY') and any('publish' in a.lower() for a in args):
+            raise ValueError('Signed Gradle publication is unsupported through the pool; use sdk.sh prepare --sign for caller-side signing')
         if os.environ.get('ANDROID_SERIAL'): environment['ANDROID_SERIAL'] = os.environ['ANDROID_SERIAL']
         if not any(a in ('-p', '--project-dir') or a.startswith('--project-dir=') or (a.startswith('-p') and len(a) > 2) for a in args):
             args += ['--project-dir', str(Path.cwd().resolve())]
@@ -113,15 +119,11 @@ def dispatch(mode, arguments, *, output=None, command=None, input_files=None, en
             for file in selected.rglob('*'):
                 if file.is_file() and not any(p in ('build', '.gradle') for p in file.relative_to(selected).parts):
                     input_files[(Path(relative) / file.relative_to(selected)).as_posix()] = file
-            names[relative + '/build'] = selected / 'build'
+            if not (selected / 'build.gradle.kts').is_file(): names[relative + '/build'] = selected / 'build'
             if argument in ('-p', '--project-dir'): args[index + 1] = str(selected)
             else: args[index] = '--project-dir=' + str(selected)
         repository = ROOT / 'build/maven-repository'
-        if repository.is_dir(): input_files['build/maven-repository', 'build/reports', 'build/test-results', 'build/outputs'] = repository
-        for project in ROOT.iterdir():
-            if project.is_dir() and (project / 'build.gradle.kts').is_file():
-                for directory in ('outputs', 'reports', 'test-results'):
-                    names[project.name + '/build/' + directory] = project / 'build' / directory
+        if repository.is_dir(): input_files['build/maven-repository'] = repository
         if any(a.rsplit(':', 1)[-1] == 'apiDump' for a in args):
             names['nuxie-android/api/nuxie-android.api'] = ROOT / 'nuxie-android/api/nuxie-android.api'
         if any('hostrender' in a.lower() for a in args):
@@ -152,6 +154,7 @@ def dispatch(mode, arguments, *, output=None, command=None, input_files=None, en
                 from urllib.parse import urlsplit, unquote
                 selected = Path(unquote(urlsplit(args[index + 1]).path)).resolve(strict=True)
                 input_files['.nuxie/sdk-inputs/maven-repository'] = selected
+    names = {name: destination for name, destination in names.items() if not any(name.startswith(parent + '/') for parent in names if parent != name)}
     return module.route(ROOT, args, frontend=frontend, platform=platform,
                         requirements=requirements, outputs=names, input_files=input_files, environment=environment,
                         merge_outputs=[name for name in names if not (SDK == 'react-native' and name == 'dist')])
