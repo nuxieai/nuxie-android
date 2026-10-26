@@ -62,7 +62,7 @@ def selection(mode, arguments, command=None, selected_platform=None, selected_de
         serial = os.environ.get('ANDROID_SERIAL')
         if not serial: raise ValueError('ANDROID_SERIAL is required for connected pool tests')
         requirements.add('android-device@' + serial)
-    if SDK == 'android' and (command in ('host-render', 'host-render-smoke') or (mode == 'gradle' and any('hostrender' in a.lower() for a in gradle_tasks(arguments)))):
+    if SDK == 'android' and (command in ('host-render', 'host-render-smoke') or (mode == 'gradle' and any(a.lower() in ('hostrenderharness', 'hostrendersmoke', 'compilehostrenderbridge') for a in gradle_tasks(arguments)))):
         requirements.add('native-host@' + sys.platform + '-' + os.uname().machine)
         return ('macos' if sys.platform == 'darwin' else 'linux'), sorted(requirements)
     if mode.startswith('script-'):
@@ -81,7 +81,7 @@ def selection(mode, arguments, command=None, selected_platform=None, selected_de
 def gradle_tasks(arguments):
     values = iter(arguments)
     tasks = []
-    takes_value = {'-P', '--project-prop', '-D', '--system-prop', '-p', '--project-dir', '-g', '--gradle-user-home', '-I', '--init-script',
+    takes_value = {'--tests', '--args', '--configuration', '--dependency', '--dependency-verification', '-P', '--project-prop', '-D', '--system-prop', '-p', '--project-dir', '-g', '--gradle-user-home', '-I', '--init-script',
                    '-c', '--settings-file', '-b', '--build-file', '-x', '--exclude-task',
                    '--include-build', '--project-cache-dir', '--console', '--warning-mode',
                    '--max-workers', '--priority', '--configuration-cache-problems'}
@@ -190,7 +190,7 @@ def _dispatch(mode, arguments, *, output=None, command=None, input_files=None, e
             names['runtime/prebuilt'] = ROOT / 'runtime/prebuilt'
         if any(a.rsplit(':', 1)[-1] == 'apiDump' for a in args):
             names['nuxie-android/api/nuxie-android.api'] = ROOT / 'nuxie-android/api/nuxie-android.api'
-        if any('hostrender' in a.lower() for a in gradle_tasks(arguments)):
+        if any(a.lower() in ('hostrenderharness', 'hostrendersmoke', 'compilehostrenderbridge') for a in gradle_tasks(arguments)):
             spec = importlib.util.spec_from_file_location('sdk_host_pool', ROOT / 'scripts/bazel/sdk.py')
             host = importlib.util.module_from_spec(spec); spec.loader.exec_module(host)
             files, variables = _stack.enter_context(host.host_inputs())
