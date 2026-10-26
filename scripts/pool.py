@@ -59,7 +59,8 @@ def selection(mode, arguments, command=None):
 
 
 def dispatch(mode, arguments, *, output=None, command=None, input_files=None, environment=None):
-    if os.environ.get('_NUXIE_POOL_NESTED') == '1': return None
+    if (os.environ.get('_NUXIE_POOL_NESTED') == '1' or os.environ.get('NUXIE_HOMELAB') == '0'
+            or os.environ.get('NUXIE_EXECUTION') == 'local' or '--help' in arguments or '-h' in arguments): return None
     helper = Path.home() / '.local/share/nuxie-homelab/sdk-task.py'
     configured = (Path.home() / '.config/nuxie/homelab-cluster.json').is_file()
     if not helper.is_file():
