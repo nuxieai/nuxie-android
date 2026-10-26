@@ -35,6 +35,13 @@ class PoolRoutingTests(unittest.TestCase):
         if pool.SDK == 'react-native':
             self.assertEqual(pool.selection('prepare-native', []), ('portable', ['android', 'node']))
 
+    def test_parsed_command_controls_platform_when_options_come_first(self):
+        if pool.SDK == 'android': return
+        command = 'build-native' if pool.SDK in ('react-native', 'flutter') else 'test-ios'
+        platform, tools = pool.selection('sdk', ['--configuration', 'Debug', command, '--platform', 'ios'], command)
+        self.assertEqual(platform, 'macos')
+        self.assertIn('xcode', tools)
+
     def test_nested_command_does_not_submit_another_request(self):
         with patch.dict(os.environ, {'_NUXIE_POOL_NESTED':'1'}):
             self.assertIsNone(pool.dispatch('sdk', ['test']))

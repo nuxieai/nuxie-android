@@ -11,12 +11,12 @@ SDK = 'android'
 OUTPUTS = ['build/bazel-sdk', 'nuxie-android/build/outputs', 'nuxie-android/build/reports', 'nuxie-android/build/test-results', 'example-app/build/outputs']
 
 
-def selection(mode, arguments):
+def selection(mode, arguments, command=None):
     selected = 'android' if mode == 'prepare-native' and SDK in ('react-native', 'unity') else 'all'
     for i, arg in enumerate(arguments):
         if arg == '--platform' and i + 1 < len(arguments): selected = arguments[i + 1]
         elif arg.startswith('--platform='): selected = arg.split('=', 1)[1]
-    command = arguments[0] if arguments else ''
+    command = command or (arguments[0] if arguments else '')
     requirements = set()
     apple = False
     if SDK == 'android':
@@ -47,11 +47,14 @@ def selection(mode, arguments):
     if (mode == 'gradle' or (mode == 'check' and 'android' in requirements)
             or (SDK == 'android' and mode == 'sdk' and command in ('check', 'lint', 'api-check', 'providers'))):
         requirements.add('java17')
+    if SDK == 'android' and command in ('host-render', 'host-render-smoke'):
+        requirements.add('native-host@' + sys.platform + '-' + os.uname().machine)
+        return ('macos' if sys.platform == 'darwin' else 'linux'), sorted(requirements)
     if apple: requirements.add('xcode')
     return ('macos' if apple else 'portable'), sorted(requirements)
 
 
-def dispatch(mode, arguments, *, output=None):
+def dispatch(mode, arguments, *, output=None, command=None, input_files=None, environment=None):
     if os.environ.get('_NUXIE_POOL_NESTED') == '1': return None
     helper = Path.home() / '.local/share/nuxie-homelab/sdk-task.py'
     configured = (Path.home() / '.config/nuxie/homelab-cluster.json').is_file()
@@ -61,7 +64,7 @@ def dispatch(mode, arguments, *, output=None):
         return None
     spec = importlib.util.spec_from_file_location('pool_sdk_task', helper)
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-    platform, requirements = selection(mode, arguments)
+    platform, requirements = selection(mode, arguments, command)
     names = {name: ROOT / name for name in OUTPUTS}
     if output is not None:
         names['build/pool-prepared'] = Path(output).resolve()
@@ -71,7 +74,7 @@ def dispatch(mode, arguments, *, output=None):
     if output is not None and not any(a == '--output' or a.startswith('--output=') for a in args):
         args += ['--output', str(output)]
     return module.route(ROOT, args, frontend=frontend, platform=platform,
-                        requirements=requirements, outputs=names)
+                        requirements=requirements, outputs=names, input_files=input_files, environment=environment)
 
 
 def main():
