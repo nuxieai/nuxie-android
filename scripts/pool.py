@@ -90,6 +90,8 @@ def dispatch(mode, arguments, *, output=None, command=None, input_files=None, en
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     platform, requirements = selection(mode, arguments, command, selected_platform, selected_device)
     names = {name: ROOT / name for name in OUTPUTS}
+    only_render = (mode == 'script-test-minified-font-fallback' or (mode == 'sdk' and command in ('host-render', 'host-render-smoke')))
+    if only_render: names = {}
     if output is not None:
         names['build/pool-prepared'] = Path(output).resolve()
         names.pop('build/bazel-sdk', None)
@@ -102,7 +104,7 @@ def dispatch(mode, arguments, *, output=None, command=None, input_files=None, en
     if output is not None and not any(a == '--output' or a.startswith('--output=') for a in args):
         args += ['--output', str(output)]
     input_files = dict(input_files or {}); environment = dict(environment or {})
-    for project in ROOT.iterdir():
+    for project in ([] if only_render else ROOT.iterdir()):
         if project.is_dir() and (project / 'build.gradle.kts').is_file():
             for directory in ('outputs', 'reports', 'test-results'):
                 names[project.name + '/build/' + directory] = project / 'build' / directory
@@ -121,6 +123,8 @@ def dispatch(mode, arguments, *, output=None, command=None, input_files=None, en
             # Relocate the project itself and its local Maven repository.
             if not selected.is_relative_to(ROOT): raise ValueError('Generated pool Gradle projects must be inside the SDK checkout')
             relative = selected.relative_to(ROOT).as_posix()
+            if argument in ('-p', '--project-dir'): args[index + 1] = str(selected)
+            else: args[index] = '--project-dir=' + str(selected)
             if relative == '.': continue
             for file in selected.rglob('*'):
                 if file.is_file() and not any(p in ('build', '.gradle') for p in file.relative_to(selected).parts):
