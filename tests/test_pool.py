@@ -21,6 +21,12 @@ class PoolRoutingTests(unittest.TestCase):
             self.assertEqual(pool.main(),0)
             self.assertEqual(run.call_args.args[0],[str(pool.ROOT/'gradlew'),'--max-workers=1','clean'])
 
+    def test_worker_limit_is_single_and_preserves_a_smaller_request(self):
+        with patch.dict(os.environ, {'NUXIE_BAZEL_CPU':'4'}):
+            for arguments in (['lint','--max-workers=1'], ['--max-workers','1','lint']):
+                self.assertEqual(pool.gradle_worker_arguments(arguments),['lint','--no-daemon','--max-workers=1'])
+            self.assertEqual(pool.gradle_worker_arguments(['lint','--max-workers=8']),['lint','--no-daemon','--max-workers=4'])
+
     def test_portable_and_platform_requirements(self):
         platform, tools = pool.selection('sdk', ['test'])
         self.assertEqual(platform, 'portable')
