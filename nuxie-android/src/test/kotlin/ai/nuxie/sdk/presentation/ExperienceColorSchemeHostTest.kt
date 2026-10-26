@@ -1,5 +1,7 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.TestRuntimeLane
+
 import ai.nuxie.sdk.runtime.*
 import android.content.res.Configuration
 import kotlinx.coroutines.runBlocking
@@ -135,7 +137,7 @@ class ExperienceColorSchemeHostTest {
     ) {
         RuntimeEnvironment.setQualifiers(if (scheme == ExperienceColorScheme.DARK) "+night" else "+notnight")
         val native = RecordingNative(declaresAppearance, declaresTheme, hasAuxiliary)
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val failures = mutableListOf<ExperiencePresentationException>()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native),
             initialPresentationSize = ExperienceArtboardSize(393f, 852f), usesSystemFrameCallbacks = false,

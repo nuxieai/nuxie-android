@@ -1,5 +1,7 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.TestRuntimeLane
+
 import ai.nuxie.sdk.fixtures.FixtureRunner
 import ai.nuxie.sdk.runtime.NativeViewModelCatalog
 import ai.nuxie.sdk.runtime.NativeViewModelSchema
@@ -47,7 +49,7 @@ class ExperienceSurfaceHostPointerTest {
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Test fun `screen release owns file and renderer when run has no Experience model`() = kotlinx.coroutines.runBlocking {
         val native = RecordingNative()
-        val run = ExperienceRunValues()
+        val run = ExperienceRunValues(lane = TestRuntimeLane())
         try {
             repeat(2) { index ->
                 val host = ExperienceSurfaceHost(context = RuntimeEnvironment.getApplication(), lane = run.lane,
@@ -143,7 +145,7 @@ class ExperienceSurfaceHostPointerTest {
                 return base.captureSemantics(player)
             }
         }
-        val run = ExperienceRunValues()
+        val run = ExperienceRunValues(lane = TestRuntimeLane())
         val failures = mutableListOf<ExperiencePresentationException>()
         fun host() = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), run.lane,
             runtime = NuxieRuntime(native), runValues = run, usesSystemFrameCallbacks = false,
@@ -199,7 +201,7 @@ class ExperienceSurfaceHostPointerTest {
 
     @Test fun `custom watchdog waits for pending frame phase writes and zero delta step`() = kotlinx.coroutines.test.runTest {
         val native = RecordingNative("screen/phase")
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
         val texture = SurfaceTexture(0)
         val outgoing = ExperienceScreenExitHandshake()
@@ -264,7 +266,7 @@ class ExperienceSurfaceHostPointerTest {
             val native = RecordingNative("screen/phase")
             var renders = 0
             native.onRender = { renders++ }
-            val lane = NuxieRuntimeLane()
+            val lane = TestRuntimeLane()
             val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
             val texture = SurfaceTexture(0)
             try {
@@ -315,7 +317,7 @@ class ExperienceSurfaceHostPointerTest {
 
     @Test fun `converted text settles on the native lane after pending render and before capture`() {
         val native = RecordingNative().apply { nativeInput = true }
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val captured = mutableListOf<Double>()
         val effects = mutableListOf<ULong>()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane,
@@ -379,7 +381,7 @@ class ExperienceSurfaceHostPointerTest {
     @Test
     fun `pending surface submission polls without stepping or publishing effects`() {
         val native = RecordingNative()
-        val values = ExperienceRunValues()
+        val values = ExperienceRunValues(lane = TestRuntimeLane())
         val lane = values.lane
         val published = mutableListOf<ULong>()
         var composed = 0
@@ -458,7 +460,7 @@ class ExperienceSurfaceHostPointerTest {
 
     @Test fun `CPU surface stays connected across host resize`() {
         val native = RecordingNative().apply { attachStatus = -1 }
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
         val texture = SurfaceTexture(0)
         try {
@@ -486,7 +488,7 @@ class ExperienceSurfaceHostPointerTest {
     @Test
     fun `resizing another shared host preserves the pending window`() {
         val native = RecordingNative()
-        val values = ExperienceRunValues()
+        val values = ExperienceRunValues(lane = TestRuntimeLane())
         val lane = values.lane
         val hosts = List(2) { ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane,
             runtime = NuxieRuntime(native), runValues = values) }
@@ -520,7 +522,7 @@ class ExperienceSurfaceHostPointerTest {
     @Test
     fun `hiding a pending surface releases its native submission without destroying the texture`() {
         val native = RecordingNative()
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane,
             runtime = NuxieRuntime(native))
         val texture = SurfaceTexture(0)
@@ -552,7 +554,7 @@ class ExperienceSurfaceHostPointerTest {
     fun `transition events wait for a delivered frame after surface unavailability`() {
         val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
         val native = RecordingNative()
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val events = mutableListOf<String>()
         val host = ExperienceSurfaceHost(activity.get(), lane, runtime = NuxieRuntime(native),
             listener = object : ExperienceSurfaceHost.Listener {
@@ -617,7 +619,7 @@ class ExperienceSurfaceHostPointerTest {
 
     private fun assertFirstFrameHandoff(earlyComposition: Boolean) {
         val native = RecordingNative()
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         lateinit var host: ExperienceSurfaceHost
         var firstFrames = 0
         host = ExperienceSurfaceHost(
@@ -667,7 +669,7 @@ class ExperienceSurfaceHostPointerTest {
             .resolve("journeys/planes/runtime-visibility-android.json").readText()).jsonObject
             .getValue("frameBackpressure").jsonObject
         val native = RecordingNative().apply { nativeInput = true }
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native), usesSystemFrameCallbacks = false, listener = nativeEditorListener())
         val texture = SurfaceTexture(0)
         val rendering = CountDownLatch(1)
@@ -713,7 +715,7 @@ class ExperienceSurfaceHostPointerTest {
     @Test
     fun `failed surface resize reports failure and stops native frame submission`() {
         val native = RecordingNative()
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val failures = mutableListOf<ExperiencePresentationException>()
         val host = ExperienceSurfaceHost(
             RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native),
@@ -769,7 +771,7 @@ class ExperienceSurfaceHostPointerTest {
 
     private fun assertUndeliveredFrameRecovers(disposition: Int) {
         val native = RecordingNative()
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         var firstFrames = 0
         val failures = mutableListOf<ExperiencePresentationException>()
         val host = ExperienceSurfaceHost(
@@ -812,7 +814,7 @@ class ExperienceSurfaceHostPointerTest {
     @Test
     fun `environment state queues before loading and updates the screen env`() {
         val native = RecordingNative(globalEnvironment = true)
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
         try {
             host.updateRuntimeValues(linkedMapOf(
@@ -842,7 +844,7 @@ class ExperienceSurfaceHostPointerTest {
     @Test
     fun `environment updates wait for pending presentation and apply before the next step`() {
         val native = RecordingNative(globalEnvironment = true)
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
         val texture = SurfaceTexture(0)
         try {
@@ -878,7 +880,7 @@ class ExperienceSurfaceHostPointerTest {
     @Test
     fun `env font scale is set before player creation and configuration updates wait for pending pixels`() {
         val native = RecordingNative("fontScale", globalEnvironment = true)
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
         val texture = SurfaceTexture(0)
         val lifecycle = ExperienceScreenLifecycle()
@@ -920,7 +922,7 @@ class ExperienceSurfaceHostPointerTest {
     fun `an absent env font scale does not block sibling environment writes or loading`() {
         for (globalEnvironment in listOf(false, true)) {
             val native = RecordingNative(globalEnvironment = globalEnvironment)
-            val lane = NuxieRuntimeLane()
+            val lane = TestRuntimeLane()
             val failures = mutableListOf<ExperiencePresentationException>()
             val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native),
                 listener = object : ExperienceSurfaceHost.Listener {
@@ -953,7 +955,7 @@ class ExperienceSurfaceHostPointerTest {
     @Test
     fun `resume cancels a delivered press before the next gesture reaches the retained player`() {
         val native = RecordingNative()
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane,
             artboardSize = ExperienceArtboardSize(400f, 200f), runtime = NuxieRuntime(native))
         host.layout(0, 0, 1_000, 1_000)
@@ -998,7 +1000,7 @@ class ExperienceSurfaceHostPointerTest {
         val fixture = Json.parseToJsonElement(FixtureRunner.fixturesRoot()
             .resolve("journeys/planes/runtime-visibility-android.json").readText()).jsonObject
         val native = RecordingNative()
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane,
             artboardSize = ExperienceArtboardSize(400f, 200f), runtime = NuxieRuntime(native))
         var texture = SurfaceTexture(0)
@@ -1049,7 +1051,7 @@ class ExperienceSurfaceHostPointerTest {
     @Test
     fun `queued frame and pointer cannot cross a hidden interval even after rapid resume`() {
         val native = RecordingNative()
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane,
             artboardSize = ExperienceArtboardSize(400f, 200f), runtime = NuxieRuntime(native))
         host.layout(0, 0, 1_000, 1_000)
@@ -1101,7 +1103,7 @@ class ExperienceSurfaceHostPointerTest {
     @Test
     fun `queued older frame cannot consume a tap ahead of its focus-loss text commit`() {
         val native = RecordingNative().apply { nativeInput = true }
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane,
             artboardSize = ExperienceArtboardSize(400f, 200f), runtime = NuxieRuntime(native), usesSystemFrameCallbacks = false, listener = nativeEditorListener())
         host.layout(0, 0, 1_000, 1_000)
@@ -1153,7 +1155,7 @@ class ExperienceSurfaceHostPointerTest {
     @Test
     fun `surface tap reaches the configured player and release closes the input seam`() {
         val native = RecordingNative()
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val host = ExperienceSurfaceHost(
             context = RuntimeEnvironment.getApplication(),
             lane = lane,
@@ -1216,7 +1218,7 @@ class ExperienceSurfaceHostPointerTest {
     @Test fun `semantic capture failure reaches recovery on the main thread`() {
         val controller = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
         val native = RecordingNative().apply { semanticCaptureStatus = 9; presentation = 1 }
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val failures = mutableListOf<ExperiencePresentationException>()
         var callbackOnMain: Boolean? = null
         lateinit var host: ExperienceSurfaceHost
@@ -1260,7 +1262,7 @@ class ExperienceSurfaceHostPointerTest {
     @Test fun `semantics wait for delivery and composition then retire before hidden work can act`() {
         val controller = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
         val native = RecordingNative()
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val host = ExperienceSurfaceHost(controller.get(), lane,
             artboardSize = ExperienceArtboardSize(100f, 100f), runtime = NuxieRuntime(native),
             listener = object : ExperienceSurfaceHost.Listener {
@@ -1368,7 +1370,7 @@ class ExperienceSurfaceHostPointerTest {
         for (boundary in listOf("current", "hide", "resize", "input", "release", "pending-hide", "pending-current", "newer")) {
             val controller = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
             val native = RecordingNative().apply { geometryStatus = 3 }
-            val lane = NuxieRuntimeLane()
+            val lane = TestRuntimeLane()
             var delivered = 0
             val host = ExperienceSurfaceHost(controller.get(), lane, runtime = NuxieRuntime(native),
                 listener = object : ExperienceSurfaceHost.Listener {
@@ -1591,7 +1593,7 @@ class ExperienceSurfaceHostPointerTest {
         val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
         val editor = android.widget.EditText(activity.get())
         val native = RecordingNative().apply { semanticNodeCount = 3 }
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val host = ExperienceSurfaceHost(activity.get(), lane, runtime = NuxieRuntime(native),
             artboardSize = ExperienceArtboardSize(100f, 100f), usesSystemFrameCallbacks = false,
             listener = object : ExperienceSurfaceHost.Listener {
@@ -1792,7 +1794,7 @@ class ExperienceSurfaceHostPointerTest {
     @Test fun `Rive focus selects one owner for keys shared with accessibility`() {
         val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup().visible()
         val native = RecordingNative().apply { semanticNodeCount = 2 }
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val host = ExperienceSurfaceHost(activity.get(), lane, runtime = NuxieRuntime(native),
             artboardSize = ExperienceArtboardSize(100f, 100f), usesSystemFrameCallbacks = false)
         val container = ExperienceInputContainer(activity.get(), host::dispatchExperienceKeyEvent, host::semanticKeyboardEntry)
@@ -1873,7 +1875,7 @@ class ExperienceSurfaceHostPointerTest {
         block: (ExperienceSurfaceHost, RecordingNative, NuxieRuntimeLane, SurfaceTexture) -> Unit,
     ) {
         native.nativeInput = textInputs.isNotEmpty()
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         lateinit var host: ExperienceSurfaceHost
         host = ExperienceSurfaceHost(context, lane, runtime = NuxieRuntime(native),
             artboardSize = ExperienceArtboardSize(100f, 100f), usesSystemFrameCallbacks = false,

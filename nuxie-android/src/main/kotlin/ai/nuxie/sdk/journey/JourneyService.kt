@@ -219,6 +219,8 @@ internal class JourneyService(
     private val artifactManager: JourneyArtifactManager? = null,
     private val prepareNativeValues: suspend (ai.nuxie.sdk.presentation.ExperienceRunValues,
         AuthenticatedJourneyRelease, ai.nuxie.sdk.experiences.JourneyReleaseDelivery) -> Unit = { _, _, _ -> },
+    private val createNativeValues: (ai.nuxie.sdk.presentation.ExperienceRunSnapshot?) ->
+        ai.nuxie.sdk.presentation.ExperienceRunValues = { ai.nuxie.sdk.presentation.ExperienceRunValues(it) },
     fixedStorageScope: JourneyStorageScope? = null,
 ) : JourneyProfileConsumer {
     private class WorkerContext(
@@ -401,7 +403,7 @@ internal class JourneyService(
     private val nativeValuesByRun = mutableMapOf<String, NativeRunValues>()
 
     private fun nativeValues(run: JourneyRun, owner: String, descriptor: JsonObject): ai.nuxie.sdk.presentation.ExperienceRunValues =
-        nativeValuesByRun.getOrPut(run.id) { NativeRunValues(owner, ai.nuxie.sdk.presentation.ExperienceRunValues(run.nativeSnapshot), descriptor) }.also {
+        nativeValuesByRun.getOrPut(run.id) { NativeRunValues(owner, createNativeValues(run.nativeSnapshot), descriptor) }.also {
             check(it.owner == owner)
         }.values
 
@@ -2667,8 +2669,11 @@ internal class JourneyService(
                     finishExecution(run, "abandoned")
                     return
                 }
-                val values = if (readsNativeValues(step) || step.text("kind") == "complete")
-                    preparedNativeValues(run, release, target) else nativeValuesByRun[run.id]?.values
+                // Screenless releases have no native graph or executor to prepare.
+                val needsNativeValues = release.descriptor["render"] is JsonObject &&
+                    (readsNativeValues(step) || step.text("kind") == "complete")
+                val values = if (needsNativeValues) preparedNativeValues(run, release, target)
+                    else nativeValuesByRun[run.id]?.values
                 run = run.copy(context = JsonObject(run.context + mapOf(
                     "responses" to (values?.journeyValues() ?: JsonObject(emptyMap())),
                     "formAnswers" to (values?.formAnswers(release.descriptor) ?: JsonObject(emptyMap())))))

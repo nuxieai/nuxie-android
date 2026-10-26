@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.journey
 
+import ai.nuxie.sdk.runtime.testRunValues
 import ai.nuxie.sdk.NuxieEnvironment
 import ai.nuxie.sdk.fixtures.FixtureRunner
 import ai.nuxie.sdk.network.HttpTransport
@@ -286,7 +287,9 @@ class JourneyResponseSaveDeliveryTest {
             val catalog = ai.nuxie.sdk.experiences.JourneyProfileCatalog(emptyMap(),
                 ai.nuxie.sdk.experiences.JourneyReleaseHighWaterStore(context)) { null }
             val service = JourneyService(ai.nuxie.sdk.identity.IdentityService(context), store, catalog, directory, scope,
-                capture = { _, _, _, _ -> true }, responseSaveDelivery = delivery)
+                capture = { _, _, _, _ -> true }, responseSaveDelivery = delivery,
+                createNativeValues = ::testRunValues,
+            )
             delivery.activate(JourneyStorageScope.testFixture)
             delivery.enqueue(journal, run, "feedback", json("{}"))
             withTimeout(5_000) { started.await() }

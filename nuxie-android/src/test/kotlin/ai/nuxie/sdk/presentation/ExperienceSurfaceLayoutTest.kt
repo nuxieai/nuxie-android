@@ -1,5 +1,7 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.TestRuntimeLane
+
 import ai.nuxie.sdk.runtime.*
 import android.graphics.SurfaceTexture
 import android.os.Looper
@@ -227,7 +229,7 @@ class ExperienceSurfaceLayoutTest {
         val context = RuntimeEnvironment.getApplication()
         val previousDensity = context.resources.displayMetrics.density
         context.resources.displayMetrics.density = density
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val native = RecordingNative(video, fitContent)
         val bounds = mutableListOf<ExperienceArtboardSize>()
         val failures = mutableListOf<ExperiencePresentationException>()

@@ -10,7 +10,7 @@ class NuxieRuntimeViewModelsTest {
     @Test
     fun `catalog bind step write and free are confined to the runtime lane`() = runBlocking {
         val native = SessionNative()
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val runtime = NuxieRuntimeViewModels(
             lane = lane,
             fileHandle = 10,
@@ -45,7 +45,7 @@ class NuxieRuntimeViewModelsTest {
     @Test
     fun `native status remains primary when failed-bind cleanup also fails`() = runBlocking {
         val native = SessionNative()
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val runtime = NuxieRuntimeViewModels(lane, 10, 20, 30, native)
 
         try {

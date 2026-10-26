@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.journey
 
+import ai.nuxie.sdk.runtime.testRunValues
 import ai.nuxie.sdk.presentation.JourneyEmissionBatchResult
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.runCurrent
@@ -136,9 +137,12 @@ class JourneyServiceTest {
         val firstScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         try {
             val presenter = RecordingJourneyPresenter()
-            val service = JourneyService(identity = identity("customer"), events = store, catalog = catalog,
+            val service = JourneyService(
+                identity = identity("customer"), events = store, catalog = catalog,
                 journalDirectory = directory, scope = firstScope, capture = { _, _, _, _ -> true },
-                presenter = presenter, nowMillis = { 100_000L })
+                presenter = presenter, nowMillis = { 100_000L },
+                createNativeValues = ::testRunValues,
+            )
             service.initialize()
             service.onAppWillEnterForeground()
             service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
@@ -152,13 +156,16 @@ class JourneyServiceTest {
         }
         val presenter = RecordingJourneyPresenter()
         val completions = CopyOnWriteArrayList<Map<String, Any?>>()
-        val recovered = JourneyService(identity = identity("customer"), events = store, catalog = catalog,
+        val recovered = JourneyService(
+            identity = identity("customer"), events = store, catalog = catalog,
             journalDirectory = directory, scope = scope,
             capture = { name, properties, _, _ ->
                 if (name == JourneyEventNames.LEG_COMPLETED) completions += properties
                 true
             }, presenter = presenter, fixedStorageScope = JourneyStorageScope(renderedAuthority),
-            nowMillis = { 200_000L })
+            nowMillis = { 200_000L },
+            createNativeValues = ::testRunValues,
+        )
         recovered.initialize()
         assertEquals(1, completions.size)
         assertEquals("abandoned", completions.single()["outcome"])
@@ -206,18 +213,24 @@ class JourneyServiceTest {
         }
         val firstScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         try {
-            JourneyService(identity = identity("customer"), events = interruptedStore, catalog = catalog(),
+            JourneyService(
+                identity = identity("customer"), events = interruptedStore, catalog = catalog(),
                 journalDirectory = directory, scope = firstScope, capture = { _, _, _, _ -> true },
-                fixedStorageScope = storageScope, nowMillis = { 100_500L }).initialize()
+                fixedStorageScope = storageScope, nowMillis = { 100_500L },
+                createNativeValues = ::testRunValues,
+            ).initialize()
         } finally { firstScope.cancel() }
         assertEquals(1, acknowledgements)
         assertEquals(event.id, journal.conversionWatches().getValue(first.journeyId).conversion?.eventId)
         assertEquals(listOf(event.id), store.pendingConversionOccurrences("customer").map { it.event.id })
 
         val second = requireNotNull(journal.admit(arm, JourneyFrequency.EveryMatch, "step", 100_250, policy = policy))
-        JourneyService(identity = identity("customer"), events = store, catalog = catalog(),
+        JourneyService(
+            identity = identity("customer"), events = store, catalog = catalog(),
             journalDirectory = directory, scope = scope, capture = { _, _, _, _ -> true },
-            fixedStorageScope = storageScope, nowMillis = { 100_500L }).initialize()
+            fixedStorageScope = storageScope, nowMillis = { 100_500L },
+            createNativeValues = ::testRunValues,
+        ).initialize()
         val reopened = JourneyRunJournal(directory, "customer", storageScope)
         assertEquals(event.id, reopened.conversionWatches().getValue(first.journeyId).conversion?.eventId)
         assertNull(reopened.conversionWatches().getValue(second.journeyId).conversion)
@@ -248,14 +261,17 @@ class JourneyServiceTest {
         catalog.commit("customer", catalog.prepare(profile(condition, publication), authority))
         val snapshot = requireNotNull(catalog.snapshot("customer"))
         val starts = CopyOnWriteArrayList<String>()
-        val service = JourneyService(identity = identity("customer"), events = store, catalog = catalog,
+        val service = JourneyService(
+            identity = identity("customer"), events = store, catalog = catalog,
             journalDirectory = directory, scope = scope, nowMillis = { clock.get() },
             capture = { name, properties, _, _ ->
                 if (name == JourneyEventNames.LEG_STARTED) starts += requireNotNull(properties["journey_id"] as? String)
                 true
             }, featureAccess = {
                 ai.nuxie.sdk.features.FeatureAccess(owned.get(), true, null, ai.nuxie.sdk.features.FeatureType.BOOLEAN)
-            })
+            },
+            createNativeValues = ::testRunValues,
+        )
         service.initialize()
         service.onAppWillEnterForeground()
         service.profileDidCommit(snapshot, authority, "customer", 1)
@@ -287,8 +303,11 @@ class JourneyServiceTest {
         store = SQLiteEventStore(context, nowMillis = { clock.get() })
         val keys = java.security.KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
         val catalog = policyCatalog(keys)
-        val service = JourneyService(identity = identity("customer"), events = store, catalog = catalog,
-            journalDirectory = directory, scope = scope, capture = { _, _, _, _ -> true }, nowMillis = { clock.get() })
+        val service = JourneyService(
+            identity = identity("customer"), events = store, catalog = catalog,
+            journalDirectory = directory, scope = scope, capture = { _, _, _, _ -> true }, nowMillis = { clock.get() },
+            createNativeValues = ::testRunValues,
+        )
         service.initialize()
         service.onAppWillEnterForeground()
         val publications = listOf(
@@ -378,9 +397,12 @@ class JourneyServiceTest {
         val goalEvent = StoredEvent("goal", "done", timestampMillis = 100_500, distinctId = "customer")
         store.insertPendingAndStageRoute(entryEvent)
         store.insertPendingAndStageRoute(goalEvent)
-        JourneyService(identity = identity("customer"), events = store, catalog = catalog(),
+        JourneyService(
+            identity = identity("customer"), events = store, catalog = catalog(),
             journalDirectory = directory, scope = scope, capture = { _, _, _, _ -> true },
-            fixedStorageScope = JourneyStorageScope(authority), nowMillis = { 100_500L }).initialize()
+            fixedStorageScope = JourneyStorageScope(authority), nowMillis = { 100_500L },
+            createNativeValues = ::testRunValues,
+        ).initialize()
 
         // Entry routing still owns admission. Measurement must leave the later goal
         // available until that route has had the opportunity to create its watch.
@@ -429,6 +451,7 @@ class JourneyServiceTest {
                 true
             },
             nowMillis = { now },
+            createNativeValues = ::testRunValues,
         )
 
         service.initialize()
@@ -466,9 +489,12 @@ class JourneyServiceTest {
         val authority = authority(entry)
         catalog.commit("customer", catalog.prepare(profile(releaseEntry = entry), authority))
         val presenter = RecordingJourneyPresenter()
-        val service = JourneyService(identity = identity("customer"), events = store, catalog = catalog,
+        val service = JourneyService(
+            identity = identity("customer"), events = store, catalog = catalog,
             journalDirectory = directory, scope = scope, capture = { _, _, _, _ -> true },
-            presenter = presenter, nowMillis = { 100_000L })
+            presenter = presenter, nowMillis = { 100_000L },
+            createNativeValues = ::testRunValues,
+        )
         service.initialize()
         service.onAppWillEnterForeground()
         service.profileDidCommit(requireNotNull(catalog.snapshot("customer")), authority, "customer", 1)
@@ -497,6 +523,7 @@ class JourneyServiceTest {
             },
             presenter = presenter,
             nowMillis = { 100_000L },
+            createNativeValues = ::testRunValues,
         )
         service.initialize()
         service.onAppWillEnterForeground()
@@ -563,13 +590,16 @@ class JourneyServiceTest {
         val snapshot = baseline.copy(releasesByDigest = mapOf(release.descriptorSha256 to release))
         val captures = CopyOnWriteArrayList<String>()
         val presenter = RecordingJourneyPresenter()
-        val service = JourneyService(identity = identity("customer"), events = store, catalog = catalog,
+        val service = JourneyService(
+            identity = identity("customer"), events = store, catalog = catalog,
             journalDirectory = directory, scope = scope, capture = { name, _, _, _ -> captures += name; true },
             captureScreenEvent = { name, properties, eventId, distinctId, occurredAt, admission, origin ->
                 val event = StoredEvent(eventId, name, JsonValueConverter.fromMap(properties), occurredAt, distinctId, journeyOrigin = origin)
                 val settled = admission?.commitIfCurrent { true } != null
                 StableEventCaptureResult(settled, event.takeIf { settled })
-            }, presenter = presenter, nowMillis = { clock.get() })
+            }, presenter = presenter, nowMillis = { clock.get() },
+            createNativeValues = ::testRunValues,
+        )
         service.initialize()
         service.onAppWillEnterForeground()
         service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
@@ -613,8 +643,11 @@ class JourneyServiceTest {
         catalog.commit("customer", catalog.prepare(profile(releaseEntry = renderedEntry), authority))
         val presenter = RecordingJourneyPresenter()
         val captured = CopyOnWriteArrayList<String>()
-        val service = JourneyService(identity("customer"), store, catalog, directory, scope,
-            capture = { name, _, _, _ -> captured += name; true }, presenter = presenter)
+        val service = JourneyService(
+            identity("customer"), store, catalog, directory, scope,
+            capture = { name, _, _, _ -> captured += name; true }, presenter = presenter,
+            createNativeValues = ::testRunValues,
+        )
         service.initialize()
         service.onAppWillEnterForeground()
         service.profileDidCommit(checkNotNull(catalog.snapshot("customer")), authority, "customer", 1)
@@ -675,14 +708,17 @@ class JourneyServiceTest {
                 return JourneyPresentationActionResult.Handled
             }
         }
-        val service = JourneyService(identity = identity("customer"), events = store, catalog = catalog,
+        val service = JourneyService(
+            identity = identity("customer"), events = store, catalog = catalog,
             journalDirectory = directory, scope = scope, capture = { name, _, _, _ -> captures += name; true },
             captureScreenEvent = { name, properties, eventId, distinctId, occurredAt, admission, origin ->
                 val event = StoredEvent(eventId, name, JsonValueConverter.fromMap(properties), occurredAt, distinctId, journeyOrigin = origin)
                 val settled = admission?.commitIfCurrent { true } != null
                 captures += name
                 StableEventCaptureResult(settled, event.takeIf { settled })
-            }, presenter = presenter)
+            }, presenter = presenter,
+            createNativeValues = ::testRunValues,
+        )
         service.initialize()
         service.onAppWillEnterForeground()
         service.profileDidCommit(snapshot, renderedAuthority, "customer", 1)
@@ -753,6 +789,7 @@ class JourneyServiceTest {
             },
             presenter = presenter,
             nowMillis = { 100_000L },
+            createNativeValues = ::testRunValues,
         )
         service.initialize()
         service.onAppWillEnterForeground()
@@ -932,6 +969,7 @@ class JourneyServiceTest {
                 captureScreenEvent = eventLog::captureScreenEvent,
                 nowMillis = { 102_000L },
                 fixedStorageScope = JourneyStorageScope(renderedAuthority),
+                createNativeValues = ::testRunValues,
             )
 
             recoveringService().initialize()
@@ -980,6 +1018,7 @@ class JourneyServiceTest {
             capture = { name, _, _, _ -> captures += name; true },
             presenter = presenter,
             nowMillis = { 100_000L },
+            createNativeValues = ::testRunValues,
         )
         service.initialize()
         service.onAppWillEnterForeground()
@@ -1035,6 +1074,7 @@ class JourneyServiceTest {
             },
             presenter = presenter,
             nowMillis = { 100_000L },
+            createNativeValues = ::testRunValues,
         )
         service.initialize()
 
@@ -1114,6 +1154,7 @@ class JourneyServiceTest {
             },
             presenter = presenter,
             nowMillis = { 100_000L },
+            createNativeValues = ::testRunValues,
         )
         service.initialize()
         service.onAppWillEnterForeground()
@@ -1144,6 +1185,7 @@ class JourneyServiceTest {
             capture = { _, _, _, _ -> true },
             presenter = presenter,
             nowMillis = { 100_000L },
+            createNativeValues = ::testRunValues,
         )
         service.initialize()
         service.onAppWillEnterForeground()
@@ -1173,6 +1215,7 @@ class JourneyServiceTest {
             capture = { _, _, _, _ -> true },
             presenter = presenter,
             nowMillis = { 100_000L },
+            createNativeValues = ::testRunValues,
         )
         service.initialize()
         service.onAppWillEnterForeground()
@@ -1219,6 +1262,7 @@ class JourneyServiceTest {
             },
             presenter = presenter,
             nowMillis = { 100_000L },
+            createNativeValues = ::testRunValues,
         )
         service.initialize()
         service.onAppWillEnterForeground()
@@ -1265,6 +1309,7 @@ class JourneyServiceTest {
             },
             presenter = presenter,
             nowMillis = { 100_000L },
+            createNativeValues = ::testRunValues,
         )
         service.initialize()
         service.onAppWillEnterForeground()
@@ -1356,9 +1401,12 @@ class JourneyServiceTest {
                 return JourneyPresentationResult.Shown
             }
         }
-        val journeys = JourneyService(identity = identity, events = store, catalog = catalog,
+        val journeys = JourneyService(
+            identity = identity, events = store, catalog = catalog,
             journalDirectory = directory, scope = scope, presenter = presenter, nowMillis = { 100_000L },
-            capture = { name, properties, _, _ -> captures += name to properties; true })
+            capture = { name, properties, _, _ -> captures += name to properties; true },
+            createNativeValues = ::testRunValues,
+        )
         try {
             journeys.initialize()
             journeys.onAppWillEnterForeground()
@@ -1418,6 +1466,7 @@ class JourneyServiceTest {
                 },
                 presenter = presenter,
                 nowMillis = { 100_000L },
+                createNativeValues = ::testRunValues,
             )
             service.initialize()
             service.onAppWillEnterForeground()
@@ -1490,6 +1539,7 @@ class JourneyServiceTest {
                 capture = { name, _, _, _ -> captures.add(name) },
                 presenter = presenter,
                 nowMillis = { 100_000L },
+                createNativeValues = ::testRunValues,
             )
             service.initialize()
             service.onAppWillEnterForeground()
@@ -1527,6 +1577,7 @@ class JourneyServiceTest {
                 },
                 presenter = presenter,
                 nowMillis = { 100_000L },
+                createNativeValues = ::testRunValues,
             )
             service.initialize()
             service.onAppWillEnterForeground()
@@ -1595,6 +1646,7 @@ class JourneyServiceTest {
                 presenter = presenter,
                 artifactManager = manager,
                 nowMillis = { 100_000L },
+                createNativeValues = ::testRunValues,
             )
             service.initialize()
             service.onAppWillEnterForeground()
@@ -1673,6 +1725,7 @@ class JourneyServiceTest {
                 catalog.authenticatePinnedRelease(pin, reference)
             },
             nowMillis = { 200_000L },
+            createNativeValues = ::testRunValues,
         )
 
         service.initialize()
@@ -1741,6 +1794,7 @@ class JourneyServiceTest {
                     catalog.authenticatePinnedRelease(pin, reference)
                 },
                 nowMillis = { 200_000L },
+                createNativeValues = ::testRunValues,
             )
 
             service.initialize()
@@ -1807,6 +1861,7 @@ class JourneyServiceTest {
                     }
                 },
                 nowMillis = { 200_000L },
+                createNativeValues = ::testRunValues,
             )
 
             service.initialize()
@@ -1884,7 +1939,8 @@ class JourneyServiceTest {
         val failFirst = java.util.concurrent.atomic.AtomicBoolean(true)
         val attempts = CopyOnWriteArrayList<Pair<Long, Boolean>>()
         var admissions = 0
-        val service = JourneyService(identity, store, catalog, directory, scope,
+        val service = JourneyService(
+            identity, store, catalog, directory, scope,
             capture = { name, properties, eventId, distinctId ->
                 if (eventId == retained.startedEventId && failFirst.compareAndSet(true, false)) {
                     recovering.complete(Unit)
@@ -1897,7 +1953,9 @@ class JourneyServiceTest {
                 assertTrue(retained.startedEventId in persisted)
                 assertTrue(retained.completedEventId in persisted)
                 admissions++
-            })
+            },
+            createNativeValues = ::testRunValues,
+        )
         eventLog.subscribeCommittedWithAdmission(sampleGeneration = service::eventAdmissionGeneration) { event, generation ->
             kotlinx.coroutines.coroutineScope {
                 val result = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { service.handleEvent(event, generation) }
@@ -1959,11 +2017,14 @@ class JourneyServiceTest {
         val deferred = CompletableDeferred<Unit>()
         val returnDeferred = CompletableDeferred<Unit>()
         val admissions = AtomicInteger()
-        val service = JourneyService(identity, store, catalog, directory, scope,
+        val service = JourneyService(
+            identity, store, catalog, directory, scope,
             capture = { name, properties, eventId, customer ->
                 eventLog.captureIdempotently(name, properties, eventId, customer)
             }, nowMillis = { 100_000L }, replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
-            beforeAdmission = { admissions.incrementAndGet() })
+            beforeAdmission = { admissions.incrementAndGet() },
+            createNativeValues = ::testRunValues,
+        )
         eventLog.subscribeCommittedWithAdmission(sampleGeneration = service::eventAdmissionGeneration) { event, generation ->
             val accepted = service.handleEvent(event, generation)
             if (event.name == "inventory_opened" && !accepted && !deferred.isCompleted) {
@@ -2024,7 +2085,8 @@ class JourneyServiceTest {
         val releaseRecovery = CompletableDeferred<Unit>()
         val order = CopyOnWriteArrayList<String>()
         var fail = failureMode != "healthy"
-        val service = JourneyService(identity, store, catalog, directory, scope,
+        val service = JourneyService(
+            identity, store, catalog, directory, scope,
             capture = { _, _, eventId, _ ->
                 if (eventId == retained.startedEventId) { recovering.complete(Unit); releaseRecovery.await() }
                 order += if (eventId == retained.startedEventId) "started" else if (eventId == retained.completedEventId) "completed" else eventId
@@ -2036,7 +2098,9 @@ class JourneyServiceTest {
                 order += "presentation"
                 StableEventCaptureResult(!fail, null)
             },
-            replayPendingLocalRoutes = { !(fail && failureMode == "replay") })
+            replayPendingLocalRoutes = { !(fail && failureMode == "replay") },
+            createNativeValues = ::testRunValues,
+        )
         fun expected(key: String) = contract.getValue(key).jsonArray.map { it.jsonPrimitive.content }
         service.profileDidCommit(snapshot, authority, "customer", 1)
         service.enqueueInitialization()
@@ -2088,6 +2152,7 @@ class JourneyServiceTest {
                 true
             },
             nowMillis = { 100_000L },
+            createNativeValues = ::testRunValues,
         )
 
         service.profileDidCommit(snapshot, authority, "customer", 1)
@@ -2216,6 +2281,7 @@ class JourneyServiceTest {
             },
             nowMillis = { 100_000L },
             replayPendingLocalRoutes = eventLog::replayPendingLocalRoutes,
+            createNativeValues = ::testRunValues,
         )
         eventLog.subscribeCommittedWithAdmission(
             sampleGeneration = service::eventAdmissionGeneration,
@@ -2253,6 +2319,7 @@ class JourneyServiceTest {
             scope = scope,
             capture = { name, _, _, _ -> captures.add(name) },
             nowMillis = { 100_000L },
+            createNativeValues = ::testRunValues,
         )
 
         service.initialize()
@@ -2290,6 +2357,7 @@ class JourneyServiceTest {
                     resumeAdmission.await()
                 },
                 nowMillis = { 100_000L },
+                createNativeValues = ::testRunValues,
             )
 
             service.initialize()
@@ -2332,6 +2400,7 @@ class JourneyServiceTest {
                 true
             },
             nowMillis = { 100_000L },
+            createNativeValues = ::testRunValues,
         )
         service.initialize()
         service.onAppWillEnterForeground()
@@ -2390,6 +2459,7 @@ class JourneyServiceTest {
             capture = { _, _, _, _ -> true },
             dispatcher = dispatcher,
             nowMillis = { 100_000L },
+            createNativeValues = ::testRunValues,
         )
 
         service.initialize()
@@ -2458,6 +2528,7 @@ class JourneyServiceTest {
             capture = { _, _, _, _ -> true },
             dispatcher = dispatcher,
             nowMillis = { 100_000L },
+            createNativeValues = ::testRunValues,
         )
 
         service.initialize()
@@ -2977,8 +3048,11 @@ class JourneyServiceTest {
             }
             currentRequest = null
             val journeyScope = CoroutineScope(backgroundScope.coroutineContext + SupervisorJob(backgroundScope.coroutineContext[kotlinx.coroutines.Job]))
-            journeys = JourneyService(identity, store, catalog, File(directory, name).apply { mkdirs() }, journeyScope,
-                capture = { event, props, id, _ -> captures += Triple(event, props, id); true }, presenter = presenter, linkRecorder = recorder, nowMillis = { 100_000L })
+            journeys = JourneyService(
+                identity, store, catalog, File(directory, name).apply { mkdirs() }, journeyScope,
+                capture = { event, props, id, _ -> captures += Triple(event, props, id); true }, presenter = presenter, linkRecorder = recorder, nowMillis = { 100_000L },
+                createNativeValues = ::testRunValues,
+            )
             val admission = async { journeys.initialize(); journeys.onAppWillEnterForeground(); journeys.profileDidCommit(snapshot, authority, "customer", 1) }
             runCurrent()
             if (!screenless) {
@@ -3061,8 +3135,11 @@ class JourneyServiceTest {
         val authority = authority(releaseEntry)
         catalog.commit("customer", catalog.prepare(profile(releaseEntry = releaseEntry), authority))
         val presenter = RecordingJourneyPresenter()
-        val service = JourneyService(identity, store, catalog, directory, scope,
-            capture = { _, _, _, _ -> true }, presenter = presenter, nowMillis = { 100_000L })
+        val service = JourneyService(
+            identity, store, catalog, directory, scope,
+            capture = { _, _, _, _ -> true }, presenter = presenter, nowMillis = { 100_000L },
+            createNativeValues = ::testRunValues,
+        )
         service.initialize(); service.onAppWillEnterForeground()
         service.profileDidCommit(requireNotNull(catalog.snapshot("customer")), authority, "customer", 1)
         val request = requireNotNull(presenter.request)
@@ -3159,9 +3236,12 @@ class JourneyServiceTest {
                 actualPresentation.shutdownOwnedBy(ownerDistinctId)
             }
         }
-        val service = JourneyService(identity = identity, events = store, catalog = catalog, journalDirectory = directory, scope = scope,
+        val service = JourneyService(
+            identity = identity, events = store, catalog = catalog, journalDirectory = directory, scope = scope,
             capture = { name, properties, id, _ -> captures += Triple(name, properties, id); true }, presenter = if (realPresenter) actualPresenter else presenter,
-            linkRecorder = recorder, nowMillis = { 100_000L })
+            linkRecorder = recorder, nowMillis = { 100_000L },
+            createNativeValues = ::testRunValues,
+        )
         if (!owned) presenter.linkHandler = { link ->
             opened += link.url
             effectId = journal.runs().first().effectReceipts["link"]
@@ -3479,7 +3559,8 @@ class JourneyServiceTest {
         val failPublication = java.util.concurrent.atomic.AtomicBoolean(failPublicationOnce)
         val captures = CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
         val failReport = java.util.concurrent.atomic.AtomicBoolean(failReportOnce)
-        val journeys = JourneyService(identity = identity, events = store, catalog = catalog, journalDirectory = directory,
+        val journeys = JourneyService(
+            identity = identity, events = store, catalog = catalog, journalDirectory = directory,
             scope = scope, capture = { name, properties, _, _ ->
                 captures += name to properties
                 if (name == JourneyEventNames.LEG_COMPLETED && failReport.compareAndSet(true, false)) {
@@ -3512,7 +3593,9 @@ class JourneyServiceTest {
                     throw java.io.IOException("Completion clock unavailable")
                 }
                 100_000L
-            })
+            },
+            createNativeValues = ::testRunValues,
+        )
         try {
             journeys.initialize()
             journeys.onAppWillEnterForeground()
@@ -3851,6 +3934,7 @@ class JourneyServiceTest {
             ),
             presenter = presenter,
             nowMillis = { 100_000L },
+            createNativeValues = ::testRunValues,
         )
         service.initialize()
         service.onAppWillEnterForeground()

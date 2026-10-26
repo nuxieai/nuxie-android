@@ -51,3 +51,9 @@
     private native long[] nativeWithWeight(long, int);
     private native boolean nativeTestingEnabled();
 }
+
+# The executor resolves these callbacks on their concrete object through JNI.
+-keepclassmembers class ai.nuxie.sdk.runtime.NativeRuntimeLane$Job {
+    public void run();
+    public void close();
+}

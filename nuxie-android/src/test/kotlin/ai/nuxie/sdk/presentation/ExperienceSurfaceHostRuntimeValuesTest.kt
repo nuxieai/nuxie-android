@@ -1,5 +1,7 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.TestRuntimeLane
+
 import ai.nuxie.sdk.runtime.NativeCallResult
 import ai.nuxie.sdk.runtime.NativeViewModelWrite
 import ai.nuxie.sdk.runtime.NuxieViewModelCatalog
@@ -25,7 +27,7 @@ import org.robolectric.RuntimeEnvironment
 class ExperienceSurfaceHostRuntimeValuesTest {
     @Test fun `write without a bound model reports rejection`() {
         org.robolectric.shadows.ShadowLog.clear()
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane)
         val native = object : NuxieTypedRuntimeNative {
             override val isAvailable = true
@@ -50,7 +52,7 @@ class ExperienceSurfaceHostRuntimeValuesTest {
     }
 
     @Test fun `write queued before loading completes as rejected when released`() {
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane)
         try {
             val pending = host.updateRuntimeValues(values)
@@ -67,7 +69,7 @@ class ExperienceSurfaceHostRuntimeValuesTest {
     }
 
     @Test fun `transition phase wins over an older write held by a submitted frame`() {
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane)
         val writes = java.util.concurrent.CopyOnWriteArrayList<String>()
         val native = object : NuxieTypedRuntimeNative {
