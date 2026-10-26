@@ -79,7 +79,10 @@ def selection(mode, arguments, command=None, selected_platform=None, selected_de
 
 def dispatch(mode, arguments, *, output=None, command=None, input_files=None, environment=None, selected_platform=None, selected_device=None):
     if (os.environ.get('_NUXIE_POOL_NESTED') == '1' or os.environ.get('NUXIE_HOMELAB') == '0'
-            or os.environ.get('NUXIE_EXECUTION') == 'local' or '--help' in arguments or '-h' in arguments): return None
+            or os.environ.get('NUXIE_EXECUTION') == 'local' or os.environ.get('NUXIE_CI_RUNNER_POLICY_VERSION') == '2' or '--help' in arguments or '-h' in arguments): return None
+    if mode == 'gradle':
+        tasks = [value.rsplit(':', 1)[-1] for value in arguments if not value.startswith('-')]
+        if (tasks and all(value == 'clean' for value in tasks)) or '--stop' in arguments: return None
     helper = Path.home() / '.local/share/nuxie-homelab/sdk-task.py'
     configured = (Path.home() / '.config/nuxie/homelab-cluster.json').is_file()
     if not helper.is_file():
@@ -188,7 +191,7 @@ def main():
         command = ['node', 'scripts/check.mjs', *arguments]
     else:
         command = [sys.executable, 'scripts/' + mode + '.py', *arguments]
-    return subprocess.run(command, cwd=ROOT, env=dict(os.environ, _NUXIE_POOL_NESTED='1')).returncode
+    return subprocess.run(command, cwd=Path.cwd() if mode == 'gradle' else ROOT, env=dict(os.environ, _NUXIE_POOL_NESTED='1')).returncode
 
 
 if __name__ == '__main__':
