@@ -20,6 +20,7 @@ shopt -s nullglob
 
 rsync -a \
   --exclude '.git' \
+  --exclude '.nuxie' \
   --exclude '.gradle' \
   --exclude '.kotlin' \
   --exclude 'build' \

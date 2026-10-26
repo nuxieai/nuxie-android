@@ -53,7 +53,7 @@ def selection(mode, arguments, command=None, selected_platform=None):
     if (mode == 'gradle' or (mode == 'check' and 'android' in requirements)
             or (SDK == 'android' and mode == 'sdk' and command in ('check', 'lint', 'api-check', 'providers'))):
         requirements.add('java17')
-    if mode == 'gradle' and any('connected' in a.lower() for a in arguments if not a.startswith('-')):
+    if mode == 'gradle' and any(any(word in a.rsplit(':', 1)[-1].lower() for word in ('connected', 'installdebug', 'installrelease', 'uninstall')) for a in arguments if not a.startswith('-')):
         serial = os.environ.get('ANDROID_SERIAL')
         if not serial: raise ValueError('ANDROID_SERIAL is required for connected pool tests')
         requirements.add('android-device@' + serial)
@@ -120,7 +120,8 @@ def dispatch(mode, arguments, *, output=None, command=None, input_files=None, en
             for file in selected.rglob('*'):
                 if file.is_file() and not any(p in ('build', '.gradle') for p in file.relative_to(selected).parts):
                     input_files[(Path(relative) / file.relative_to(selected)).as_posix()] = file
-            if not (selected / 'build.gradle.kts').is_file(): names[relative + '/build'] = selected / 'build'
+            for directory in ('outputs', 'reports', 'test-results'):
+                names[relative + '/build/' + directory] = selected / 'build' / directory
             if argument in ('-p', '--project-dir'): args[index + 1] = str(selected)
             else: args[index] = '--project-dir=' + str(selected)
         repository = ROOT / 'build/maven-repository'
@@ -150,11 +151,11 @@ def dispatch(mode, arguments, *, output=None, command=None, input_files=None, en
             if (ROOT / name).exists(): input_files[name] = ROOT / name
         for directory in ('maven-consumer', 'test-store-lint-consumer', 'minified-native-logging-consumer', 'maven-signing-test', 'process-death'):
             names['build/' + directory] = ROOT / 'build' / directory
-        for index, argument in enumerate(args):
-            if argument == '--repository' and index + 1 < len(args) and args[index + 1].startswith('file:'):
-                from urllib.parse import urlsplit, unquote
-                selected = Path(unquote(urlsplit(args[index + 1]).path)).resolve(strict=True)
-                input_files['.nuxie/sdk-inputs/maven-repository'] = selected
+        repository = option(args, '--repository')
+        if repository and repository.startswith('file:'):
+            from urllib.parse import urlsplit, unquote
+            selected = Path(unquote(urlsplit(repository).path)).resolve(strict=True)
+            input_files['.nuxie/sdk-inputs/maven-repository'] = selected
     names = {name: destination for name, destination in names.items() if not any(name.startswith(parent + '/') for parent in names if parent != name)}
     return module.route(ROOT, args, frontend=frontend, platform=platform,
                         requirements=requirements, outputs=names, input_files=input_files, environment=environment,
@@ -170,6 +171,7 @@ def main():
     elif mode.startswith('script-'):
         command = [sys.executable, 'scripts/' + mode.removeprefix('script-') + '.py', *arguments]
     elif mode == 'prove-runtime-install-recovery':
+        subprocess.run([str(ROOT / 'gradlew'), '--no-daemon', '--max-workers=1', 'help'], cwd=ROOT, env=dict(os.environ, _NUXIE_POOL_NESTED='1'), check=True)
         command = ['bash', 'scripts/prove-runtime-install-recovery.sh', *arguments]
     elif SDK == 'react-native' and mode == 'check':
         # Dependencies belong to the selected host's disposable snapshot.
