@@ -22,7 +22,7 @@ def main():
     parser.add_argument('--adb', default=shutil.which('adb'))
     args = parser.parse_args()
     from pool import dispatch
-    status = dispatch('script-test-startup-process-death', sys.argv[1:])
+    status = dispatch('script-test-startup-process-death', sys.argv[1:], selected_device=args.device)
     if status is not None: raise SystemExit(status)
 
     if not args.adb:

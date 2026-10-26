@@ -23,7 +23,7 @@ def main():
     parser.add_argument('--repository', default=(root / 'build/maven-repository').as_uri())
     args = parser.parse_args()
     from pool import dispatch
-    status = dispatch('script-test-maven-consumer', sys.argv[1:])
+    status = dispatch('script-test-maven-consumer', ['--version', args.version, '--repository', args.repository])
     if status is not None: raise SystemExit(status)
 
     versions = tomllib.loads((root / 'gradle/libs.versions.toml').read_text())['versions']
