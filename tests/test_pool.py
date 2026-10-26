@@ -42,6 +42,10 @@ class PoolRoutingTests(unittest.TestCase):
         self.assertEqual(platform, 'macos')
         self.assertIn('xcode', tools)
 
+    def test_ci_authorization_stays_with_its_existing_host(self):
+        with patch.dict(os.environ, {'NUXIE_CI_RUNNER_POLICY_VERSION':'2','_NUXIE_POOL_NESTED':'0','NUXIE_HOMELAB':'1','NUXIE_EXECUTION':'pool'}), patch.object(pool.Path,'home',side_effect=AssertionError('CI must not inspect client configuration')):
+            self.assertIsNone(pool.dispatch('sdk', ['test']))
+
     def test_nested_command_does_not_submit_another_request(self):
         with patch.dict(os.environ, {'_NUXIE_POOL_NESTED':'1'}):
             self.assertIsNone(pool.dispatch('sdk', ['test']))
@@ -50,7 +54,7 @@ class PoolRoutingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             home=Path(temp);helper=home/'.local/share/nuxie-homelab/sdk-task.py';helper.parent.mkdir(parents=True)
             helper.write_text("def route(root, args, **kwargs):\n assert args == ['test', '--configuration', 'Debug']\n assert kwargs['platform'] == 'portable'\n assert kwargs['frontend'] == 'scripts/bazel/sdk.py'\n assert all(p.is_absolute() for p in kwargs['outputs'].values())\n return 17\n")
-            with patch.object(pool.Path,'home',return_value=home),patch.dict(os.environ,{'_NUXIE_POOL_NESTED':'0','NUXIE_HOMELAB':'1','NUXIE_EXECUTION':'pool'}):
+            with patch.object(pool.Path,'home',return_value=home),patch.dict(os.environ,{'_NUXIE_POOL_NESTED':'0','NUXIE_HOMELAB':'1','NUXIE_EXECUTION':'pool','NUXIE_CI_RUNNER_POLICY_VERSION':'0'}):
                 self.assertEqual(pool.dispatch('sdk',['test','--configuration','Debug']),17)
 
 
