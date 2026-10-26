@@ -16,11 +16,12 @@ def option(arguments, name):
     return next((arguments[i + 1] for i, value in enumerate(arguments[:-1]) if value == name), None) or next((value.split('=', 1)[1] for value in arguments if value.startswith(name + '=')), None)
 
 
-def selection(mode, arguments, command=None):
+def selection(mode, arguments, command=None, selected_platform=None):
     selected = 'android' if mode == 'prepare-native' and SDK in ('react-native', 'unity') else 'all'
     for i, arg in enumerate(arguments):
         if arg == '--platform' and i + 1 < len(arguments): selected = arguments[i + 1]
         elif arg.startswith('--platform='): selected = arg.split('=', 1)[1]
+    if selected_platform is not None: selected = selected_platform
     command = command or (arguments[0] if arguments else '')
     requirements = set()
     apple = False
@@ -71,7 +72,7 @@ def selection(mode, arguments, command=None):
     return ('macos' if apple else 'portable'), sorted(requirements)
 
 
-def dispatch(mode, arguments, *, output=None, command=None, input_files=None, environment=None):
+def dispatch(mode, arguments, *, output=None, command=None, input_files=None, environment=None, selected_platform=None):
     if (os.environ.get('_NUXIE_POOL_NESTED') == '1' or os.environ.get('NUXIE_HOMELAB') == '0'
             or os.environ.get('NUXIE_EXECUTION') == 'local' or '--help' in arguments or '-h' in arguments): return None
     helper = Path.home() / '.local/share/nuxie-homelab/sdk-task.py'
@@ -82,7 +83,7 @@ def dispatch(mode, arguments, *, output=None, command=None, input_files=None, en
         return None
     spec = importlib.util.spec_from_file_location('pool_sdk_task', helper)
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-    platform, requirements = selection(mode, arguments, command)
+    platform, requirements = selection(mode, arguments, command, selected_platform)
     names = {name: ROOT / name for name in OUTPUTS}
     if output is not None:
         names['build/pool-prepared'] = Path(output).resolve()
