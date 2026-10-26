@@ -24,7 +24,15 @@ def main():
     parser.add_argument("--skip-install", action="store_true", help="Repeat against the APK already installed")
     args = parser.parse_args()
     from pool import dispatch
-    status = dispatch('script-test-minified-font-fallback', sys.argv[1:])
+    selected = args.apk.expanduser().resolve()
+    arguments = list(sys.argv[1:])
+    if not any(a == '--apk' or a.startswith('--apk=') for a in arguments): arguments += ['--apk', str(selected)]
+    else:
+        for index, argument in enumerate(arguments):
+            if argument == '--apk': arguments[index + 1] = str(selected)
+            elif argument.startswith('--apk='): arguments[index] = '--apk=' + str(selected)
+    files = {} if args.skip_install else {'.nuxie/sdk-inputs/font-fallback.apk': selected}
+    status = dispatch('script-test-minified-font-fallback', arguments, input_files=files, output=args.output.resolve() if args.output else None)
     if status is not None: raise SystemExit(status)
 
 
