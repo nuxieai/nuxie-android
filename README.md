@@ -436,3 +436,16 @@ existing native artifact contract after the SDK checks pass. Download the
 The archive preserves the original `sdk-artifacts.json`, file hashes and symlinks;
 wrapper native pins must match its source revision.
 The archive uses the wrappers’ existing source-addressed Maven coordinate.
+
+## Build pool
+
+With the homelab client configured, the existing SDK build/test frontends and
+readiness gate submit to the shared pool automatically. Portable work can use
+Linux, WSL or macOS; Apple work selects a Mac, and engine checks require the
+pinned installed editor. Missing tools cause a refusal before execution.
+Running builds are not restarted when the client is updated.
+
+Products return to the checkout's declared artifact paths. Logs, test diagnostics
+and request timings are retained under `.nuxie/homelab/` and
+`.nuxie/homelab-timings/`. A failed remote test remains a failure and does not
+fall back to local compilation. See the [SDK pool operations guide](https://github.com/nuxieai/nuxie-dev/blob/main/docs/operations/sdk-bazel-build.md#shared-pool-execution-for-every-sdk).
