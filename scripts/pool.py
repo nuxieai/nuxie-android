@@ -81,7 +81,7 @@ def selection(mode, arguments, command=None, selected_platform=None, selected_de
 def gradle_tasks(arguments):
     values = iter(arguments)
     tasks = []
-    takes_value = {'-p', '--project-dir', '-g', '--gradle-user-home', '-I', '--init-script',
+    takes_value = {'-P', '--project-prop', '-D', '--system-prop', '-p', '--project-dir', '-g', '--gradle-user-home', '-I', '--init-script',
                    '-c', '--settings-file', '-b', '--build-file', '-x', '--exclude-task',
                    '--include-build', '--project-cache-dir', '--console', '--warning-mode',
                    '--max-workers', '--priority', '--configuration-cache-problems'}

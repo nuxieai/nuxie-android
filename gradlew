@@ -87,7 +87,7 @@ APP_BASE_NAME=${0##*/}
 APP_HOME=$( cd "${APP_HOME:-./}" > /dev/null && pwd -P ) || exit
 
 # Keep the standard Gradle entrypoint while executing on a compatible pool host.
-if [ "${_NUXIE_POOL_NESTED:-0}" != 1 ] && [ "${NUXIE_HOMELAB:-1}" != 0 ] && [ "${NUXIE_EXECUTION:-}" != local ] && [ -f "$HOME/.config/nuxie/homelab-cluster.json" ]; then
+if [ "${_NUXIE_POOL_NESTED:-0}" != 1 ] && [ "${NUXIE_HOMELAB:-1}" != 0 ] && [ "${NUXIE_EXECUTION:-}" != local ] && [ "${NUXIE_CI_RUNNER_POLICY_VERSION:-0}" != 2 ] && [ -f "$HOME/.config/nuxie/homelab-cluster.json" ]; then
     exec python3 "$APP_HOME/scripts/pool.py" gradle "$@"
 fi
 
