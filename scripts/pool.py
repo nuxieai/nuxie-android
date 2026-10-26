@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Submit this SDK's existing frontend to the shared, capability-selected pool."""
 import importlib.util
+import contextlib
 import os
 import shlex
 from pathlib import Path
@@ -78,11 +79,16 @@ def selection(mode, arguments, command=None, selected_platform=None, selected_de
 
 
 def dispatch(mode, arguments, *, output=None, command=None, input_files=None, environment=None, selected_platform=None, selected_device=None):
+    with contextlib.ExitStack() as stack:
+        return _dispatch(mode, arguments, output=output, command=command, input_files=input_files, environment=environment, selected_platform=selected_platform, selected_device=selected_device, _stack=stack)
+
+
+def _dispatch(mode, arguments, *, output=None, command=None, input_files=None, environment=None, selected_platform=None, selected_device=None, _stack=None):
     if (os.environ.get('_NUXIE_POOL_NESTED') == '1' or os.environ.get('NUXIE_HOMELAB') == '0'
             or os.environ.get('NUXIE_EXECUTION') == 'local' or os.environ.get('NUXIE_CI_RUNNER_POLICY_VERSION') == '2' or '--help' in arguments or '-h' in arguments): return None
     if mode == 'gradle':
         tasks = [value.rsplit(':', 1)[-1] for value in arguments if not value.startswith('-')]
-        if (tasks and all(value == 'clean' for value in tasks)) or '--stop' in arguments: return None
+        if (tasks and all(value in ('clean', 'fetch', 'runtimeFetch') for value in tasks)) or '--stop' in arguments: return None
     helper = Path.home() / '.local/share/nuxie-homelab/sdk-task.py'
     configured = (Path.home() / '.config/nuxie/homelab-cluster.json').is_file()
     if not helper.is_file():
@@ -138,12 +144,14 @@ def dispatch(mode, arguments, *, output=None, command=None, input_files=None, en
             else: args[index] = '--project-dir=' + str(selected)
         repository = ROOT / 'build/maven-repository'
         if repository.is_dir(): input_files['build/maven-repository'] = repository
+        if any(a.rsplit(':', 1)[-1] in ('fetch', 'runtimeFetch') for a in args):
+            names['runtime/prebuilt'] = ROOT / 'runtime/prebuilt'
         if any(a.rsplit(':', 1)[-1] == 'apiDump' for a in args):
             names['nuxie-android/api/nuxie-android.api'] = ROOT / 'nuxie-android/api/nuxie-android.api'
         if any('hostrender' in a.lower() for a in args):
             spec = importlib.util.spec_from_file_location('sdk_host_pool', ROOT / 'scripts/bazel/sdk.py')
             host = importlib.util.module_from_spec(spec); spec.loader.exec_module(host)
-            files, variables = host.host_inputs()
+            files, variables = _stack.enter_context(host.host_inputs())
             input_files.update(files); environment.update(variables)
             for index, argument in enumerate(args):
                 if not (argument == '--args' or argument.startswith('--args=')): continue
@@ -161,7 +169,10 @@ def dispatch(mode, arguments, *, output=None, command=None, input_files=None, en
     if mode.startswith('script-'):
         for name in ('build/maven-repository', 'nuxie-android/build/outputs/aar/nuxie-android-release.aar'):
             if (ROOT / name).exists(): input_files[name] = ROOT / name
-        for directory in ('maven-consumer', 'test-store-lint-consumer', 'minified-native-logging-consumer', 'maven-signing-test', 'process-death'):
+        for directory in ('maven-consumer', 'test-store-lint-consumer', 'minified-native-logging-consumer'):
+            for suffix in ('build/outputs', 'build/reports', 'build/test-results', 'qualification.log'):
+                name = 'build/' + directory + '/' + suffix; names[name] = ROOT / name
+        for directory in ('maven-signing-test', 'process-death'):
             names['build/' + directory] = ROOT / 'build' / directory
         repository = option(args, '--repository')
         if repository and repository.startswith('file:'):

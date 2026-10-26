@@ -2,6 +2,7 @@
 """Build the native Android SDK directly with Bazel and prepare its Maven boundary."""
 
 import argparse
+import contextlib
 import hashlib
 import io
 import fcntl
@@ -400,36 +401,54 @@ def prepare(args):
     print(output / "sdk-artifacts.json")
 
 
+@contextlib.contextmanager
 def host_inputs():
     library = Path(os.environ.get('NUXIE_HOST_CAPI_LIB', '')).expanduser().resolve()
     if not library.is_file(): raise ValueError('NUXIE_HOST_CAPI_LIB must name a prepared host library')
-    files = {'.nuxie/sdk-inputs/host-runtime' + library.suffix: library}
-    env = {'NUXIE_HOST_CAPI_LIB': str(library)}
-    for name in ('NUXIE_MOLTENVK_LIBRARY', 'VK_ICD_FILENAMES'):
-        if os.environ.get(name):
-            # Copy containing driver metadata/libraries together so relative
-            # ICD paths retain their declared relationship.
-            selected_paths = []
-            for index, value in enumerate(os.environ[name].split(os.pathsep)):
-                selected = Path(value).expanduser().resolve(strict=True)
-                files['.nuxie/sdk-inputs/' + name.lower() + '-' + str(index)] = selected.parent
-                selected_paths.append(str(selected))
-            env[name] = os.pathsep.join(selected_paths)
-    for name in ('DYLD_LIBRARY_PATH', 'LD_LIBRARY_PATH'):
-        if os.environ.get(name):
-            directories = []
-            for index, directory in enumerate(os.environ[name].split(os.pathsep)):
-                selected = Path(directory).expanduser().resolve(strict=True)
-                files['.nuxie/sdk-inputs/' + name.lower() + '-' + str(index)] = selected
-                directories.append(str(selected))
-            env[name] = os.pathsep.join(directories)
-    return files, env
+    state = ROOT / '.nuxie'; state.mkdir(exist_ok=True)
+    if state.is_symlink(): raise ValueError('SDK driver staging must stay inside the checkout')
+    with tempfile.TemporaryDirectory(dir=state, prefix='sdk-drivers-') as temporary:
+        files = {'.nuxie/sdk-inputs/host-runtime' + library.suffix: library}
+        env = {'NUXIE_HOST_CAPI_LIB': str(library)}
+        if os.environ.get('NUXIE_MOLTENVK_LIBRARY'):
+            selected = Path(os.environ['NUXIE_MOLTENVK_LIBRARY']).expanduser().resolve(strict=True)
+            files['.nuxie/sdk-inputs/moltenvk/' + selected.name] = selected
+            env['NUXIE_MOLTENVK_LIBRARY'] = str(selected)
+        descriptors = []
+        for index, value in enumerate(filter(None, os.environ.get('VK_ICD_FILENAMES', '').split(os.pathsep))):
+            selected = Path(value).expanduser().resolve(strict=True)
+            descriptor = json.loads(selected.read_text())
+            reference = Path(descriptor['ICD']['library_path']).expanduser()
+            if reference.is_absolute(): candidate = reference
+            elif '/' in str(reference): candidate = selected.parent / reference
+            else:
+                candidates = [selected.parent / reference, *(Path(directory) / reference for directory in
+                    [*filter(None, os.environ.get('LD_LIBRARY_PATH', '').split(os.pathsep)), '/opt/homebrew/lib', '/usr/local/lib', '/usr/lib/x86_64-linux-gnu', '/usr/lib/aarch64-linux-gnu', '/usr/lib'])]
+                candidate = next((file for file in candidates if file.is_file()), candidates[0])
+            binary = candidate.resolve(strict=True)
+            descriptor['ICD']['library_path'] = './' + binary.name
+            rewritten = Path(temporary) / ('icd-' + str(index) + '.json')
+            rewritten.write_text(json.dumps(descriptor, sort_keys=True))
+            prefix = '.nuxie/sdk-inputs/vulkan-' + str(index) + '/'
+            files[prefix + 'icd.json'] = rewritten; files[prefix + binary.name] = binary
+            descriptors.append(str(rewritten))
+        if descriptors: env['VK_ICD_FILENAMES'] = os.pathsep.join(descriptors)
+        for name in ('DYLD_LIBRARY_PATH', 'LD_LIBRARY_PATH'):
+            if os.environ.get(name):
+                directories = []
+                for index, directory in enumerate(os.environ[name].split(os.pathsep)):
+                    selected = Path(directory).expanduser().resolve(strict=True)
+                    files['.nuxie/sdk-inputs/' + name.lower() + '-' + str(index)] = selected
+                    directories.append(str(selected))
+                env[name] = os.pathsep.join(directories)
+        yield files, env
 
 
 def pool_dispatch(args):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from pool import dispatch
-    if os.environ.get('_NUXIE_POOL_NESTED') == '1': return None
+    if (os.environ.get('_NUXIE_POOL_NESTED') == '1' or os.environ.get('NUXIE_HOMELAB') == '0'
+            or os.environ.get('NUXIE_EXECUTION') == 'local' or os.environ.get('NUXIE_CI_RUNNER_POLICY_VERSION') == '2'): return None
     if args.command == 'prepare':
         identity = source_identity(args.maven_version, args.sign)
         state = ROOT / '.nuxie'; state.mkdir(exist_ok=True)
@@ -441,20 +460,20 @@ def pool_dispatch(args):
             publish_prepared(args, incoming, identity)
             return 0
     if args.command in ('host-render', 'host-render-smoke'):
-        files, env = host_inputs()
-        arguments = list(sys.argv[1:])
-        output = None
-        if args.command == 'host-render':
-            source = Path(args.input).expanduser().resolve(strict=True)
-            files['.nuxie/sdk-inputs/render-input'] = source
-            for index, argument in enumerate(arguments):
-                if argument == '--input': arguments[index + 1] = str(source)
-                elif argument.startswith('--input='): arguments[index] = '--input=' + str(source)
-            output = Path(args.output).expanduser().resolve()
-            for index, argument in enumerate(arguments):
-                if argument == '--output': arguments[index + 1] = str(output)
-                elif argument.startswith('--output='): arguments[index] = '--output=' + str(output)
-        return dispatch('sdk', arguments, command=args.command, output=output, input_files=files, environment=env)
+        with host_inputs() as (files, env):
+            arguments = list(sys.argv[1:])
+            output = None
+            if args.command == 'host-render':
+                source = Path(args.input).expanduser().resolve(strict=True)
+                files['.nuxie/sdk-inputs/render-input'] = source
+                for index, argument in enumerate(arguments):
+                    if argument == '--input': arguments[index + 1] = str(source)
+                    elif argument.startswith('--input='): arguments[index] = '--input=' + str(source)
+                output = Path(args.output).expanduser().resolve()
+                for index, argument in enumerate(arguments):
+                    if argument == '--output': arguments[index + 1] = str(output)
+                    elif argument.startswith('--output='): arguments[index] = '--output=' + str(output)
+            return dispatch('sdk', arguments, command=args.command, output=output, input_files=files, environment=env)
     return dispatch('sdk', sys.argv[1:], command=args.command, selected_device=getattr(args, 'serial', None))
 
 
