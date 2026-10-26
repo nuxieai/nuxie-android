@@ -9,7 +9,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 SDK = 'android'
-OUTPUTS = ['build/bazel-sdk', 'nuxie-android/build/outputs', 'nuxie-android/build/reports', 'nuxie-android/build/test-results', 'example-app/build/outputs', 'build/maven-repository', 'build/reports', 'build/test-results', 'build/outputs']
+OUTPUTS = ['build/bazel-sdk', 'nuxie-android/build/outputs', 'nuxie-android/build/reports', 'nuxie-android/build/test-results', 'example-app/build/outputs', 'build/maven-repository', 'build/reports', 'build/test-results', 'build/outputs', 'nuxie-android/api/nuxie-android.api']
 
 
 def option(arguments, name):
