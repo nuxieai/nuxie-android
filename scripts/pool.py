@@ -104,16 +104,16 @@ def gradle_worker_arguments(arguments):
 def caller_gradle_context(arguments):
     # These options select caller-owned configuration, caches or persistent
     # daemon/watch operations, rather than the SDK's declared build inputs.
-    local = {'--init-script', '--settings-file', '--build-file', '--gradle-user-home',
+    local = {'--system-prop', '--init-script', '--settings-file', '--build-file', '--gradle-user-home',
              '--project-cache-dir', '--include-build', '--offline', '--stop', '--status',
              '--foreground', '--daemon', '--continuous', '-t', '--write-locks',
              '--update-locks', '--write-verification-metadata', '--export-keys', '--profile'}
-    values = iter(arguments)
+    values = iter(arguments); project_directory = Path.cwd().resolve()
     for value in values:
         if value.split('=', 1)[0] in local or value.startswith(('-I', '-c', '-b', '-g', '-D')): return True
         project = next(values, None) if value in ('-p', '--project-dir') else value.partition('=')[2] if value.startswith('--project-dir=') else value[2:].removeprefix('=') if value.startswith('-p') and len(value) > 2 else None
-        if project and not Path(project).expanduser().resolve().is_relative_to(ROOT.resolve()): return True
-    return False
+        if project: project_directory = Path(project).expanduser().resolve()
+    return not project_directory.is_relative_to(ROOT.resolve())
 
 
 def dispatch(mode, arguments, *, output=None, command=None, input_files=None, environment=None, selected_platform=None, selected_device=None):

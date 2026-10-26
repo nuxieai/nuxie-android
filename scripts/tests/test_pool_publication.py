@@ -42,7 +42,7 @@ class PoolPublicationTests(unittest.TestCase):
             dispatch=Mock(return_value=9)
             args=SimpleNamespace(command='prepare',maven_version='0.2.0',sign=True,output=Path(temporary)/'maven')
             with patch.object(sdk,'ROOT',Path(temporary)),patch.object(sdk,'source_identity',return_value=('a'*40,False)), \
-                    patch.dict(sys.modules,{'pool':SimpleNamespace(dispatch=dispatch)}),patch.dict(os.environ,{'_NUXIE_POOL_NESTED':'0'}):
+                    patch.dict(sys.modules,{'pool':SimpleNamespace(dispatch=dispatch)}),patch.dict(os.environ,{'_NUXIE_POOL_NESTED':'0','NUXIE_CI_RUNNER_POLICY_VERSION':'0','NUXIE_HOMELAB':'1','NUXIE_EXECUTION':'pool'}):
                 self.assertEqual(sdk.pool_dispatch(args),9)
             self.assertNotIn('--sign',dispatch.call_args.args[1])
             self.assertNotEqual(dispatch.call_args.kwargs['output'],args.output)
