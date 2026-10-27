@@ -1,6 +1,6 @@
 package ai.nuxie.sdk.presentation
 
-import ai.nuxie.sdk.runtime.NuxieRuntimeLane
+import ai.nuxie.sdk.runtime.TestRuntimeLane
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -53,7 +53,7 @@ class ExperiencePresentationRetirementTest {
     }
 
     @Test fun `noncancellable rollback stops waiting on a stalled lane without freeing its owner`() = runTest {
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val entered = CountDownLatch(1)
         val unblock = CountDownLatch(1)
         val released = AtomicBoolean(false)
@@ -88,7 +88,7 @@ class ExperiencePresentationRetirementTest {
     }
 
     @Test fun `cleanup timeout preserves in-flight failures and fails normal completion`() = runTest {
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val entered = CountDownLatch(1)
         val unblock = CountDownLatch(1)
         lane.enqueue { entered.countDown(); check(unblock.await(30, TimeUnit.SECONDS)) }

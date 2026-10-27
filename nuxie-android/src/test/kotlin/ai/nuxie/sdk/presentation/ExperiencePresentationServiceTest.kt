@@ -786,7 +786,7 @@ class ExperiencePresentationServiceTest {
         val mounted = ExperienceMountedScreen(activity.get(), source, object : ExperienceSurfaceHost.Listener {
             override fun onFirstFrame() = Unit
             override fun onFailure(error: ExperiencePresentationException) = Unit
-        }, {})
+        }, {}, createLane = ::TestRuntimeLane)
         val lane = ExperienceMountedScreen::class.java.getDeclaredField("lane").apply { isAccessible = true }
             .get(mounted) as ai.nuxie.sdk.runtime.NuxieRuntimeLane
         val entered = java.util.concurrent.CountDownLatch(1)

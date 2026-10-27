@@ -454,7 +454,7 @@ class ExperienceInteractivePageTest {
     }
 
     private suspend fun withLayer(native: RecordingNative = RecordingNative(), body: suspend (ExperienceInteractivePage, RecordingNative) -> Unit) {
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         native.lane = lane
         val file = NuxieRuntimeFile(1, native)
         val descriptor = Json.parseToJsonElement("""{"leg":{"screens":[

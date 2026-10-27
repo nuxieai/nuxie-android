@@ -50,7 +50,7 @@ class ExperienceLayerSurfaceFailureTest {
     private suspend fun withSurface(globals: Boolean = false, prepareTarget: Boolean = true, body: suspend (ExperienceSurfaceHost, ExperienceInteractivePage,
         ExperienceInteractivePageTest.RecordingNative, NuxieRuntimeLane) -> Unit) {
         val native = ExperienceInteractivePageTest.RecordingNative().apply { this.globals = globals }
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val file = NuxieRuntimeFile(1, native)
         val descriptor = Json.parseToJsonElement("""{"leg":{"screens":[{"id":"a","defaultViewModelName":"A"},
             {"id":"b","defaultViewModelName":"B"},{"id":"c","defaultViewModelName":"C"}]},"render":{"screens":[{"id":"a","artboardName":"A"},{"id":"b","artboardName":"B"},{"id":"c","artboardName":"C"}],"layerHost":{"artboardName":"LayerList","list":"screens"}}}""").jsonObject

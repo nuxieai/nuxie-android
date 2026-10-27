@@ -18,6 +18,7 @@ internal class ExperienceMountedScreen(
     listener: ExperienceSurfaceHost.Listener,
     private val onFailure: (Throwable) -> Unit,
     videoDecoderPool: ai.nuxie.sdk.runtime.ExperienceVideoDecoderPool? = null,
+    createLane: () -> NuxieRuntimeLane = { NuxieRuntimeLane() },
 ) {
     val isLayer: Boolean = ai.nuxie.sdk.experiences.ExperiencePageHostContract.isEnabled(prepared.descriptor)
     private class Row(val prepared: PreparedPresentation, val listener: ExperienceSurfaceHost.Listener)
@@ -40,7 +41,7 @@ internal class ExperienceMountedScreen(
             prepared.artifactsByKey[key]?.let { name to it }
         }.toMap()
     private val runValues = prepared.runValues?.also { it.retainScreen() }
-    private val lane = runValues?.lane ?: NuxieRuntimeLane()
+    private val lane = runValues?.lane ?: createLane()
     private var captionOverlay: ExperienceVideoCaptionOverlay? = null
     private var textOverlay: ExperienceTextInputOverlay? = null
     private var layoutBounds: ExperienceArtboardSize? = null
