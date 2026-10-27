@@ -226,7 +226,7 @@ def _dispatch(mode, arguments, *, output=None, command=None, input_files=None, e
             else: args[index] = '--project-dir=' + str(selected)
         if any(task.lower().startswith('verify') or (task.startswith('v') and len(task) > 1 and task[1].isupper()) for task in gradle_tasks(arguments)):
             for name, source in names.items():
-                if name.endswith(('/outputs', '/libs')) and source.is_dir(): input_files[name] = source
+                if name.endswith(('/outputs', '/libs', '/reports')) and source.is_dir(): input_files[name] = source
         repository = ROOT / 'build/maven-repository'
         if repository.is_dir(): input_files['build/maven-repository'] = repository
         if any(a.rsplit(':', 1)[-1] in ('fetch', 'runtimeFetch') for a in args):
@@ -235,6 +235,8 @@ def _dispatch(mode, arguments, *, output=None, command=None, input_files=None, e
             names['nuxie-android/api/nuxie-android.api'] = ROOT / 'nuxie-android/api/nuxie-android.api'
         if any(host_render_task(a) for a in gradle_tasks(arguments)):
             names['nuxie-android/build/host-render/native'] = ROOT / 'nuxie-android/build/host-render/native'
+            header = ROOT / 'runtime/prebuilt/include/nux_capi.generated.h'
+            if header.is_file(): input_files['runtime/prebuilt/include/nux_capi.generated.h'] = header
             spec = importlib.util.spec_from_file_location('sdk_host_pool', ROOT / 'scripts/bazel/sdk.py')
             host = importlib.util.module_from_spec(spec); spec.loader.exec_module(host)
             files, variables = _stack.enter_context(host.host_inputs())
