@@ -208,7 +208,8 @@ class ExperiencePagePresentationHeightTest {
                 .newInstance(activity, registryId, content, false) as ExperienceSurfaceHost.Listener
         private var current = screen(prepared)
         private val failures = mutableListOf<Throwable>()
-        private val mounted = ExperienceMountedScreen(activity, prepared, current, { failures += it })
+        private val mounted = ExperienceMountedScreen(activity, prepared, current, { failures += it },
+            createLane = ::TestRuntimeLane)
         val surface = mounted.surface
         val texture = SurfaceTexture(0)
         private val lane = field(mounted, "lane") as NuxieRuntimeLane
@@ -549,7 +550,7 @@ class ExperiencePagePresentationHeightTest {
             MutableList<Float?>, ExperienceInteractivePageTest.RecordingNative, MutableList<ExperiencePresentationException>) -> Unit)? = null) {
         val controller = Robolectric.buildActivity(Activity::class.java).setup()
         val activity = controller.get()
-        val lane = NuxieRuntimeLane()
+        val lane = TestRuntimeLane()
         val pageNative = ExperienceInteractivePageTest.RecordingNative().apply { presentation = 1; globals = environmentViewport }
         val native = object : NuxieTypedRuntimeNative by pageNative {
             var size = floatArrayOf(393f, 852f)

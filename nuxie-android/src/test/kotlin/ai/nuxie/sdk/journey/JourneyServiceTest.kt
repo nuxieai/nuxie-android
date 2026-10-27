@@ -3507,7 +3507,7 @@ class JourneyServiceTest {
             }, capturePresentationEvent = { name, properties, id, distinctId, occurredAt, admission ->
                 val accepted = admission?.commitIfCurrent { true } == true
                 StableEventCaptureResult(accepted, StoredEvent(id, name, JsonValueConverter.fromMap(properties), occurredAt, distinctId).takeIf { accepted })
-            }, presenter = presenter, nowMillis = { 100_000L })
+            }, presenter = presenter, nowMillis = { 100_000L }, createNativeValues = ::testRunValues)
         try {
             journeys.initialize(); journeys.onAppWillEnterForeground(); journeys.profileDidCommit(snapshot, authority, "customer", 1)
             val first = requests.first()
