@@ -836,9 +836,7 @@ class ExperiencePresentationServiceTest {
             val failure = stepFailure!!.suppressed.single() as ExperiencePresentationException
             assertEquals(ExperiencePresentationException.Reason.HOST_FAILED, failure.reason)
             assertTrue(failure.cause is kotlinx.coroutines.TimeoutCancellationException)
-            val gate = ExperiencePresentationService::class.java.getDeclaredField("layerNavigation")
-                .apply { isAccessible = true }.get(service) as kotlinx.coroutines.sync.Mutex
-            assertFalse("The cancelled page step must release layerNavigation", gate.isLocked)
+            assertFalse("The cancelled page step must release the move slot", checkNotNull(PresentationRegistry.resolve(id)).moves.isBusy)
             assertFalse(ownerReleased.get())
             assertFalse(sourceLease.closed.get())
             assertTrue(destinationLease.closed.get())
@@ -891,9 +889,6 @@ class ExperiencePresentationServiceTest {
             assertEquals(ExperiencePresentationException.Reason.HOST_FAILED, cleanupFailure.reason)
             assertTrue(cleanupFailure.cause is kotlinx.coroutines.TimeoutCancellationException)
             assertNotNull("The native shell remains owned until it detaches", PresentationRegistry.observe(id))
-            val gate = ExperiencePresentationService::class.java.getDeclaredField("layerNavigation")
-                .apply { isAccessible = true }.get(service) as kotlinx.coroutines.sync.Mutex
-            assertFalse(gate.isLocked)
             val reservation = checkNotNull(service.reserveJourney("customer-1"))
             val later = async {
                 service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
@@ -2853,8 +2848,8 @@ class ExperiencePresentationServiceTest {
             assertTrue(destination.shell.fitsContent)
             assertTrue(hugging.layerContentHeight === destination.layerContentHeight)
             assertEquals(152f, destination.layerContentHeight.get())
-            // A completed system close withdraws preparation in its source
-            // layer, instead of turning the native dismissal into an error.
+            // A completed system close waits its turn behind the move in flight, as the Activity
+            // queues it, then closes the page that move landed on: nothing is withdrawn.
             val sourceId = nativeLayers.last()
             val sourceContent = checkNotNull(PresentationRegistry.resolve(sourceId))
             val expectedAfterClose = service.layerScreenIds().dropLast(1)
@@ -2866,15 +2861,24 @@ class ExperiencePresentationServiceTest {
                 }
             }
             runCurrent()
-            assertTrue(checkNotNull(sourceContent.closeLayer).invoke(object : PreparedLayerReveal {
-                override suspend fun prepare() {
-                    PresentationRegistry.detach(sourceId, hosts.getValue(sourceId))
-                    nativeLayers.removeAt(nativeLayers.lastIndex)
+            val nativeClose = async {
+                sourceContent.moves.run {
+                    val landedId = nativeLayers.last()
+                    checkNotNull(checkNotNull(PresentationRegistry.resolve(landedId)).closeLayer).invoke(object : PreparedLayerReveal {
+                        override suspend fun prepare() {
+                            PresentationRegistry.detach(landedId, hosts.getValue(landedId))
+                            nativeLayers.removeAt(nativeLayers.lastIndex)
+                        }
+                        override fun activate() = Unit
+                    })
                 }
-                override fun activate() = Unit
-            }))
-            assertEquals(ExperiencePresentationException.Reason.LAYER_DISMISSED,
-                (inFlight.await().exceptionOrNull() as ExperiencePresentationException).reason)
+            }
+            runCurrent()
+            assertFalse("The close waits for the move in flight", nativeClose.isCompleted)
+            assertEquals(sourceId, nativeLayers.last())
+            checkNotNull(heldNavigation).complete(Unit)
+            assertTrue(inFlight.await().exceptionOrNull()?.stackTraceToString(), inFlight.await().isSuccess)
+            assertTrue(nativeClose.await())
             assertEquals(expectedAfterClose, service.layerScreenIds())
             heldNavigation = null
             navigate("screen_details", JsonObject(mapOf("type" to JsonPrimitive("modal"))))

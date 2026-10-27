@@ -2894,7 +2894,10 @@ internal class JourneyService(
                                 }
                                 pendingPresentationPurchasePlacements[run.id] = placementId
                             }
-                            when (val presentationResult = withNestedPresentationCallbacks(run.id, closesLayer) {
+                            // A Back waits for the running move, which may be a native close waiting on this
+                            // Journey's own dismissal checkpoint.
+                            when (val presentationResult = withNestedPresentationCallbacks(run.id,
+                                closesLayer || actionType == JourneyActionType.BACK) {
                                 presentation.dispatchAction(owner, purchaseAction, effectId)
                             }) {
                                 is JourneyPresentationActionResult.Navigate -> {

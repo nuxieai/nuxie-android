@@ -83,7 +83,8 @@ internal class NuxieExperienceActivity : Activity() {
     private var restoringLayerScreen: Screen? = null
     private val screens = mutableSetOf<Screen>()
     private var navigation: Navigation? = null
-    private val queuedBack = ArrayDeque<() -> Unit>()
+    /** The Experience's one move queue; every Screen in it carries the same one. */
+    private val moves: ExperienceMoveQueue? get() = (layers.firstOrNull()?.screen ?: currentScreen)?.prepared?.moves
     private lateinit var contentRoot: FrameLayout
     private var visible = false
     private var dismissible = true
@@ -521,7 +522,6 @@ internal class NuxieExperienceActivity : Activity() {
                     target.publishPreparedFrame()
                 target.mounted?.setInputEnabled(true)
                 target.mounted?.setVisible(visible)
-                drainQueuedBack()
             }
         }
 
@@ -543,8 +543,6 @@ internal class NuxieExperienceActivity : Activity() {
                         else if (closingLayer == null && !target.prepared.opensLayer) source.mounted?.activate()
                     }
                     target.closed.await()
-                    if (currentScreen === source && source.screenCloseReason() == null && !isFinishing && !isDestroyed) drainQueuedBack()
-                    else queuedBack.clear()
                 }
             }
         }
@@ -885,39 +883,54 @@ internal class NuxieExperienceActivity : Activity() {
         }
     }
 
+    /** System Back is a move request: a press during a move waits its turn and runs on the Screen the move lands on (S1). */
     private fun closeTopLayerOrExperience() {
-        if (navigation != null) {
-            if (currentScreen?.mounted?.isLayer == true) queuedBack.addLast(::closeTopLayerOrExperience)
+        val moves = moves ?: run {
+            if (dismissible) finishTerminal(CloseReason.UserDismissed)
             return
         }
-        if (closingLayer != null) return
+        registryScope.launch {
+            try { moves.run { closeTopLayerOrExperienceNow() } } catch (_: ExperienceMoveQueue.Closed) {}
+        }
+    }
+
+    private suspend fun closeTopLayerOrExperienceNow() {
+        if (isFinishing || isDestroyed) return
         val screen = currentScreen
         if (!dismissible && layers.lastOrNull()?.pushed != true) return
         if (screen?.mounted?.isLayer == true && layers.size > 1) {
-            registryScope.launch {
-                closeLayer(layers.last(), authored = true, method = "native_back")
-                // Back presses queued during navigation run in order, one per completed pop (S1).
-                if (!isFinishing && !isDestroyed) drainQueuedBack() else queuedBack.clear()
-            }
+            closeLayer(layers.last(), authored = true, method = "native_back")
             return
         }
         if (layers.size > 1) layers.last().sheet?.closeFromUser()
         else finishTerminal(CloseReason.UserDismissed)
     }
 
-    private fun drainQueuedBack() {
-        if (navigation == null && queuedBack.isNotEmpty()) queuedBack.removeFirst().invoke()
-    }
-
     private fun requestLayerClose(layer: Layer) {
-        val index = layers.indexOf(layer)
-        if (index < 1) return
-        val count = layers.size - index
-        registryScope.launch { layers.lastOrNull()?.let { closeLayer(it, authored = false, pageCount = count) } }
+        val moves = moves ?: return
+        registryScope.launch {
+            try {
+                moves.run {
+                    // The platform has already dismissed this sheet. Close it and every page above it,
+                    // on the stack this move starts on.
+                    val index = layers.indexOf(layer)
+                    if (index >= 1) closeLayer(layers.last(), authored = false, pageCount = layers.size - index)
+                }
+            } catch (_: ExperienceMoveQueue.Closed) {}
+        }
     }
 
+    /** A layer's close is a move. Work the running move calls into joins it instead of queueing. */
     private suspend fun closeLayer(layer: Layer, authored: Boolean,
         method: String = if (authored) "journey" else "native_sheet", pageCount: Int = 1): Boolean {
+        val moves = moves ?: return false
+        return try {
+            moves.run { closeLayerNow(layer, authored, method, pageCount) }
+        } catch (_: ExperienceMoveQueue.Closed) { false }
+    }
+
+    private suspend fun closeLayerNow(layer: Layer, authored: Boolean, method: String, pageCount: Int): Boolean {
+        // closingLayer guards a re-entrant close from the move's own callbacks; moves never overlap.
         if (layers.lastOrNull() !== layer || pageCount < 1 || pageCount >= layers.size || closingLayer != null) return false
         closingLayer = layer
         layers.forEach { it.sheet?.setInputEnabled(false) }
@@ -1037,6 +1050,7 @@ internal class NuxieExperienceActivity : Activity() {
     }
 
     override fun onDestroy() {
+        if (!isChangingConfigurations) moves?.revoke()
         registryScope.cancel()
         clearAcquisitionRecovery()
         removeLoadingView()
@@ -1196,6 +1210,8 @@ internal class NuxieExperienceActivity : Activity() {
     }
 
     private fun finishTerminal(reason: CloseReason) {
+        // The Experience closes: what waits in its queue completes as closed.
+        moves?.revoke()
         acquiringScreen?.finishTerminal(reason) ?: currentScreen?.finishTerminal(reason)
     }
 
