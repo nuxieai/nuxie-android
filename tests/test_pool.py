@@ -75,12 +75,15 @@ class PoolRoutingTests(unittest.TestCase):
         import json
         with tempfile.TemporaryDirectory() as temporary:
             home=Path(temporary).resolve();root=home/'sdk';scripts=root/'scripts/bazel';scripts.mkdir(parents=True)
+            header=root/'runtime/prebuilt/include/nux_capi.generated.h';header.parent.mkdir(parents=True);header.write_text('prepared header')
             (scripts/'sdk.py').write_text("import contextlib\n@contextlib.contextmanager\ndef host_inputs():\n yield {}, {}\n")
             helper=home/'.local/share/nuxie-homelab/sdk-task.py';helper.parent.mkdir(parents=True);record=home/'record.json'
-            helper.write_text("from pathlib import Path\nimport os,json\ndef route(root,args,**kwargs):\n Path(os.environ['RECORD']).write_text(json.dumps(list(kwargs['outputs'])))\n return 17\n")
+            helper.write_text("from pathlib import Path\nimport os,json\ndef route(root,args,**kwargs):\n Path(os.environ['RECORD']).write_text(json.dumps({'outputs':list(kwargs['outputs']),'inputs':list(kwargs['input_files'])}))\n return 17\n")
             with patch.object(pool,'ROOT',root),patch.object(pool.Path,'home',return_value=home),patch.dict(os.environ,{'_NUXIE_POOL_NESTED':'0','NUXIE_CI_RUNNER_POLICY_VERSION':'0','NUXIE_HOMELAB':'1','NUXIE_EXECUTION':'pool','RECORD':str(record)}):
                 self.assertEqual(pool.dispatch('gradle',['-p',str(root),':nuxie-android:compileHostRenderBridge']),17)
-                self.assertIn('nuxie-android/build/host-render/native',json.loads(record.read_text()))
+                declared=json.loads(record.read_text())
+                self.assertIn('nuxie-android/build/host-render/native',declared['outputs'])
+                self.assertIn('runtime/prebuilt/include/nux_capi.generated.h',declared['inputs'])
 
     def test_device_and_host_task_abbreviations_keep_their_requirements(self):
         with patch.dict(os.environ, {'ANDROID_SERIAL':'emulator-5558'}):
@@ -94,11 +97,14 @@ class PoolRoutingTests(unittest.TestCase):
         import json
         with tempfile.TemporaryDirectory() as temporary:
             home=Path(temporary).resolve();root=home/'sdk';artifact=root/'example-app/build/outputs/apk/debug/example.apk';artifact.parent.mkdir(parents=True);artifact.write_bytes(b'assembled APK')
+            report=root/'build/reports/android-release/example-app-bundle-config.txt';report.parent.mkdir(parents=True);report.write_text('bundle configuration')
             helper=home/'.local/share/nuxie-homelab/sdk-task.py';helper.parent.mkdir(parents=True);record=home/'record.json'
             helper.write_text("from pathlib import Path\nimport os,json\ndef route(root,args,**kwargs):\n Path(os.environ['RECORD']).write_text(json.dumps({k:str(v) for k,v in kwargs['input_files'].items()}))\n return 17\n")
             with patch.object(pool,'ROOT',root),patch.object(pool.Path,'home',return_value=home),patch.dict(os.environ,{'_NUXIE_POOL_NESTED':'0','NUXIE_CI_RUNNER_POLICY_VERSION':'0','NUXIE_HOMELAB':'1','NUXIE_EXECUTION':'pool','RECORD':str(record)}):
-                self.assertEqual(pool.dispatch('gradle',['-p',str(root),':example-app:verifyDebugApk16KiB']),17)
-                self.assertEqual(json.loads(record.read_text())['example-app/build/outputs'],str(root/'example-app/build/outputs'))
+                self.assertEqual(pool.dispatch('gradle',['-p',str(root),':example-app:verifyDebugApk16KiB',':example-app:verifyReleaseBundleConfig16KiB']),17)
+                declared=json.loads(record.read_text())
+                self.assertEqual(declared['example-app/build/outputs'],str(root/'example-app/build/outputs'))
+                self.assertEqual(declared['build/reports'],str(root/'build/reports'))
 
     def test_portable_and_platform_requirements(self):
         platform, tools = pool.selection('sdk', ['test'])
