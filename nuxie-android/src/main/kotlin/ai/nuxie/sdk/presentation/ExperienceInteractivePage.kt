@@ -45,6 +45,8 @@ internal class ExperienceInteractivePage private constructor(
     private val loggedRemovedWrites = mutableSetOf<String>()
     private val collapsed = mutableSetOf<String>()
     private var liveStep: Pair<String, String?>? = null
+    /** The Screen on top, which owns an event several rows share (F1). */
+    private var activeRow: String? = null
     private var closed = false
     private var failure: Throwable? = null
 
@@ -90,6 +92,14 @@ internal class ExperienceInteractivePage private constructor(
         require(screenId !in mounted && index == mounted.size) { "New page rows must append" }
         artboard.insertDefaultListItem(contract.listPath, index, valuesOnLane(screenId))
         mounted.add(screenId)
+        if (activeRow == null) activeRow = screenId
+    }
+
+    suspend fun selectActive(screenId: String) = lane.call { selectActiveOnLane(screenId) }
+
+    internal fun selectActiveOnLane(screenId: String) = checked {
+        require(screenId in mounted) { "Unknown page row" }
+        activeRow = screenId
     }
 
     suspend fun takeIncoming(screenId: String, source: String, isBack: Boolean) =
@@ -373,7 +383,7 @@ internal class ExperienceInteractivePage private constructor(
     internal fun captureOnLane(outcome: NuxiePlayerStepOutcome, correlationId: ULong): Step = checked {
         val captures = mounted.associateWith { row(it).values.captureSnapshot(outcome.viewModelChanges) }
         val snapshots = captures.mapValues { it.value.values }
-        val owners = outcome.events.map { owner(it, snapshots) }
+        val owners = outcome.events.map { owner(it, snapshots, activeRow) }
         val projected = snapshots.mapValues { (id, snapshot) ->
             val events = outcome.events.filterIndexed { index, _ -> owners[index] == id }
             val row = row(id)
@@ -501,9 +511,14 @@ internal class ExperienceInteractivePage private constructor(
         internal fun journeyValues(values: Map<String, NuxieViewModelScalarValue>): Map<String, NuxieViewModelScalarValue> =
             values.filterKeys { it.substringBefore('/') !in setOf("screen", "env") }
 
-        internal fun owner(event: NuxieRuntimeEvent, snapshots: Map<String, NuxieViewModelSnapshot>): String? =
-            snapshots.keys.singleOrNull { event.sourceViewModelInstanceId != 0L &&
-                snapshots.getValue(it).containsInstance(event.sourceViewModelInstanceId) }
+        internal fun owner(event: NuxieRuntimeEvent, snapshots: Map<String, NuxieViewModelSnapshot>, active: String?): String? {
+            if (event.sourceViewModelInstanceId == 0L) return null
+            val matches = snapshots.keys.filter { snapshots.getValue(it).containsInstance(event.sourceViewModelInstanceId) }
+            if (matches.size == 1) return matches.single()
+            // An instance several rows link, such as an item of a shared Experience
+            // list, belongs to the Screen on top when it is one of them (F1).
+            return active?.takeIf { it in matches }
+        }
 
         internal fun resolveCompletions(waiters: MutableMap<CompletableDeferred<Unit>, String>, events: List<NuxieRuntimeEvent>) {
             val names = events.map { it.name }.toSet()
