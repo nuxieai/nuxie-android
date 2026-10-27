@@ -4,8 +4,6 @@ import ai.nuxie.sdk.experiences.ExperiencePageHostContract.Style
 import ai.nuxie.sdk.logging.NuxieLog
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** Page mutations in a batch run on one native lane, before another advance or draw. */
@@ -45,14 +43,12 @@ internal object ExperiencePageStep {
             var loggedPresentationTimeout = false
             suspend fun awaitHalf(completions: List<Deferred<Unit>>, budget: Long) {
                 val presented = withTimeoutOrNull(budget) { operations.present(); true } == true
-                currentCoroutineContext().ensureActive()
                 if (presented) operations.wait(completions, budget)
                 else if (!loggedPresentationTimeout) {
                     loggedPresentationTimeout = true
                     NuxieLog.w("ExperiencePageStep", "Experience phase presentation watchdog expired", null,
                         NuxieLog.sensitive("watchdogMs", budget))
                 }
-                currentCoroutineContext().ensureActive()
             }
             val exiting = listOf(source to ExperienceScreenLifecycle.Phase.EXITING)
             val entering = listOf(target to ExperienceScreenLifecycle.Phase.ENTERING)
@@ -122,9 +118,7 @@ internal object ExperiencePageStep {
             // step_end commands arrive on the next player step. Deliver that result
             // while the outgoing row still owns host commands, even after retirement.
             operations.drain()
-            currentCoroutineContext().ensureActive()
             operations.hidden()
-            currentCoroutineContext().ensureActive()
             operations.active()
         } finally { operations.input(true) }
     }

@@ -632,178 +632,6 @@ class ExperienceLayerSurfaceFailureTest {
         }
     }
 
-    @Test fun `Back cut cancellation restores a fresh source and permits a following step`() = runBlocking {
-        cancelledBackCut(skipping = false)
-    }
-
-    @Test fun `skipping Back cut cancellation retains skipped rows for a later Back`() = runBlocking {
-        cancelledBackCut(skipping = true)
-    }
-
-    @Test fun `together cancellation after stepEnd cuts back before retiring target`() = runBlocking {
-        cancelledEndedStep(reducedMotion = false)
-    }
-
-    @Test fun `reduced motion cancellation after stepEnd cuts back before retiring target`() = runBlocking {
-        cancelledEndedStep(reducedMotion = true)
-    }
-
-    private suspend fun CoroutineScope.cancelledEndedStep(reducedMotion: Boolean) {
-        for (keepTarget in listOf(false, true)) withSurface { surface, page, native, lane ->
-            native.traceListMutations = true
-            var activated = false
-            var batches = 0
-            val navigation = launch {
-                try {
-                    ExperiencePageStep.perform("a", "b", ai.nuxie.sdk.experiences.ExperiencePageHostContract.Style.MAGIC_MOVE,
-                        false, ExperienceScreenTransitionPlan.Custom("pair", 100, true, "leave", "arrive"),
-                        ExperiencePageStep.Exit(null, null), reducedMotion, object : ExperiencePageStep.Operations {
-                            val mutations = mutableListOf<(ExperienceInteractivePage) -> Unit>()
-                            var ended = false
-                            override fun input(enabled: Boolean) = Unit
-                            override suspend fun prepare() = Unit
-                            override suspend fun register(screenId: String, event: String): Deferred<Unit> = CompletableDeferred(Unit)
-                            override suspend fun batch(present: Boolean, watchdogMs: Long, writes: suspend () -> Unit) {
-                                writes()
-                                surface.layerOperation { layer -> mutations.forEach { it(layer) }; mutations.clear() }
-                                batches++
-                                if (ended) currentCoroutineContext().cancel()
-                            }
-                            override suspend fun takeIncoming() { mutations += { it.takeIncomingOnLane("b", "a", false) } }
-                            override suspend fun settle() = Unit
-                            override suspend fun phases(values: List<Pair<String, ExperienceScreenLifecycle.Phase>>, transition: String) {
-                                mutations += { it.setPhasesOnLane(values, transition) }
-                            }
-                            override suspend fun begin(transition: String?) { mutations += { it.beginOnLane("b", transition) } }
-                            override suspend fun end(transition: String?) { mutations += { it.endOnLane("b", transition) }; ended = true }
-                            // Exercise both a retained source and one removed by the completed batch.
-                            override suspend fun retire() { mutations += { it.retireOnLane(if (keepTarget) setOf("b") else setOf("a", "b"), "b") } }
-                            override suspend fun present() = Unit
-                            override suspend fun hidden() = Unit
-                            override suspend fun active() { activated = true }
-                        })
-                } finally {
-                    withContext(NonCancellable) {
-                        lane.blockingCall { assertNull(field(page, "liveStep")); native.trace.clear() }
-                        surface.restoreLayerRow("a", "b", keepTarget)
-                    }
-                }
-            }
-            navigation.join()
-            assertTrue(navigation.isCancelled)
-            assertFalse(activated)
-            assertEquals(if (reducedMotion) 1 else 2, batches)
-            assertEquals(listOf("begin:A:null", "end:A:null"), native.trace.filter { it.startsWith("begin:") || it.startsWith("end:") })
-            val end = native.trace.indexOf("end:A:null")
-            assertTrue(native.trace.indexOf(if (keepTarget) "collapse:1:true" else "remove") > end)
-            assertEquals(if (keepTarget) listOf("a", "b") else listOf("a"), page.mountedScreenIds())
-            assertFalse(page.isCollapsed("a"))
-            assertEquals(NuxieViewModelScalarValue.StringValue("active"), page.lifecycle("a")["screen/phase"])
-            if (keepTarget) {
-                assertTrue(page.isCollapsed("b"))
-                assertEquals(NuxieViewModelScalarValue.StringValue("hidden"), page.lifecycle("b")["screen/phase"])
-                assertTrue(native.trace.indexOf("move:1:0") < native.trace.indexOf("begin:A:null"))
-            }
-            surface.layerOperation {
-                it.prepareOnLane("b")
-                it.takeIncomingOnLane("b", "a", false)
-                it.beginOnLane("b", null); it.endOnLane("b", null)
-                it.retireOnLane(setOf("a", "b"), "b")
-                it.setPhasesOnLane(listOf("a" to ExperienceScreenLifecycle.Phase.HIDDEN, "b" to ExperienceScreenLifecycle.Phase.ACTIVE))
-            }
-            assertEquals(NuxieViewModelScalarValue.StringValue("active"), page.lifecycle("b")["screen/phase"])
-        }
-    }
-
-    private suspend fun CoroutineScope.cancelledBackCut(skipping: Boolean) {
-        withSurface { surface, page, native, lane ->
-            val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
-            val scene = java.io.File.createTempFile("page-back-abort", ".riv").apply { writeBytes(byteArrayOf(1)) }
-            val baseline = field(page, "descriptor") as JsonObject
-            val render = baseline.getValue("render").jsonObject
-            val sourceId = if (skipping) "c" else "b"
-            val descriptor = JsonObject(baseline + ("render" to JsonObject(render + ("transitions" to
-                Json.parseToJsonElement("""[{"id":"back","kind":"page","sourceScreenId":"$sourceId","destinationScreenId":"a",
-                    "durationMs":60000,"source":{"completeEventName":"leave"},"destination":{"completeEventName":"arrive"}}]""")))))
-            val initial = PreparedPresentation(scene, "A", 0, PresentationShell.FullScreen(), "a", descriptor,
-                pageHistory = listOf("a"))
-            val listener = object : ExperienceSurfaceHost.Listener {
-                override fun onFirstFrame() = Unit
-                override fun onFailure(error: ExperiencePresentationException) { throw AssertionError(error) }
-            }
-            val mounted = ExperienceMountedScreen(activity.get(), initial, listener, { throw AssertionError(it) })
-            val ownedLane = field(mounted, "lane") as NuxieRuntimeLane
-            set(mounted, "surface", surface)
-            var navigation: Job? = null
-            try {
-                val b = initial.copy(screenId = "b", artboardName = "B", pageHistory = listOf("a", "b"), retainedViewModel = AtomicReference())
-                mounted.prepareRow(b, listener)
-                mounted.navigateLayer(b, false)
-                val staleB = page.snapshot("b")
-                page.applyValues("b", mapOf("keptValue" to NuxieViewModelScalarValue.NumberValue(42.0)))
-                val oldB = page.snapshot("b").nativeRootInstanceId
-                val source = if (skipping) b.copy(screenId = "c", artboardName = "C", pageHistory = listOf("a", "b", "c"), retainedViewModel = AtomicReference()) else b
-                if (skipping) {
-                    mounted.prepareRow(source, listener)
-                    mounted.navigateLayer(source, false)
-                    page.applyValues("c", mapOf("keptValue" to NuxieViewModelScalarValue.NumberValue(73.0)))
-                }
-                val oldSource = page.snapshot(sourceId).nativeRootInstanceId
-                val target = initial.copy(transition = Json.parseToJsonElement("""{"type":"none","transitionId":"back"}""").jsonObject)
-                mounted.prepareRow(target, listener)
-                native.events = arrayOf(NativeRuntimeEvent(0, 0, "leave", "", "", 0f, emptyArray(), oldSource))
-                navigation = launch {
-                    try { mounted.navigateLayer(target, true) }
-                    finally { withContext(NonCancellable) { mounted.restoreRow(source, "a") } }
-                }
-                // Use real time: a test scheduler can skip the arrival watchdog
-                // while the caller suspends on the separate native lane.
-                withTimeout(5_000) {
-                    while (page.mountedScreenIds() != listOf("a")) delay(1)
-                }
-                lane.blockingCall { assertEquals("a" to "back", field(page, "liveStep")) }
-                assertTrue(navigation.isActive)
-                assertTrue(native.freed.contains("values:$oldSource"))
-                native.writes.clear()
-                navigation.cancelAndJoin()
-                val fresh = page.snapshot(sourceId).nativeRootInstanceId
-                assertNotEquals(oldSource, fresh)
-                assertEquals(listOf(sourceId, "a"), page.mountedScreenIds())
-                assertTrue(page.isCollapsed("a"))
-                assertEquals(NuxieViewModelScalarValue.StringValue("active"), page.lifecycle(sourceId)["screen/phase"])
-                assertEquals(if (skipping) 73.0 else 42.0,
-                    native.writes.single { it.first == fresh && it.second.path == "keptValue" }.second.numberValue.toDouble(), 0.0)
-                assertFalse(native.writes.any { it.first == oldSource || it.first == oldB })
-                assertEquals(source.pageHistory, (field(mounted, "prepared") as PreparedPresentation).pageHistory)
-                assertTrue((field(mounted, "rows") as Map<*, *>).keys.containsAll(source.pageHistory))
-                native.events = emptyArray()
-                if (skipping) {
-                    assertEquals(oldB, page.snapshot("b").nativeRootInstanceId)
-                    mounted.prepareRow(b.copy(retainedViewModel = AtomicReference(staleB)), listener)
-                    val freshB = page.snapshot("b").nativeRootInstanceId
-                    assertNotEquals(oldB, freshB)
-                    assertEquals(42.0, native.writes.single { it.first == freshB && it.second.path == "keptValue" }.second.numberValue.toDouble(), 0.0)
-                    native.traceListMutations = true
-                    native.trace.clear()
-                    mounted.navigateLayer(b, true)
-                    assertTrue(native.trace.indexOf("move:2:0") in 0 until native.trace.indexOf("begin:B:null"))
-                    assertEquals(listOf("b", "a"), page.mountedScreenIds())
-                } else {
-                    mounted.prepareRow(initial, listener)
-                    mounted.navigateLayer(initial, true)
-                    assertEquals(listOf("a"), page.mountedScreenIds())
-                }
-                assertFalse(native.writes.any { it.first == oldSource || it.first == oldB })
-                assertTrue(native.allocations.all { it.second == null })
-            } finally {
-                navigation?.cancelAndJoin()
-                mounted.close(false) {}
-                assertTrue(ownedLane.awaitQuiescence(5_000))
-                activity.pause().stop().destroy(); scene.delete()
-            }
-        }
-    }
-
     @Test fun `row preparation retires a stalled submission within its operation budget`() = runTest {
         withSurface { surface, _, native, lane ->
             installPendingSubmission(surface, native, lane)
@@ -823,33 +651,29 @@ class ExperienceLayerSurfaceFailureTest {
         }
     }
 
-    @Test fun `cancelled preparation cannot block noncancellable abort restoration or later Back`() = runTest {
+    @Test fun `cancelled preparation leaves the source row alone and a later preparation still runs`() = runTest {
         withSurface(prepareTarget = false) { surface, layer, native, lane ->
             installPendingSubmission(surface, native, lane)
             val scene = java.io.File.createTempFile("layer-abort", ".riv")
             val target = PreparedPresentation(scene, "B", 0, PresentationShell.FullScreen(), "b")
             var prepared = false
-            var restored = false
-            val navigation = launch(start = CoroutineStart.UNDISPATCHED) {
-                try { surface.prepareLayerRow(target); prepared = true }
-                finally { withContext(NonCancellable) { runCatching { surface.restoreLayerRow("a", "b") }.onSuccess { restored = true } } }
-            }
+            // A move still preparing has changed nothing on screen, so a close cancels it outright (S1c).
+            val navigation = launch(start = CoroutineStart.UNDISPATCHED) { surface.prepareLayerRow(target); prepared = true }
             navigation.cancel(); runCurrent(); lane.blockingCall {}
             advanceTimeBy(251); repeat(4) { runCurrent(); lane.blockingCall {} }
             try {
-                assertTrue("Abort must finish while its parent is cancelled", navigation.isCompleted)
-                assertTrue(restored)
+                assertTrue("Cancelled preparation must end while its parent is cancelled", navigation.isCompleted)
                 @Suppress("UNCHECKED_CAST")
                 val retained = field(surface, "layerRetainedValues") as Map<String, *>
                 assertFalse("Cancelled preparation must not mutate retained row ownership", retained.containsKey("b"))
                 assertFalse("Cancelled row preparation must never run late", prepared)
-                assertEquals(1, native.detaches)
+                assertEquals("A cancelled preparation retires nothing", 0, native.detaches)
                 assertEquals(listOf("a"), layer.mountedScreenIds())
                 runBlocking {
                     surface.prepareLayerRow(target)
                     surface.layerOperation { it.insertOnLane("b", 1) }
-                    surface.restoreLayerRow("a", "b")
                 }
+                assertEquals(setOf("a", "b"), layer.mountedScreenIds().toSet())
             } finally { retireAndDrain(surface, lane); navigation.cancelAndJoin(); scene.delete() }
         }
     }

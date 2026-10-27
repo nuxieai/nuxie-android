@@ -12,6 +12,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
@@ -44,7 +45,7 @@ class ExperiencePagePresentationHeightTest {
 
     private val fitContent = PresentationShell.Sheet(PresentationShell.Sheet.Detent.FIT_CONTENT, true)
 
-    @Test fun `mounted page delivers heights through active Activity Screen after navigation rollback Back and recreation`() = runBlocking {
+    @Test fun `mounted page delivers heights through active Activity Screen after navigation Back and recreation`() = runBlocking {
         val scene = java.io.File.createTempFile("page-activity-height", ".riv").apply { writeBytes(byteArrayOf(1)) }
         val descriptor = Json.parseToJsonElement("""{"state":{},"responses":{},"ruleGroups":[],
             "leg":{"screens":[{"id":"a","defaultViewModelName":"A"},{"id":"b","defaultViewModelName":"B"}]},
@@ -84,8 +85,7 @@ class ExperiencePagePresentationHeightTest {
 
             val back = a.copy(pageHistory = listOf("a"), isBack = true,
                 transition = Json.parseToJsonElement("""{"type":"magic-move","transitionId":"pair"}""").jsonObject)
-            page.navigate(back, cancel = true)
-            page.text("Still B\nSecond\nThird\nFourth")
+            page.text("Restored\nSecond\nThird\nFourth")
             page.frame()
             page.assertHeight(520f)
             page.navigate(back)
@@ -161,6 +161,15 @@ class ExperiencePagePresentationHeightTest {
                 p.frame(); p.assertHeight(480f)
                 p.pop(); a.assertHeight(152f)
             } finally { nested.close() }
+        }
+    }
+
+    @Test fun `a started page close lands even when its caller gives up`() = runBlocking {
+        withPushPages { a, p, _ ->
+            a.start(); a.frame(); p.start(); p.frame(); p.assertHeight(400f)
+            p.popWhileItsCallerGivesUp()
+            a.assertHeight(152f)
+            a.frame(); a.assertHeight(152f)
         }
     }
 
@@ -311,6 +320,24 @@ class ExperiencePagePresentationHeightTest {
             assertFalse(activity.isFinishing)
         }
 
+        /** A close's caller is cancelled after the close started (S1c): the close still lands. */
+        suspend fun popWhileItsCallerGivesUp() {
+            set(mounted, "reduceMotionEnabled", true)
+            coroutineScope {
+                val close = launch(start = CoroutineStart.UNDISPATCHED) {
+                    (current as PresentationScreenHandle).dismissPagesFromJourney(1)
+                }
+                assertFalse("The close is still running", close.isCompleted)
+                assertNotNull("The close has started", field(activity, "closingLayer"))
+                close.cancel()
+                withTimeout(5_000) {
+                    while (!close.isCompleted) { shadowOf(Looper.getMainLooper()).idle(); delay(1) }
+                }
+            }
+            assertEquals("The started close lands: one page is left", 1, (field(activity, "layers") as List<*>).size)
+            assertFalse(activity.isFinishing)
+        }
+
         suspend fun cutCovered(target: PreparedPresentation) {
             prepared = checkNotNull(activityCall { (current as PresentationScreenHandle).cutCoveredPage(target) })
         }
@@ -345,7 +372,7 @@ class ExperiencePagePresentationHeightTest {
                 mapOf("label" to NuxieViewModelScalarValue.StringValue(value)))
         }
 
-        suspend fun navigate(target: PreparedPresentation, cancel: Boolean = false, frameBeforeCommit: Boolean = false) {
+        suspend fun navigate(target: PreparedPresentation, frameBeforeCommit: Boolean = false) {
             val next = screen(target)
             set(next, "mounted", mounted)
             set(next, "view", field(current, "view"))
@@ -364,20 +391,15 @@ class ExperiencePagePresentationHeightTest {
                 // No completion events: the normal watchdog lands this step after the asserted frame.
                 step.await()
             } else mounted.navigateLayer(target, target.isBack)
-            if (cancel) {
-                mounted.restoreRow(prepared, checkNotNull(target.screenId))
-                screenClass.getDeclaredMethod("close", Boolean::class.javaPrimitiveType).apply { isAccessible = true }.invoke(next, false)
-            } else {
-                // Navigation.activate transfers the page, replaces the layer Screen and closes the source.
-                if (frameBeforeCommit) frame()
-                set(layer, "screen", next)
-                screenClass.getDeclaredMethod("takeLayerOwnership", screenClass).apply { isAccessible = true }
-                    .invoke(next, current)
-                screenClass.getDeclaredMethod("close", Boolean::class.javaPrimitiveType).apply { isAccessible = true }.invoke(current, false)
-                current = next
-                prepared = target
-                set(activity, "currentScreen", next)
-            }
+            // Navigation.activate transfers the page, replaces the layer Screen and closes the source.
+            if (frameBeforeCommit) frame()
+            set(layer, "screen", next)
+            screenClass.getDeclaredMethod("takeLayerOwnership", screenClass).apply { isAccessible = true }
+                .invoke(next, current)
+            screenClass.getDeclaredMethod("close", Boolean::class.javaPrimitiveType).apply { isAccessible = true }.invoke(current, false)
+            current = next
+            prepared = target
+            set(activity, "currentScreen", next)
         }
 
         fun assertHeight(expected: Float) {

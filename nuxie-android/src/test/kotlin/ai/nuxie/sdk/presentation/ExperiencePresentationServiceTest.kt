@@ -764,7 +764,7 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
-    fun `cancelled page step on a blocked lane reaches abort and releases navigation`() = runTest {
+    fun `started page step on a blocked lane fails at its native limit and releases navigation`() = runTest {
         val release = renderedJourneyRelease("text-input-navigation.json")
         val launched = mutableListOf<String>()
         val service = service(this, launch = launched::add)
@@ -795,6 +795,8 @@ class ExperiencePresentationServiceTest {
         val stepStarted = CompletableDeferred<Unit>()
         var stepFailure: Throwable? = null
         var aborted = false
+        val moves = checkNotNull(PresentationRegistry.resolve(id)).moves
+        val sourceId = id
         val host = object : PresentationScreenHandle {
             override fun requestCloseFromService(reason: CloseReason) = true
             override fun screenCloseReason(): CloseReason? = null
@@ -803,12 +805,20 @@ class ExperiencePresentationServiceTest {
                 if (aborted) return null
                 return object : PreparedScreenNavigation {
                     override suspend fun awaitExit() {
+                        // As the Activity's Navigation: its first change is admitted, then it lands or fails (S1c).
+                        check(moves.markStarted())
                         stepStarted.complete(Unit)
-                        try { mounted.navigateLayer(source.copy(screenId = "b"), false) }
-                        catch (error: Throwable) { stepFailure = error; throw error }
+                        withContext(NonCancellable) {
+                            try { mounted.navigateLayer(source.copy(screenId = "b"), false) }
+                            catch (error: Throwable) { stepFailure = error; throw error }
+                        }
                     }
                     override fun activate() = Unit
-                    override suspend fun abort() { aborted = true }
+                    override suspend fun abort() {
+                        aborted = true
+                        // As the Activity's Navigation: a started move that did not take over ends the Experience.
+                        PresentationRegistry.reportFailure(sourceId, checkNotNull(stepFailure))
+                    }
                 }
             }
         }
@@ -816,34 +826,37 @@ class ExperiencePresentationServiceTest {
         lane.enqueue { entered.countDown(); check(unblock.await(30, java.util.concurrent.TimeUnit.SECONDS)) }
         assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
         val next = async {
-            service.presentJourney(testPresentationFences(), release, "screen_details", "journey-1", "customer-1", null,
-                acquire = { acquired(release.identity, destinationLease) }, onOutcome = {})
+            runCatching {
+                service.presentJourney(testPresentationFences(), release, "screen_details", "journey-1", "customer-1", null,
+                    acquire = { acquired(release.identity, destinationLease) }, onOutcome = {})
+            }
         }
         try {
             stepStarted.await()
-            next.cancel()
+            // A cancelled caller cannot stop a started step: it lands or fails on its own.
             runCurrent()
-            // Native ownership must survive the caller giving up on the stalled lane.
+            // Native ownership must survive the step giving up on the stalled lane.
             lane.afterTermination { ownerReleased.set(true) }
-            advanceTimeBy(4_999)
+            advanceTimeBy(5_000)
             runCurrent()
-            assertFalse("Cleanup retains its five-second retirement budget", aborted)
-            advanceTimeBy(2)
+            assertFalse("The step keeps its native limit after its 250 ms wait", aborted)
+            assertFalse(next.isCompleted)
+            // The stalled call fails at its limit, and the step's cleanup on the same lane has its own.
+            advanceTimeBy(5_500)
             runCurrent()
-            assertTrue("Page-step cancellation must reach Navigation.abort within five seconds", aborted)
-            assertTrue("presentJourney must finish cancellation", next.isCompleted)
-            assertTrue("The page step must preserve cancellation", stepFailure is CancellationException)
-            val failure = stepFailure!!.suppressed.single() as ExperiencePresentationException
+            assertTrue("A failed started step must reach Navigation.abort within its native limits", aborted)
+            assertTrue("presentJourney must finish with the failure", next.isCompleted)
+            assertTrue(next.await().isFailure)
+            val failure = stepFailure as ExperiencePresentationException
             assertEquals(ExperiencePresentationException.Reason.HOST_FAILED, failure.reason)
             assertTrue(failure.cause is kotlinx.coroutines.TimeoutCancellationException)
-            assertFalse("The cancelled page step must release the move slot", checkNotNull(PresentationRegistry.resolve(id)).moves.isBusy)
+            assertFalse("The failed page step must release the move slot", moves.isBusy)
             assertFalse(ownerReleased.get())
-            assertFalse(sourceLease.closed.get())
             assertTrue(destinationLease.closed.get())
 
             val later = async {
-                service.presentJourney(testPresentationFences(), release, "screen_details", "journey-1", "customer-1", null,
-                    acquire = { acquired(release.identity, Lease()) }, onOutcome = {})
+                service.presentJourney(testPresentationFences(), release, "screen_details", "journey-1", "customer-1",
+                    service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) }, onOutcome = {})
             }
             runCurrent()
             assertEquals("A later presentation must start while the old lane remains blocked", 2, launched.size)
@@ -859,6 +872,85 @@ class ExperiencePresentationServiceTest {
             service.dismissFromHost("customer-1")
         }
         assertTrue(ownerReleased.get())
+    }
+
+    @Test
+    fun `a close during a started move lets it land, then closes the Screen it landed on`() = runTest {
+        val release = renderedJourneyRelease("text-input-navigation.json")
+        val launched = mutableListOf<String>()
+        val service = service(this, launch = launched::add)
+        val initial = async {
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) }, onOutcome = {})
+        }
+        runCurrent()
+        val id = launched.single()
+        PresentationRegistry.reportFirstFrame(id)
+        initial.await()
+
+        val moves = checkNotNull(PresentationRegistry.resolve(id)).moves
+        val sourceId = id
+        val trace = mutableListOf<String>()
+        val lands = CompletableDeferred<Unit>()
+        var landedId: String? = null
+        var navigating = false
+        var detachAfterActivation = false
+        val host = object : PresentationScreenHandle {
+            override fun requestCloseFromService(reason: CloseReason) = true.also {
+                if (reason == CloseReason.UserDismissed) trace += "closed the source"
+            }
+            override fun screenCloseReason(): CloseReason? = null
+            // As the Activity's Screen: during a navigation the source stays until the move's Screen takes over.
+            override fun finishAfterServiceClose() {
+                if (navigating) detachAfterActivation = true else PresentationRegistry.detach(sourceId, this)
+            }
+            override suspend fun prepareNavigation(id: String, content: PreparedPresentation): PreparedScreenNavigation {
+                landedId = id
+                navigating = true
+                val source = this
+                return object : PreparedScreenNavigation {
+                    override suspend fun awaitExit() {
+                        check(moves.markStarted())
+                        trace += "started"
+                        withContext(NonCancellable) { lands.await() }
+                        trace += "landed"
+                    }
+                    override fun activate() {
+                        trace += "activated"
+                        // As the Activity's activation, which publishes the landed Screen's prepared frame.
+                        PresentationRegistry.reportFirstFrame(checkNotNull(landedId))
+                        navigating = false
+                        if (detachAfterActivation) PresentationRegistry.detach(sourceId, source)
+                    }
+                    override suspend fun abort() { trace += "aborted"; navigating = false }
+                }
+            }
+        }
+        assertTrue(PresentationRegistry.attach(id, host))
+        val next = async {
+            runCatching {
+                service.presentJourney(testPresentationFences(), release, "screen_details", "journey-1", "customer-1", null,
+                    acquire = { acquired(release.identity, Lease()) }, onOutcome = {})
+            }
+        }
+        try {
+            runCurrent()
+            assertEquals(listOf("started"), trace)
+            service.dismiss(CloseReason.UserDismissed)
+            runCurrent()
+            assertEquals("The close waits for the started move", listOf("started"), trace)
+            assertFalse(next.isCompleted)
+            lands.complete(Unit)
+            runCurrent()
+            assertTrue(next.await().exceptionOrNull()?.stackTraceToString(), next.await().isSuccess)
+            assertEquals("The move lands, and the close acts on the Screen it landed on", listOf("started", "landed", "activated"), trace)
+            assertNull("The landed Screen is closed", PresentationRegistry.resolve(checkNotNull(landedId)))
+            assertFalse(moves.isBusy)
+        } finally {
+            lands.complete(Unit)
+            next.cancelAndJoin()
+            service.dismissFromHost("customer-1")
+        }
     }
 
     @Test

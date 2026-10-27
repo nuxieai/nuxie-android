@@ -49,16 +49,6 @@ internal class ExperienceScreenViewTransition(
         animator?.cancel()
     }
 
-    fun restoreSource() {
-        cancel()
-        source.alpha = 1f
-        source.translationX = 0f
-        source.translationY = 0f
-        target.alpha = 0f
-        target.translationX = 0f
-        target.translationY = 0f
-    }
-
     internal fun applyProgress(progress: Float) {
         val fraction = progress.coerceIn(0f, 1f)
         when (kind) {

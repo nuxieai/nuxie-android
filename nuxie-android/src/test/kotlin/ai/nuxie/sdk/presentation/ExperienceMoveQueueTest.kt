@@ -3,7 +3,9 @@ package ai.nuxie.sdk.presentation
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -121,6 +123,80 @@ class ExperienceMoveQueueTest {
         assertFalse("a stopped Activity ends the wait", stoppedWait.await())
         held.complete(Unit)
         second.join()
+    }
+
+    @Test
+    fun `a move's first change is admitted only until a close revokes the queue`() = runTest {
+        val queue = ExperienceMoveQueue()
+        val lands = CompletableDeferred<Unit>()
+        val started = launch { queue.run { assertTrue(queue.markStarted()); lands.await() } }
+        runCurrent()
+        assertSame(queue.running, queue.revoke())
+        assertTrue("a move that started before the close stays started", checkNotNull(queue.running).started)
+        lands.complete(Unit)
+        started.join()
+
+        val closing = ExperienceMoveQueue()
+        val prepared = CompletableDeferred<Unit>()
+        var admitted: Boolean? = null
+        val preparing = launch { closing.run { prepared.await(); admitted = closing.markStarted() } }
+        runCurrent()
+        closing.revoke()
+        prepared.complete(Unit)
+        preparing.join()
+        assertEquals("a move still preparing never starts once the Experience is closing", false, admitted)
+        assertTrue("work outside a move proceeds while the Experience is open", ExperienceMoveQueue().markStarted())
+        assertFalse(closing.markStarted())
+    }
+
+    @Test
+    fun `a close lets a started move land first and does not wait for one still preparing`() = runTest {
+        val queue = ExperienceMoveQueue()
+        val trace = mutableListOf<String>()
+        val lands = CompletableDeferred<Unit>()
+        val move = launch { queue.run { queue.markStarted(); lands.await(); trace += "landed" } }
+        runCurrent()
+        val close = launch { queue.closeAfterLanding(); trace += "closed" }
+        runCurrent()
+        assertTrue("the close waits for the started move", trace.isEmpty())
+        lands.complete(Unit)
+        move.join(); close.join()
+        assertEquals(listOf("landed", "closed"), trace)
+
+        val preparingQueue = ExperienceMoveQueue()
+        val prepared = CompletableDeferred<Unit>()
+        val preparing = launch { preparingQueue.run { prepared.await() } }
+        runCurrent()
+        val preparingClose = async { preparingQueue.closeAfterLanding() }
+        runCurrent()
+        assertTrue("a move still preparing has changed nothing, so the close does not wait", preparingClose.isCompleted)
+        assertTrue(preparingQueue.isRevoked)
+        prepared.complete(Unit)
+        preparing.join()
+    }
+
+    @Test
+    fun `a close from the started move's own work does not wait on itself`() = runTest {
+        val queue = ExperienceMoveQueue()
+        val result = queue.run { queue.markStarted(); queue.closeAfterLanding(); "closed from inside" }
+        assertEquals("closed from inside", result)
+        assertTrue(queue.isRevoked)
+    }
+
+    @Test
+    fun `a close stops waiting for a wedged started move at its limit`() = runTest {
+        val queue = ExperienceMoveQueue()
+        val wedged = launch { queue.run { queue.markStarted(); awaitCancellation() } }
+        runCurrent()
+        val close = async { queue.closeAfterLanding() }
+        advanceTimeBy(4_999); runCurrent()
+        assertFalse("the close waits within its limit", close.isCompleted)
+        advanceTimeBy(2); runCurrent()
+        assertTrue("past its limit the close proceeds", close.isCompleted)
+        close.await()
+        assertTrue("the wedged move still holds its slot", queue.isBusy)
+        wedged.cancel()
+        wedged.join()
     }
 
     @Test

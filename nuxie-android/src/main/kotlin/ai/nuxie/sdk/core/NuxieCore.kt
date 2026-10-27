@@ -384,7 +384,6 @@ internal class NuxieCore(
                     JourneyPresentationResult.Declined
                 ExperiencePresentationException.Reason.JOURNEY_COMPLETED ->
                     JourneyPresentationResult.Completed
-                ExperiencePresentationException.Reason.LAYER_DISMISSED -> JourneyPresentationResult.Shown
                 ExperiencePresentationException.Reason.PRODUCTS_UNAVAILABLE ->
                     JourneyPresentationResult.ProductsUnavailable
                 else -> JourneyPresentationResult.Failed
