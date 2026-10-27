@@ -642,7 +642,7 @@ internal class ExperienceSurfaceHost(
         }
     }
 
-    /** One ordinary zero-time step, its result delivered as a frame's would be (R3c). */
+    /** One ordinary zero-time step, its result delivered as a frame's would be (R3c, S8). */
     internal fun stepZeroDeltaOnLane() {
         val correlationId = nextCorrelationId
         nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL

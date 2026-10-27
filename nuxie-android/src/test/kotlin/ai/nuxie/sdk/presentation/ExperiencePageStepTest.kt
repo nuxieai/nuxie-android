@@ -34,6 +34,7 @@ class ExperiencePageStepTest {
         override suspend fun wait(completions: List<Deferred<Unit>>, milliseconds: Long) { events += "wait:${completions.size}:$milliseconds" }
         override suspend fun hidden() { events += "hidden" }
         override suspend fun active() { events += "active" }
+        override suspend fun drain() { events += "drain"; assertFalse(enabled) }
     }
     private suspend fun perform(trace: Trace, style: Style, plan: ExperienceScreenTransitionPlan.Custom? = this.plan,
         reduced: Boolean = false, target: String = "b", exit: ExperiencePageStep.Exit = ExperiencePageStep.Exit("declared", 350),
@@ -45,7 +46,7 @@ class ExperiencePageStepTest {
             val trace = Trace(); perform(trace, style)
             assertEquals(listOf("input:false", "prepare", "batch", "take", "settle", "register:a:leave", "register:b:arrive",
                 "a:exiting,b:entering:pair", "begin:pair", "commit:true", "present", "wait:2:650", "batch",
-                "end:pair", "retire", "a:hidden,b:active:", "commit:false", "hidden", "active", "input:true"), trace.events)
+                "end:pair", "retire", "a:hidden,b:active:", "commit:false", "drain", "hidden", "active", "input:true"), trace.events)
         }
     }
     @Test fun `cut with transition waits for each published half and swaps after begin`() = runBlocking {
@@ -53,7 +54,7 @@ class ExperiencePageStepTest {
         assertEquals(listOf("input:false", "prepare", "register:a:leave", "batch", "a:exiting:pair", "commit:true",
             "present", "wait:1:650", "batch", "take", "settle", "register:b:arrive", "b:entering:pair", "begin:pair", "retire",
             "a:hidden:", "commit:true", "present", "wait:1:650", "batch", "end:pair", "b:active:", "commit:false",
-            "hidden", "active", "input:true"), trace.events)
+            "drain", "hidden", "active", "input:true"), trace.events)
     }
     @Test fun `cut without transition uses declared exit and null step name with no arrival wait`() = runBlocking {
         val trace = Trace(); perform(trace, Style.NONE, plan = null)
@@ -73,14 +74,14 @@ class ExperiencePageStepTest {
         for (style in listOf(Style.MAGIC_MOVE, Style.FADE, Style.NONE)) {
             val trace = Trace(); perform(trace, style, reduced = true)
             assertEquals(listOf("input:false", "prepare", "batch", "take", "settle", "a:exiting:pair", "b:entering:pair",
-                "begin:pair", "end:pair", "retire", "a:hidden,b:active:", "commit:false", "hidden", "active", "input:true"), trace.events)
+                "begin:pair", "end:pair", "retire", "a:hidden,b:active:", "commit:false", "drain", "hidden", "active", "input:true"), trace.events)
         }
     }
     @Test fun `covered cut keeps both rows hidden and settles the woken row before a nameless step`() = runBlocking {
         for (style in listOf(Style.MAGIC_MOVE, Style.FADE, Style.NONE)) {
             val trace = Trace(); perform(trace, style, reduced = style == Style.FADE, coveredCut = true)
             assertEquals(listOf("input:false", "prepare", "batch", "a:hidden,b:hidden:", "take", "settle",
-                "begin:null", "end:null", "retire", "commit:false", "hidden", "active", "input:true"), trace.events)
+                "begin:null", "end:null", "retire", "commit:false", "drain", "hidden", "active", "input:true"), trace.events)
         }
     }
     @Test fun `primitive fade without a published id cuts with a null step name`() = runBlocking {

@@ -498,7 +498,8 @@ class ExperienceLayerSurfaceFailureTest {
                 }
                 // R3c: one ordinary zero-time step once the row is placed, before the step begins.
                 assertEquals(listOf("insert:1", "move:1:0", "step:0.0", "begin:B:null"), native.trace.take(4))
-                assertEquals(1, native.trace.count { it.startsWith("step:") })
+                // The drain's own step comes after the step ends (S8).
+                assertEquals(listOf("step:0.0"), native.trace.dropWhile { !it.startsWith("end:") }.filter { it.startsWith("step:") })
                 assertEquals(listOf("b"), page.mountedScreenIds())
             } finally {
                 native.onStep = {}
@@ -588,6 +589,41 @@ class ExperienceLayerSurfaceFailureTest {
                 assertEquals(listOf("a", "b"), page.mountedScreenIds())
                 assertTrue(page.isCollapsed("a"))
                 assertEquals(NuxieViewModelScalarValue.StringValue("active"), page.lifecycle("b")["screen/phase"])
+            } finally {
+                mounted.close(false) {}
+                assertTrue(ownedLane.awaitQuiescence(5_000))
+                activity.pause().stop().destroy(); scene.delete()
+            }
+        }
+    }
+
+    @Test fun `step end commands reach the Screen the step leaves before the landed Screen takes over`() = runBlocking {
+        withSurface { surface, page, _, lane ->
+            val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
+            val scene = java.io.File.createTempFile("page-drain", ".riv").apply { writeBytes(byteArrayOf(1)) }
+            val descriptor = field(page, "descriptor") as JsonObject
+            val source = PreparedPresentation(scene, "A", 0, PresentationShell.FullScreen(), "a", descriptor,
+                pageHistory = listOf("a"))
+            val target = source.copy(screenId = "b", artboardName = "B", pageHistory = listOf("a", "b"))
+            val received = mutableListOf<Pair<String, List<String>>>()
+            val listener = object : ExperienceSurfaceHost.Listener {
+                override fun onFirstFrame() = Unit
+                override fun onFailure(error: ExperiencePresentationException) { throw AssertionError(error) }
+                override fun onLayerRuntimeStep(screenId: String, outcome: NuxiePlayerStepOutcome, correlationId: ULong,
+                    snapshot: NuxieViewModelSnapshot, saves: List<ExperienceResponseSaveRequest>) {
+                    if (outcome.hostCommands.isNotEmpty()) received += screenId to outcome.hostCommands.map { it.name }
+                }
+            }
+            val mounted = ExperienceMountedScreen(activity.get(), source, listener, { throw AssertionError(it) })
+            val ownedLane = field(mounted, "lane") as NuxieRuntimeLane
+            set(mounted, "surface", surface)
+            try {
+                lane.blockingCall { set(surface, "listener", listener); set(surface, "firstFrameComposed", true) }
+                mounted.prepareRow(target, listener)
+                // The fake runtime queues takeoff at step_begin and landing at step_end.
+                mounted.navigateLayer(target, false)
+                lane.blockingCall { captureAndPublish(surface, page.stepOnLane(0.016)) }
+                assertEquals(listOf("a" to listOf("takeoff", "landing")), received)
             } finally {
                 mounted.close(false) {}
                 assertTrue(ownedLane.awaitQuiescence(5_000))
