@@ -82,6 +82,24 @@ class PoolRoutingTests(unittest.TestCase):
                 self.assertEqual(pool.dispatch('gradle',['-p',str(root),':nuxie-android:compileHostRenderBridge']),17)
                 self.assertIn('nuxie-android/build/host-render/native',json.loads(record.read_text()))
 
+    def test_device_and_host_task_abbreviations_keep_their_requirements(self):
+        with patch.dict(os.environ, {'ANDROID_SERIAL':'emulator-5558'}):
+            platform,tools=pool.selection('gradle',[':nuxie-android:conDebugAndroidTest'])
+            self.assertEqual(platform,'portable');self.assertIn('android-device@emulator-5558',tools)
+        self.assertFalse(pool.device_task('configureCMakeDebug'))
+        for task in ('hRH','hostRenderHa','cHRB'):
+            self.assertTrue(pool.host_render_task(task),task)
+
+    def test_existing_products_are_inputs_to_standalone_verification(self):
+        import json
+        with tempfile.TemporaryDirectory() as temporary:
+            home=Path(temporary).resolve();root=home/'sdk';artifact=root/'example-app/build/outputs/apk/debug/example.apk';artifact.parent.mkdir(parents=True);artifact.write_bytes(b'assembled APK')
+            helper=home/'.local/share/nuxie-homelab/sdk-task.py';helper.parent.mkdir(parents=True);record=home/'record.json'
+            helper.write_text("from pathlib import Path\nimport os,json\ndef route(root,args,**kwargs):\n Path(os.environ['RECORD']).write_text(json.dumps({k:str(v) for k,v in kwargs['input_files'].items()}))\n return 17\n")
+            with patch.object(pool,'ROOT',root),patch.object(pool.Path,'home',return_value=home),patch.dict(os.environ,{'_NUXIE_POOL_NESTED':'0','NUXIE_CI_RUNNER_POLICY_VERSION':'0','NUXIE_HOMELAB':'1','NUXIE_EXECUTION':'pool','RECORD':str(record)}):
+                self.assertEqual(pool.dispatch('gradle',['-p',str(root),':example-app:verifyDebugApk16KiB']),17)
+                self.assertEqual(json.loads(record.read_text())['example-app/build/outputs'],str(root/'example-app/build/outputs'))
+
     def test_portable_and_platform_requirements(self):
         platform, tools = pool.selection('sdk', ['test'])
         self.assertEqual(platform, 'portable')

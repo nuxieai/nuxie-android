@@ -3,6 +3,7 @@
 import importlib.util
 import contextlib
 import os
+import re
 import shlex
 from pathlib import Path
 import subprocess
@@ -58,11 +59,11 @@ def selection(mode, arguments, command=None, selected_platform=None, selected_de
     if (mode == 'gradle' or (mode == 'check' and 'android' in requirements)
             or (SDK == 'android' and mode == 'sdk' and command in ('check', 'lint', 'api-check', 'providers'))):
         requirements.add('java17')
-    if mode == 'gradle' and any(any(word in a.rsplit(':', 1)[-1].lower() for word in ('connected', 'installdebug', 'installrelease', 'uninstall')) for a in gradle_tasks(arguments)):
+    if mode == 'gradle' and any(device_task(a) for a in gradle_tasks(arguments)):
         serial = os.environ.get('ANDROID_SERIAL')
         if not serial: raise ValueError('ANDROID_SERIAL is required for connected pool tests')
         requirements.add('android-device@' + serial)
-    if SDK == 'android' and (command in ('host-render', 'host-render-smoke') or (mode == 'gradle' and any(a.lower() in ('hostrenderharness', 'hostrendersmoke', 'compilehostrenderbridge') for a in gradle_tasks(arguments)))):
+    if SDK == 'android' and (command in ('host-render', 'host-render-smoke') or (mode == 'gradle' and any(host_render_task(a) for a in gradle_tasks(arguments)))):
         requirements.add('native-host@' + sys.platform + '-' + os.uname().machine)
         return ('macos' if sys.platform == 'darwin' else 'linux'), sorted(requirements)
     if mode.startswith('script-'):
@@ -76,6 +77,25 @@ def selection(mode, arguments, command=None, selected_platform=None, selected_de
     if mode == 'prove-runtime-install-recovery': requirements.add('java17')
     if apple: requirements.add('xcode')
     return ('macos' if apple else 'portable'), sorted(requirements)
+
+
+def task_abbreviates(task, name):
+    words = re.findall(r'[A-Z]?[a-z0-9]+', name)
+    pattern = ''.join('(?:' + '|'.join(re.escape(word[:n]) for n in range(len(word), 0, -1)) + ')' for word in words)
+    return re.fullmatch(pattern, task, re.IGNORECASE) is not None
+
+
+def host_render_task(task):
+    return any(task_abbreviates(task, name) for name in ('hostRenderHarness', 'hostRenderSmoke', 'compileHostRenderBridge'))
+
+
+def device_task(task):
+    for word in ('connected', 'install', 'uninstall'):
+        if task.lower().startswith(word): return True
+        # An initial c alone is ambiguous with clean; it keeps caller semantics.
+        for size in range(2 if word == 'connected' else 1, len(word)):
+            if task.startswith(word[:size]) and len(task) > size and task[size].isupper(): return True
+    return False
 
 
 def host_render_argument_path(value, *, exists=False):
@@ -146,7 +166,7 @@ def _dispatch(mode, arguments, *, output=None, command=None, input_files=None, e
     if mode == 'gradle':
         tasks = gradle_tasks(arguments)
         # Gradle permits clean/cl and camel-case clean-task abbreviations.
-        if any(caller_gradle_operation(task) for task in tasks): return None
+        if any(caller_gradle_operation(task) and not host_render_task(task) for task in tasks): return None
         if caller_gradle_context(arguments): return None
         # These explicitly address the caller's dependency cache or Maven home.
         if '--offline' in arguments or any(task.endswith('ToMavenLocal') for task in tasks): return None
@@ -204,13 +224,16 @@ def _dispatch(mode, arguments, *, output=None, command=None, input_files=None, e
                 names[relative + '/build/' + directory] = selected / 'build' / directory
             if argument in ('-p', '--project-dir'): args[index + 1] = str(selected)
             else: args[index] = '--project-dir=' + str(selected)
+        if any(task.lower().startswith('verify') or (task.startswith('v') and len(task) > 1 and task[1].isupper()) for task in gradle_tasks(arguments)):
+            for name, source in names.items():
+                if name.endswith(('/outputs', '/libs')) and source.is_dir(): input_files[name] = source
         repository = ROOT / 'build/maven-repository'
         if repository.is_dir(): input_files['build/maven-repository'] = repository
         if any(a.rsplit(':', 1)[-1] in ('fetch', 'runtimeFetch') for a in args):
             names['runtime/prebuilt'] = ROOT / 'runtime/prebuilt'
         if any(a.rsplit(':', 1)[-1] == 'apiDump' for a in args):
             names['nuxie-android/api/nuxie-android.api'] = ROOT / 'nuxie-android/api/nuxie-android.api'
-        if any(a.lower() in ('hostrenderharness', 'hostrendersmoke', 'compilehostrenderbridge') for a in gradle_tasks(arguments)):
+        if any(host_render_task(a) for a in gradle_tasks(arguments)):
             names['nuxie-android/build/host-render/native'] = ROOT / 'nuxie-android/build/host-render/native'
             spec = importlib.util.spec_from_file_location('sdk_host_pool', ROOT / 'scripts/bazel/sdk.py')
             host = importlib.util.module_from_spec(spec); spec.loader.exec_module(host)
