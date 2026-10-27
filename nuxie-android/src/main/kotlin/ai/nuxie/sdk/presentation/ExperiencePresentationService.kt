@@ -1778,23 +1778,12 @@ internal class ExperiencePresentationService(
         } ?: return JourneyPresentationActionResult.Failed
         val history = active.journey.layerHistory
         val page = ExperiencePageHostContract.isEnabled(PresentationRegistry.resolve(active.id)?.descriptor)
-        var remaining = steps
-        var targetHistory = history
-        var lowerPage: ActivePresentation? = null
-        var pagesToClose = 0
-        if (page) {
-            for (candidate in synchronized(stateLock) { coveredLayers.asReversed().toList() }) {
-                if (remaining <= targetHistory.screens.lastIndex) break
-                remaining -= targetHistory.screens.size
-                lowerPage = candidate
-                targetHistory = candidate.journey.layerHistory
-                pagesToClose++
-            }
-        }
-        val target = if (remaining == 0) targetHistory.screens.last() else targetHistory.backTarget(remaining)
-        val shortened = if (page) {
-            if (remaining == 0) targetHistory else targetHistory.popping(remaining)
-        } else history.navigate(target, push = false)
+        val covered = if (page) synchronized(stateLock) { coveredLayers.toList() } else emptyList()
+        val back = if (page) ExperiencePageBack.of(steps, covered.map { it.journey.layerHistory } + history) else null
+        val lowerPage = back?.page?.let(covered::getOrNull)
+        val target = back?.target ?: history.backTarget(steps)
+        val shortened = back?.history ?: history.navigate(target, push = false)
+        val pagesToClose = back?.pagesToClose ?: 0
         val sameScreen = lowerPage == null && target == active.journey.screenId
         synchronized(stateLock) {
             if (current !== active || !active.isOwnedBy(owner.journeyId, owner.distinctId)) {
