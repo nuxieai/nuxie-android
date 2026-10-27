@@ -131,8 +131,10 @@ class ExperiencePagePresentationHeightTest {
             a.start(); a.frame(); p.start(); p.frame(); p.assertHeight(400f)
             p.text("Restored\nSecond"); p.frame(); p.assertHeight(480f)
             p.close(recreating = true); a.close(recreating = true)
-            val restoredA = ActivityPage(a.content())
-            val restoredP = ActivityPage(p.content(), lower = restoredA, baseHeights = mapOf(1 to 240f, 2 to 400f))
+            // Destroying the first Activity closed its Experience's move queue; the fresh pages start another.
+            val moves = ExperienceMoveQueue()
+            val restoredA = ActivityPage(a.content().copy(moves = moves))
+            val restoredP = ActivityPage(p.content().copy(moves = moves), lower = restoredA, baseHeights = mapOf(1 to 240f, 2 to 400f))
             try {
                 restoredA.start(covered = true); restoredP.start(); restoredP.frame()
                 restoredP.assertHeight(480f)
