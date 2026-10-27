@@ -8,6 +8,7 @@ import android.os.Looper
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -188,6 +189,84 @@ class ExperiencePagePresentationHeightTest {
         }
     }
 
+    @Test fun `a nested sheet refuses a drag and outside taps while a move runs`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame()
+            val nested = ActivityPage(content.copy(isPushPage = false, layerContentHeight = AtomicReference()),
+                lower = p, baseHeights = mapOf(1 to 180f, 2 to 320f))
+            val running = CompletableDeferred<Unit>()
+            try {
+                nested.start(); nested.frame(); nested.enableSheetInput()
+                assertTrue(nested.sheetDraggable)
+                assertTrue(nested.sheetCancelsOnTouchOutside)
+                val move = launch(start = CoroutineStart.UNDISPATCHED) { content.moves.run { running.await() } }
+                nested.idle()
+                assertFalse("A drag waits for the running move", nested.sheetDraggable)
+                assertFalse("An outside tap waits for the running move", nested.sheetCancelsOnTouchOutside)
+                running.complete(Unit); move.join(); nested.idle()
+                assertTrue(nested.sheetDraggable)
+                assertTrue(nested.sheetCancelsOnTouchOutside)
+            } finally { running.complete(Unit); nested.close() }
+        }
+    }
+
+    @Test fun `a nested sheet's drag holds the slot until it returns or its close lands`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame()
+            val nested = ActivityPage(content.copy(isPushPage = false, layerContentHeight = AtomicReference()),
+                lower = p, baseHeights = mapOf(1 to 180f, 2 to 320f))
+            try {
+                nested.start(); nested.frame(); nested.enableSheetInput()
+                nested.sheetState("STATE_DRAGGING")
+                assertTrue("The drag holds the slot", content.moves.isBusy)
+                assertTrue("Its own sheet stays draggable", nested.sheetDraggable)
+                assertNull("Nothing else is admitted during the drag", content.moves.tryTake(null))
+                nested.sheetState("STATE_EXPANDED")
+                assertFalse("A drag that returns gives the slot back", content.moves.isBusy)
+                assertEquals(3, nested.layerCount())
+
+                nested.sheetState("STATE_DRAGGING")
+                nested.sheetState("STATE_SETTLING")
+                nested.sheetState("STATE_HIDDEN")
+                assertTrue("A hidden sheet keeps the slot until its close lands", content.moves.isBusy)
+                nested.settle { nested.layerCount() == 2 && !content.moves.isBusy }
+                p.frame(); p.assertHeight(400f)
+            } finally { nested.close() }
+        }
+    }
+
+    @Test fun `a nested sheet dismissed during a move closes after the move lands`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame()
+            val nested = ActivityPage(content.copy(isPushPage = false, layerContentHeight = AtomicReference()),
+                lower = p, baseHeights = mapOf(1 to 180f, 2 to 320f))
+            val running = CompletableDeferred<Unit>()
+            try {
+                nested.start(); nested.frame(); nested.enableSheetInput()
+                val move = launch(start = CoroutineStart.UNDISPATCHED) { content.moves.run { running.await() } }
+                // TalkBack's dismiss action hides the sheet without a drag; Material then cancels the dialog.
+                nested.sheetState("STATE_HIDDEN")
+                nested.idle()
+                assertEquals("The close waits for the running move", 3, nested.layerCount())
+                running.complete(Unit); move.join()
+                nested.settle { nested.layerCount() == 2 && !content.moves.isBusy }
+            } finally { running.complete(Unit); nested.close() }
+        }
+    }
+
+    @Test fun `an outside tap while nothing moves closes the nested sheet through the queue`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame()
+            val nested = ActivityPage(content.copy(isPushPage = false, layerContentHeight = AtomicReference()),
+                lower = p, baseHeights = mapOf(1 to 180f, 2 to 320f))
+            try {
+                nested.start(); nested.frame(); nested.enableSheetInput()
+                nested.cancelSheet()
+                nested.settle { nested.layerCount() == 2 && !content.moves.isBusy }
+            } finally { nested.close() }
+        }
+    }
+
     private suspend fun withPushPages(lowerAtB: Boolean = false,
         exercise: suspend (ActivityPage, ActivityPage, PreparedPresentation) -> Unit) {
         val scene = java.io.File.createTempFile("page-push-height", ".riv").apply { writeBytes(byteArrayOf(1)) }
@@ -356,6 +435,33 @@ class ExperiencePagePresentationHeightTest {
         }
 
         fun content(): PreparedPresentation = prepared
+
+        private val sheet: ExperienceNativeLayerWindow get() = field(layer, "sheet") as ExperienceNativeLayerWindow
+        private val behavior get() = (sheet.dialog as com.google.android.material.bottomsheet.BottomSheetDialog).behavior
+
+        /** What the reveal does for a dismissible sheet. */
+        fun enableSheetInput() { sheet.setInputEnabled(true); idle() }
+        val sheetDraggable: Boolean get() = behavior.isDraggable
+        val sheetCancelsOnTouchOutside: Boolean get() = shadowOf(sheet.dialog).isCancelableOnTouchOutside
+        fun layerCount() = (field(activity, "layers") as List<*>).size
+        fun idle() = shadowOf(Looper.getMainLooper()).idle()
+
+        /** Material's own state path, with its callbacks: what a drag or TalkBack's dismiss action selects. */
+        fun sheetState(name: String) {
+            check(org.robolectric.util.ReflectionHelpers.getField<Any?>(behavior, "viewRef") != null) {
+                "The sheet has not been laid out, so Material sends no state callbacks"
+            }
+            org.robolectric.util.ReflectionHelpers.callInstanceMethod<Unit>(behavior, "setStateInternal",
+                org.robolectric.util.ReflectionHelpers.ClassParameter.from(Int::class.javaPrimitiveType,
+                    com.google.android.material.bottomsheet.BottomSheetBehavior::class.java.getField(name).getInt(null)))
+        }
+
+        /** An outside tap on a sheet that allows it. */
+        fun cancelSheet() { check(sheetCancelsOnTouchOutside); sheet.dialog.cancel() }
+
+        suspend fun settle(done: () -> Boolean) {
+            withTimeout(5_000) { while (!done()) { idle(); delay(1) } }
+        }
 
         suspend fun queries(): Int = lane.call { native.contentHeightQueries }
 

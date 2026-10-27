@@ -73,11 +73,17 @@ internal class NuxieExperienceActivity : Activity() {
     private var currentScreen: Screen? = null
     private inner class Layer(val root: FrameLayout, var screen: Screen, val shell: PresentationShell, val pushed: Boolean = false) {
         var sheet: ExperienceNativeLayerWindow? = null
+        /** The slot a drag of this sheet took. Held after the sheet hides, until its dismissal work lands. */
+        var drag: ExperienceMoveQueue.Move? = null
     }
     private val layers = mutableListOf<Layer>()
     private var baseWindow: ExperienceNativeLayerWindow? = null
     /** The platform already finished dismissing the base sheet window; nothing is left to animate. */
     private var baseWindowDismissed = false
+    /** The slot a drag of the Experience's own sheet took. */
+    private var baseDrag: ExperienceMoveQueue.Move? = null
+    /** The queue whose busy state gates every sheet's drag and outside taps. */
+    private var watchedMoves: ExperienceMoveQueue? = null
     private var closingLayer: Layer? = null
     private var returningPage: Screen? = null
     private var pagePopAnimation: ExperienceScreenViewTransition? = null
@@ -863,6 +869,7 @@ internal class NuxieExperienceActivity : Activity() {
                     if (screen.mounted?.isLayer == true) layer.sheet?.setBackHandler(::closeTopLayerOrExperience)
                 }
             }
+            watchMoves()
             contentRoot.setBackgroundColor(prepared.clearColor)
             screen.mounted?.observeWindow()
         } catch (error: Throwable) {
@@ -894,6 +901,9 @@ internal class NuxieExperienceActivity : Activity() {
     private fun installLayerWindow(layer: Layer, onPresented: (() -> Unit)? = null) {
         layer.sheet = ExperienceNativeLayerWindow(this, layer.root, layer.shell) { requestLayerClose(layer) }.also {
             it.setInputEnabled(false)
+            it.setDragHandler(dragHandler({ layer.drag }, { layer.drag = it }, closes = layer))
+            it.setMoveBusy(moves?.isBusy == true)
+            watchMoves()
             onPresented?.let(it::whenPresented)
             if (layer.screen.contentHeightReady) it.updateContentHeight(layer.screen.measuredContentHeight)
             it.show()
@@ -924,18 +934,54 @@ internal class NuxieExperienceActivity : Activity() {
         else finishTerminal(CloseReason.UserDismissed)
     }
 
+    /**
+     * A sheet drag is a move (section 2): it takes the slot at STATE_DRAGGING when nothing runs or waits,
+     * gives it back if the sheet returns, and keeps it after a hide until the dismissal work lands.
+     */
+    private fun dragHandler(held: () -> ExperienceMoveQueue.Move?, hold: (ExperienceMoveQueue.Move?) -> Unit,
+        closes: Any?) = object : ExperienceNativeLayerWindow.DragHandler {
+        override fun dragStarted(): Boolean {
+            val move = moves?.tryTake(closes) ?: return false
+            hold(move)
+            return true
+        }
+        override fun dragCancelled() { held()?.also { hold(null) }?.release() }
+        override fun dragHid() = Unit
+    }
+
+    /** Every sheet refuses a drag and outside taps while a move holds the slot or waits for it. */
+    private fun watchMoves() {
+        val moves = moves ?: return
+        if (watchedMoves === moves) return
+        watchedMoves?.onBusyChanged(null)
+        watchedMoves = moves
+        moves.onBusyChanged { busy ->
+            runOnUiThread {
+                if (watchedMoves !== moves || isDestroyed) return@runOnUiThread
+                layers.forEach { it.sheet?.setMoveBusy(busy) }
+                baseWindow?.setMoveBusy(busy)
+            }
+        }
+    }
+
     private fun requestLayerClose(layer: Layer) {
         val moves = moves ?: return
+        // A drag that hid the sheet already holds the slot. Any other dismissal (an outside tap, TalkBack's
+        // dismiss action, a cancel) asks for it: on an idle queue the immediate launch takes it before this
+        // returns; otherwise the close waits its turn behind the running move.
+        val held = layer.drag?.also { layer.drag = null }
         registryScope.launch {
             try {
-                moves.run {
-                    // The platform has already dismissed this sheet. Close it and every page above it,
-                    // on the stack this move starts on.
-                    val index = layers.indexOf(layer)
-                    if (index >= 1) closeLayer(layers.last(), authored = false, pageCount = layers.size - index)
-                }
+                if (held != null) withContext(held) { closeDismissedLayer(layer) }
+                else moves.run(closes = layer) { closeDismissedLayer(layer) }
             } catch (_: ExperienceMoveQueue.Closed) {}
-        }
+        }.invokeOnCompletion { held?.release() }
+    }
+
+    /** The platform has already dismissed this sheet. Close it and every page above it, on the stack the move starts on. */
+    private suspend fun closeDismissedLayer(layer: Layer) {
+        val index = layers.indexOf(layer)
+        if (index >= 1) closeLayer(layers.last(), authored = false, pageCount = layers.size - index)
     }
 
     /** A layer's close is a move. Work the running move calls into joins it instead of queueing. */
@@ -1075,6 +1121,11 @@ internal class NuxieExperienceActivity : Activity() {
 
     override fun onDestroy() {
         if (!isChangingConfigurations) moves?.revoke()
+        watchedMoves?.onBusyChanged(null)
+        watchedMoves = null
+        // A retired window promises no further state callback, so a held drag ends here.
+        layers.forEach { layer -> layer.drag?.also { layer.drag = null }?.release() }
+        baseDrag?.also { baseDrag = null }?.release()
         registryScope.cancel()
         clearAcquisitionRecovery()
         removeLoadingView()
@@ -1261,10 +1312,15 @@ internal class NuxieExperienceActivity : Activity() {
         // The first layer uses the same native sheet as upper layers, including acquisition.
         val window = ExperienceNativeLayerWindow(this, host, shell) {
             baseWindowDismissed = true
+            // The Experience's own sheet closing is a close of the Experience: it lets a started move land.
+            baseDrag?.also { baseDrag = null }?.release()
             finishTerminal(CloseReason.UserDismissed)
         }
         baseWindow = window
+        window.setDragHandler(dragHandler({ baseDrag }, { baseDrag = it }, closes = null))
         window.setInputEnabled(true, allowDismissalDuringLoading = true)
+        window.setMoveBusy(moves?.isBusy == true)
+        watchMoves()
         window.show()
         if (currentScreen?.mounted?.isLayer == true) window.setBackHandler(::closeTopLayerOrExperience)
         return ExperienceFocusRoot(this)
