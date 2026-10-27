@@ -43,6 +43,8 @@ internal class ExperienceInteractivePage private constructor(
     private val mounted = mutableListOf<String>()
     private val removedNativeOwners = mutableMapOf<Long, String>()
     private val loggedRemovedWrites = mutableSetOf<String>()
+    /** Journey writes to a Screen Back removed wait, in order, for its next row (R6b). */
+    private val heldWrites = mutableMapOf<String, MutableList<(NuxieRuntimeViewModelState) -> Unit>>()
     private val collapsed = mutableSetOf<String>()
     private var liveStep: Pair<String, String?>? = null
     /** The Screen on top, which owns an event several rows share (F1). */
@@ -79,8 +81,13 @@ internal class ExperienceInteractivePage private constructor(
                 row.lifecycle = it
             }
             if (row.retained != null) {
-                rows[screenId] = prepareRow(screenId, row.products, routing ?: row.routing, null,
+                val next = prepareRow(screenId, row.products, routing ?: row.routing, null,
                     checkNotNull(row.retained).values, row.lifecycle)
+                rows[screenId] = next
+                // Seeded first: the held writes land after the retained values and before any later write.
+                heldWrites.remove(screenId)?.forEach { write ->
+                    runCatching { write(next.values) }.onFailure { Log.w("NuxiePage", "Rejected a held Screen write", it) }
+                }
             }
             return@checked false
         }
@@ -213,7 +220,12 @@ internal class ExperienceInteractivePage private constructor(
         write: (NuxieRuntimeViewModelState) -> Unit) = checked {
         for ((id, row) in rows) if ((screenId == null || screenId == id) &&
             (viewModelName == null || viewModelName == row.selection.rootName))
-            writableRow(id)?.let { write(it.values) }
+            writeJourney(id, write)
+    }
+
+    private fun writeJourney(id: String, write: (NuxieRuntimeViewModelState) -> Unit) {
+        val row = row(id)
+        if (row.retained == null) write(row.values) else heldWrites.getOrPut(id) { mutableListOf() } += write
     }
 
     suspend fun applyValues(screenId: String?, values: Map<String, NuxieViewModelScalarValue>, viewModelName: String? = null) = operation {
@@ -291,8 +303,8 @@ internal class ExperienceInteractivePage private constructor(
     suspend fun applyJourneyValues(screenId: String, values: Map<String, NuxieViewModelScalarValue>) = lane.call { applyJourneyValuesOnLane(screenId, values) }
 
     internal fun applyJourneyValuesOnLane(screenId: String, values: Map<String, NuxieViewModelScalarValue>) = checked {
-        val row = writableRow(screenId) ?: return@checked
-        for ((path, value) in journeyValues(values)) row.values.setValue(path, value)
+        val writes = journeyValues(values)
+        writeJourney(screenId) { row -> for ((path, value) in writes) row.setValue(path, value) }
     }
 
     suspend fun updateEnvironment(values: Map<String, NuxieViewModelScalarValue>) = lane.call { updateEnvironmentOnLane(values) }
@@ -430,6 +442,7 @@ internal class ExperienceInteractivePage private constructor(
             mounted.clear()
             removedNativeOwners.clear()
             loggedRemovedWrites.clear()
+            heldWrites.clear()
             failure?.let { throw it }
         }
     }

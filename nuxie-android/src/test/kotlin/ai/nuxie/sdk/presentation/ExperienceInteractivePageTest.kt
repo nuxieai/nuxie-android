@@ -414,7 +414,7 @@ class ExperienceInteractivePageTest {
         }
     }
 
-    @Test fun `removed B rejects native writes and revisits from retained values with a fresh default`() = runBlocking {
+    @Test fun `removed B rejects native writes, holds Journey writes, and revisits from retained values then the held writes`() = runBlocking {
         withLayer { page, native ->
             page.insertIncoming("a", Style.NONE, false)
             page.insertIncoming("b", Style.NONE, false)
@@ -428,8 +428,9 @@ class ExperienceInteractivePageTest {
             native.writes.clear()
             page.applyRuntimeValues("b", mapOf("env/fontScale" to NuxieViewModelScalarValue.NumberValue(2.0),
                 "env/reduceMotion" to NuxieViewModelScalarValue.BooleanValue(true), "keptValue" to string("ignored")))
-            page.applyJourneyValues("b", mapOf("keptValue" to string("ignored")))
-            page.applyValues("b", mapOf("keptValue" to string("ignored")))
+            // R6b: Journey writes while B is removed wait for its next row.
+            page.applyJourneyValues("b", mapOf("keptValue" to NuxieViewModelScalarValue.NumberValue(7.0)))
+            page.applyValues("b", mapOf("keptValue" to NuxieViewModelScalarValue.NumberValue(99.0)))
             page.applyListOperation("b", NativeViewModelWrite(NuxieViewModelMutationKind.LIST_CLEAR, "items"))
             page.fireTrigger("b", "accepted")
             page.setPhases(listOf("b" to ExperienceScreenLifecycle.Phase.HIDDEN))
@@ -454,7 +455,14 @@ class ExperienceInteractivePageTest {
                 assertTrue(page.canWriteNativeOwnerOnLane(fresh))
             }
             assertEquals(listOf("a", "b"), page.mountedScreenIds())
-            assertEquals(42.0, native.writes.single { it.first == fresh && it.second.path == "keptValue" }.second.numberValue.toDouble(), 0.0)
+            val freshWrites = native.writes.filter { it.first == fresh }.map { it.second }
+            val restored = freshWrites.indexOfFirst { it.path == "keptValue" && it.numberValue == 42f }
+            assertTrue("The new row is seeded from B's retained values first", restored >= 0)
+            val held = freshWrites.drop(restored + 1).filter { it.path in setOf("keptValue", "items", "accepted", "text") }
+            assertEquals(listOf("keptValue" to 7f, "keptValue" to 99f, "items" to 0f, "accepted" to 0f, "text" to 0f),
+                held.map { it.path to it.numberValue })
+            assertEquals(listOf(NuxieViewModelMutationKind.LIST_CLEAR, NuxieViewModelMutationKind.FIRE_TRIGGER,
+                NuxieViewModelMutationKind.SET_STRING), held.drop(2).map { it.kind })
             assertFalse(native.writes.any { it.first == old })
             assertTrue(native.allocations.all { it.second == null })
         }
