@@ -17,6 +17,8 @@ internal object ExperiencePageStep {
         suspend fun register(screenId: String, event: String): Deferred<Unit>
         suspend fun batch(present: Boolean = false, watchdogMs: Long = 250, writes: suspend () -> Unit) { writes() }
         suspend fun takeIncoming()
+        /** Route (a): one ordinary zero-time step once the incoming row is placed and woken (R3c). */
+        suspend fun settle()
         suspend fun phases(values: List<Pair<String, ExperienceScreenLifecycle.Phase>>, transition: String)
         suspend fun begin(transition: String?)
         suspend fun end(transition: String?)
@@ -30,7 +32,8 @@ internal object ExperiencePageStep {
     }
 
     suspend fun perform(source: String, target: String, style: Style, isBack: Boolean,
-        plan: ExperienceScreenTransitionPlan.Custom?, exit: Exit, reducedMotion: Boolean, operations: Operations) {
+        plan: ExperienceScreenTransitionPlan.Custom?, exit: Exit, reducedMotion: Boolean, operations: Operations,
+        coveredCut: Boolean = false) {
         if (source == target) return
         operations.input(false)
         try {
@@ -53,9 +56,23 @@ internal object ExperiencePageStep {
             val entering = listOf(target to ExperienceScreenLifecycle.Phase.ENTERING)
             val hidden = listOf(source to ExperienceScreenLifecycle.Phase.HIDDEN)
             val active = listOf(target to ExperienceScreenLifecycle.Phase.ACTIVE)
-            if (reducedMotion) {
+            suspend fun incoming() {
+                operations.takeIncoming()
+                operations.settle()
+            }
+            if (coveredCut) {
+                // The lower page changes unseen: both rows stay hidden, and its entrance starts at the reveal.
                 operations.batch {
-                    operations.takeIncoming()
+                    operations.phases(listOf(source to ExperienceScreenLifecycle.Phase.HIDDEN,
+                        target to ExperienceScreenLifecycle.Phase.HIDDEN), "")
+                    incoming()
+                    operations.begin(null)
+                    operations.end(null)
+                    operations.retire()
+                }
+            } else if (reducedMotion) {
+                operations.batch {
+                    incoming()
                     operations.phases(exiting, phasesTransition)
                     operations.phases(entering, phasesTransition)
                     operations.begin(transition)
@@ -66,7 +83,7 @@ internal object ExperiencePageStep {
             } else if (style != Style.NONE && plan != null) {
                 val completions = mutableListOf<Deferred<Unit>>()
                 operations.batch(present = true, watchdogMs = plan.watchdogMs) {
-                    operations.takeIncoming()
+                    incoming()
                     plan.outgoingCompletionEvent.takeIf { it.isNotEmpty() }?.let { completions += operations.register(source, it) }
                     plan.incomingCompletionEvent.takeIf { it.isNotEmpty() }?.let { completions += operations.register(target, it) }
                     operations.phases(exiting + entering, phasesTransition)
@@ -87,7 +104,7 @@ internal object ExperiencePageStep {
                 if (outgoing != null) awaitHalf(listOf(outgoing), leaveBudget)
                 var incoming: Deferred<Unit>? = null
                 operations.batch(present = plan != null, watchdogMs = plan?.watchdogMs ?: 250) {
-                    operations.takeIncoming()
+                    incoming()
                     incoming = plan?.incomingCompletionEvent?.takeIf { it.isNotEmpty() }?.let { operations.register(target, it) }
                     operations.phases(entering, phasesTransition)
                     operations.begin(transition)

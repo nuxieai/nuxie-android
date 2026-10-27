@@ -324,8 +324,8 @@ internal class ExperienceMountedScreen(
         var collecting = false
         var failure: Throwable? = null
         try {
-            ExperiencePageStep.perform(sourceId, targetId, style, isBack, plan, layerExit(prepared), reduceMotionEnabled || covered,
-                object : ExperiencePageStep.Operations {
+            ExperiencePageStep.perform(sourceId, targetId, style, isBack, plan, layerExit(prepared), reduceMotionEnabled,
+                coveredCut = covered, operations = object : ExperiencePageStep.Operations {
                     override fun input(enabled: Boolean) { setInputEnabled(enabled && !covered) }
                     override suspend fun prepare() = Unit
                     override suspend fun register(screenId: String, event: String): kotlinx.coroutines.Deferred<Unit> {
@@ -350,10 +350,9 @@ internal class ExperienceMountedScreen(
                         }
                     }
                     override suspend fun takeIncoming() { mutations += { it.takeIncomingOnLane(targetId, sourceId, isBack) } }
+                    override suspend fun settle() { mutations += { surface.stepZeroDeltaOnLane() } }
                     override suspend fun phases(values: List<Pair<String, ExperienceScreenLifecycle.Phase>>, transition: String) {
-                        mutations += { page -> page.setPhasesOnLane(if (covered) values.map { (id, _) ->
-                            id to ExperienceScreenLifecycle.Phase.HIDDEN
-                        } else values, transition) }
+                        mutations += { page -> page.setPhasesOnLane(values, transition) }
                     }
                     override suspend fun begin(transition: String?) { mutations += { it.beginOnLane(targetId, transition) } }
                     override suspend fun end(transition: String?) { mutations += { it.endOnLane(targetId, transition) } }

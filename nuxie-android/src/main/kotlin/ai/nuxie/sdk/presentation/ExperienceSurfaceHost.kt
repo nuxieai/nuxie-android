@@ -632,17 +632,7 @@ internal class ExperienceSurfaceHost(
         while (transitionWrites.isNotEmpty()) {
             applyNextTransitionWrite()
             val write = presentedTransitionWrite ?: break
-            val result = runCatching {
-                val correlationId = nextCorrelationId
-                nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
-                val outcome = stepAndRefreshFocus {
-                    checkNotNull(player).stepTyped(elapsedSeconds = 0.0, correlationId = correlationId,
-                        textRunNames = emptyList())
-                }
-                val snapshot = captureStepSnapshot(outcome, correlationId)
-                snapshot?.let(::retainScreenValues)
-                publishSteps()
-            }
+            val result = runCatching { stepZeroDeltaOnLane() }
             presentedTransitionWrite = null
             result.fold({ write.completion.complete(Unit) }, {
                 write.completion.completeExceptionally(it)
@@ -650,6 +640,18 @@ internal class ExperienceSurfaceHost(
             })
             if (result.isFailure) return
         }
+    }
+
+    /** One ordinary zero-time step, its result delivered as a frame's would be (R3c). */
+    internal fun stepZeroDeltaOnLane() {
+        val correlationId = nextCorrelationId
+        nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
+        val outcome = stepAndRefreshFocus {
+            checkNotNull(player).stepTyped(elapsedSeconds = 0.0, correlationId = correlationId,
+                textRunNames = emptyList())
+        }
+        captureStepSnapshot(outcome, correlationId)?.let(::retainScreenValues)
+        publishSteps()
     }
 
     private fun cancelTransitionWrites() {
