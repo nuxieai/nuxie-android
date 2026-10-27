@@ -224,9 +224,12 @@ def _dispatch(mode, arguments, *, output=None, command=None, input_files=None, e
                 names[relative + '/build/' + directory] = selected / 'build' / directory
             if argument in ('-p', '--project-dir'): args[index + 1] = str(selected)
             else: args[index] = '--project-dir=' + str(selected)
-        if any(task.lower().startswith('verify') or (task.startswith('v') and len(task) > 1 and task[1].isupper()) for task in gradle_tasks(arguments)):
-            for name, source in names.items():
-                if name.endswith(('/outputs', '/libs', '/reports')) and source.is_dir(): input_files[name] = source
+        # Opaque Gradle inspection tasks can consume previously built products
+        # without declaring producer dependencies. Carry the bounded SDK handoff
+        # roots, independently of the selected task name; never compiler caches.
+        for name, source in names.items():
+            if (name.endswith(('/outputs', '/libs', '/reports')) or name == 'build/bazel-sdk') and source.is_dir():
+                input_files[name] = source
         repository = ROOT / 'build/maven-repository'
         if repository.is_dir(): input_files['build/maven-repository'] = repository
         if any(a.rsplit(':', 1)[-1] in ('fetch', 'runtimeFetch') for a in args):

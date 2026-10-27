@@ -93,7 +93,7 @@ class PoolRoutingTests(unittest.TestCase):
         for task in ('hRH','hostRenderHa','cHRB'):
             self.assertTrue(pool.host_render_task(task),task)
 
-    def test_existing_products_are_inputs_to_standalone_verification(self):
+    def test_prepared_products_are_inputs_independent_of_task_name(self):
         import json
         with tempfile.TemporaryDirectory() as temporary:
             home=Path(temporary).resolve();root=home/'sdk';artifact=root/'example-app/build/outputs/apk/debug/example.apk';artifact.parent.mkdir(parents=True);artifact.write_bytes(b'assembled APK')
@@ -101,7 +101,8 @@ class PoolRoutingTests(unittest.TestCase):
             helper=home/'.local/share/nuxie-homelab/sdk-task.py';helper.parent.mkdir(parents=True);record=home/'record.json'
             helper.write_text("from pathlib import Path\nimport os,json\ndef route(root,args,**kwargs):\n Path(os.environ['RECORD']).write_text(json.dumps({k:str(v) for k,v in kwargs['input_files'].items()}))\n return 17\n")
             with patch.object(pool,'ROOT',root),patch.object(pool.Path,'home',return_value=home),patch.dict(os.environ,{'_NUXIE_POOL_NESTED':'0','NUXIE_CI_RUNNER_POLICY_VERSION':'0','NUXIE_HOMELAB':'1','NUXIE_EXECUTION':'pool','RECORD':str(record)}):
-                self.assertEqual(pool.dispatch('gradle',['-p',str(root),':example-app:verifyDebugApk16KiB',':example-app:verifyReleaseBundleConfig16KiB']),17)
+                for task in (':example-app:verifyDebugApk16KiB', ':example-app:verifyReleaseBundleConfig16KiB', ':example-app:dumpReleaseBundleConfig', ':nuxie-lint:jar'):
+                    self.assertEqual(pool.dispatch('gradle',['-p',str(root),task]),17)
                 declared=json.loads(record.read_text())
                 self.assertEqual(declared['example-app/build/outputs'],str(root/'example-app/build/outputs'))
                 self.assertEqual(declared['build/reports'],str(root/'build/reports'))
