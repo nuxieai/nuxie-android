@@ -4,36 +4,11 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include "nux_capi.generated.h"
+#include "nuxie_jni_attachment.h"
 
 // The runtime owns the queue/thread. JNI owns JVM attachment and callback refs.
-static pthread_once_t executor_key_once = PTHREAD_ONCE_INIT;
-static pthread_key_t executor_attachment_key;
-static int executor_key_status;
-
-static void executor_detach(void *context) {
-  JavaVM *vm = context;
-  if (vm != NULL) (*vm)->DetachCurrentThread(vm);
-}
-
-static void executor_make_key(void) {
-  executor_key_status = pthread_key_create(&executor_attachment_key, executor_detach);
-}
-
 static JNIEnv *executor_env(JavaVM *vm) {
-  JNIEnv *env = NULL;
-  if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) == JNI_OK) return env;
-  pthread_once(&executor_key_once, executor_make_key);
-  if (executor_key_status != 0) return NULL;
-#ifdef __ANDROID__
-  if ((*vm)->AttachCurrentThreadAsDaemon(vm, &env, NULL) != JNI_OK) return NULL;
-#else
-  if ((*vm)->AttachCurrentThreadAsDaemon(vm, (void **)&env, NULL) != JNI_OK) return NULL;
-#endif
-  if (pthread_setspecific(executor_attachment_key, vm) != 0) {
-    (*vm)->DetachCurrentThread(vm);
-    return NULL;
-  }
-  return env;
+  return nuxie_jni_env(vm, NUXIE_JNI_ATTACH_DAEMON, NULL);
 }
 
 static void executor_clear_exception(JNIEnv *env) {
