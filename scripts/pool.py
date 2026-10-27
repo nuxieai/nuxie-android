@@ -63,7 +63,7 @@ def selection(mode, arguments, command=None, selected_platform=None, selected_de
         serial = os.environ.get('ANDROID_SERIAL')
         if not serial: raise ValueError('ANDROID_SERIAL is required for connected pool tests')
         requirements.add('android-device@' + serial)
-    if SDK == 'android' and (command in ('host-render', 'host-render-smoke') or (mode == 'gradle' and any(host_render_task(a) for a in gradle_tasks(arguments)))):
+    if SDK == 'android' and (command in ('host-render', 'host-render-smoke') or (mode == 'gradle' and any(host_native_task(a) for a in gradle_tasks(arguments)))):
         requirements.add('native-host@' + sys.platform + '-' + os.uname().machine)
         return ('macos' if sys.platform == 'darwin' else 'linux'), sorted(requirements)
     if mode.startswith('script-'):
@@ -87,6 +87,10 @@ def task_abbreviates(task, name):
 
 def host_render_task(task):
     return any(task_abbreviates(task, name) for name in ('hostRenderHarness', 'hostRenderSmoke', 'compileHostRenderBridge'))
+
+
+def host_native_task(task):
+    return host_render_task(task) or any(task_abbreviates(task, name) for name in ('executorContractTest', 'compileExecutorBridge'))
 
 
 def device_task(task):
@@ -166,7 +170,7 @@ def _dispatch(mode, arguments, *, output=None, command=None, input_files=None, e
     if mode == 'gradle':
         tasks = gradle_tasks(arguments)
         # Gradle permits clean/cl and camel-case clean-task abbreviations.
-        if any(caller_gradle_operation(task) and not host_render_task(task) for task in tasks): return None
+        if any(caller_gradle_operation(task) and not host_native_task(task) for task in tasks): return None
         if caller_gradle_context(arguments): return None
         # These explicitly address the caller's dependency cache or Maven home.
         if '--offline' in arguments or any(task.endswith('ToMavenLocal') for task in tasks): return None
@@ -236,13 +240,14 @@ def _dispatch(mode, arguments, *, output=None, command=None, input_files=None, e
             names['runtime/prebuilt'] = ROOT / 'runtime/prebuilt'
         if any(a.rsplit(':', 1)[-1] == 'apiDump' for a in args):
             names['nuxie-android/api/nuxie-android.api'] = ROOT / 'nuxie-android/api/nuxie-android.api'
-        if any(host_render_task(a) for a in gradle_tasks(arguments)):
+        if any(host_native_task(a) for a in gradle_tasks(arguments)):
             names['nuxie-android/build/host-render/native'] = ROOT / 'nuxie-android/build/host-render/native'
+            names['nuxie-android/build/executor-contract/native'] = ROOT / 'nuxie-android/build/executor-contract/native'
             header = ROOT / 'runtime/prebuilt/include/nux_capi.generated.h'
             if header.is_file(): input_files['runtime/prebuilt/include/nux_capi.generated.h'] = header
             spec = importlib.util.spec_from_file_location('sdk_host_pool', ROOT / 'scripts/bazel/sdk.py')
             host = importlib.util.module_from_spec(spec); spec.loader.exec_module(host)
-            files, variables = _stack.enter_context(host.host_inputs())
+            files, variables = _stack.enter_context(host.host_inputs(include_graphics=any(host_render_task(a) for a in gradle_tasks(arguments))))
             input_files.update(files); environment.update(variables)
             for index, argument in enumerate(args):
                 if not (argument == '--args' or argument.startswith('--args=')): continue

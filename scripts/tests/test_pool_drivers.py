@@ -12,6 +12,19 @@ sdk=importlib.util.module_from_spec(spec);spec.loader.exec_module(sdk)
 
 
 class DriverInputTests(unittest.TestCase):
+    def test_executor_inputs_only_require_the_native_library(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            library = root / 'libnux_capi.dylib'
+            library.write_bytes(b'capi')
+            with patch.object(sdk, 'ROOT', root), patch.dict(os.environ, {
+                'NUXIE_HOST_CAPI_LIB': str(library), 'VK_ICD_FILENAMES': '/missing/driver.json',
+                'DYLD_LIBRARY_PATH': '/missing/libraries', 'NUXIE_MOLTENVK_LIBRARY': '/missing/moltenvk',
+            }, clear=True):
+                with sdk.host_inputs(include_graphics=False) as (files, environment):
+                    self.assertEqual(files, {'.nuxie/sdk-inputs/host-runtime/libnux_capi.dylib': library.resolve()})
+                    self.assertEqual(environment, {'NUXIE_HOST_CAPI_LIB': str(library.resolve())})
+
     def test_loader_directory_preserves_external_symlink_names_as_files(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);library=root/'libnux_capi.dylib';library.write_bytes(b'capi')
