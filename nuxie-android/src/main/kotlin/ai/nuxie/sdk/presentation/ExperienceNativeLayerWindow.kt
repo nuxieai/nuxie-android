@@ -37,6 +37,15 @@ internal class ExperienceNativeLayerWindow(
     private var presented = false
     private var retired = false
     private var inputEnabled = false
+    /** Another move holds the Experience's one slot: the sheet refuses a drag and outside taps (section 2). */
+    private var moveBusy = false
+    /** A drag that reached STATE_DRAGGING and got the slot; it ends exactly once. */
+    private var dragging = false
+    private var dragHandler: DragHandler? = null
+    private val dragCallback = object : BottomSheetBehavior.BottomSheetCallback() {
+        override fun onSlide(bottomSheet: View, slideOffset: Float) = Unit
+        override fun onStateChanged(bottomSheet: View, newState: Int) = dragStateChanged(newState)
+    }
     private var backHandler: (() -> Unit)? = null
     private var backCallback: android.window.OnBackInvokedCallback? = null
     private var backPressedCallback: androidx.activity.OnBackPressedCallback? = null
@@ -113,6 +122,51 @@ internal class ExperienceNativeLayerWindow(
         clipToOutline = true
     }
 
+    /** A sheet drag is a move: it takes the slot at STATE_DRAGGING and gives it back at its end. */
+    interface DragHandler {
+        /** True when the drag got the slot. A refused drag still moves; if it hides the sheet, the close waits its turn. */
+        fun dragStarted(): Boolean
+        /** A drag back to where it started, or a retired window: nothing closes. */
+        fun dragCancelled()
+        /** The drag hid the sheet. Its dismissal work follows through the dismiss listener and ends the move. */
+        fun dragHid()
+    }
+
+    fun setDragHandler(handler: DragHandler?) { dragHandler = handler }
+
+    /** Whether another move holds the slot. A drag in progress keeps its own sheet draggable. */
+    fun setMoveBusy(busy: Boolean) {
+        moveBusy = busy
+        applyGates()
+    }
+
+    private fun applyGates() {
+        if (retired) return
+        dialog.setCanceledOnTouchOutside(inputEnabled && !moveBusy && shell !is PresentationShell.FullScreen)
+        (dialog as? BottomSheetDialog)?.behavior?.isDraggable = inputEnabled && (!moveBusy || dragging)
+    }
+
+    private fun dragStateChanged(state: Int) {
+        if (retired) return
+        when (state) {
+            BottomSheetBehavior.STATE_DRAGGING -> if (!dragging) {
+                // The slot is taken before the busy listener runs, so mark the drag first.
+                dragging = true
+                if (dragHandler?.dragStarted() != true) dragging = false
+            }
+            BottomSheetBehavior.STATE_HIDDEN -> if (dragging) {
+                dragging = false
+                dragHandler?.dragHid()
+            }
+            // Material can reach either straight from STATE_DRAGGING, with no settling between.
+            BottomSheetBehavior.STATE_EXPANDED, BottomSheetBehavior.STATE_COLLAPSED -> if (dragging) {
+                dragging = false
+                dragHandler?.dragCancelled()
+                applyGates()
+            }
+        }
+    }
+
     fun whenPresented(completion: () -> Unit) {
         if (presented) completion() else presentationCompletion = completion
     }
@@ -143,6 +197,8 @@ internal class ExperienceNativeLayerWindow(
                 }
             }
             sheet.behavior.addBottomSheetCallback(callback)
+            sheet.behavior.removeBottomSheetCallback(dragCallback)
+            sheet.behavior.addBottomSheetCallback(dragCallback)
             sheet.behavior.state = BottomSheetBehavior.STATE_EXPANDED
             content.post {
                 if (sheet.behavior.state == BottomSheetBehavior.STATE_EXPANDED) {
@@ -267,8 +323,7 @@ internal class ExperienceNativeLayerWindow(
     fun setInputEnabled(enabled: Boolean, allowDismissalDuringLoading: Boolean = false) {
         inputEnabled = enabled && (shell.dismissible || allowDismissalDuringLoading)
         dialog.setCancelable(inputEnabled)
-        dialog.setCanceledOnTouchOutside(inputEnabled && shell !is PresentationShell.FullScreen)
-        (dialog as? BottomSheetDialog)?.behavior?.isDraggable = inputEnabled
+        applyGates()
         // Material re-registers its dismissal callback when cancelability changes.
         registerBackCallback()
     }
@@ -310,6 +365,10 @@ internal class ExperienceNativeLayerWindow(
     fun retire() {
         retired = true
         presentationCompletion = null
+        (dialog as? BottomSheetDialog)?.behavior?.removeBottomSheetCallback(dragCallback)
+        // Retirement promises no further state callback, so a drag in progress ends here.
+        if (dragging) { dragging = false; dragHandler?.dragCancelled() }
+        dragHandler = null
         if (android.os.Build.VERSION.SDK_INT >= 33) backCallback?.let { dialog.onBackInvokedDispatcher.unregisterOnBackInvokedCallback(it) }
         backCallback = null
         backPressedCallback?.remove()

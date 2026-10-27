@@ -259,6 +259,96 @@ class ExperienceNativeLayerWindowTest {
         } finally { window.retire(); activity.finish() }
     }
 
+    private class Drags(private val admits: Boolean = true) : ExperienceNativeLayerWindow.DragHandler {
+        val events = mutableListOf<String>()
+        override fun dragStarted() = admits.also { events += "started" }
+        override fun dragCancelled() { events += "cancelled" }
+        override fun dragHid() { events += "hid" }
+    }
+
+    /** Material's own drag callback path: the state it selects after accepting the pointer, with its callbacks. */
+    private fun ExperienceNativeLayerWindow.sheetState(state: Int) {
+        val behavior = (dialog as com.google.android.material.bottomsheet.BottomSheetDialog).behavior
+        check(org.robolectric.util.ReflectionHelpers.getField<Any?>(behavior, "viewRef") != null) {
+            "The sheet has not been laid out, so Material sends no state callbacks"
+        }
+        org.robolectric.util.ReflectionHelpers.callInstanceMethod<Unit>(behavior, "setStateInternal",
+            org.robolectric.util.ReflectionHelpers.ClassParameter.from(Int::class.javaPrimitiveType, state))
+    }
+
+    private val ExperienceNativeLayerWindow.draggable: Boolean
+        get() = (dialog as com.google.android.material.bottomsheet.BottomSheetDialog).behavior.isDraggable
+
+    @Test fun `a sheet refuses a drag and outside taps while another move holds the slot`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val window = ExperienceNativeLayerWindow(activity, FrameLayout(activity),
+            PresentationShell.Sheet(PresentationShell.Sheet.Detent.LARGE, true)) {}
+        try {
+            window.setInputEnabled(true)
+            window.show()
+            val dialog = Shadows.shadowOf(window.dialog)
+            assertTrue(window.draggable)
+            assertTrue(dialog.isCancelableOnTouchOutside)
+            window.setMoveBusy(true)
+            assertFalse("A drag is refused while another move holds the slot", window.draggable)
+            assertFalse("Outside taps don't cancel while another move holds the slot", dialog.isCancelableOnTouchOutside)
+            assertTrue("Cancelability, and with it the sheet's hideability, is not the move gate", dialog.isCancelable)
+            window.setMoveBusy(false)
+            assertTrue(window.draggable)
+            assertTrue(dialog.isCancelableOnTouchOutside)
+        } finally { window.retire(); activity.finish() }
+    }
+
+    @Test fun `a drag takes the slot once and ends exactly once`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val drags = Drags()
+        val window = ExperienceNativeLayerWindow(activity, FrameLayout(activity),
+            PresentationShell.Sheet(PresentationShell.Sheet.Detent.LARGE, true)) {}
+        val B = com.google.android.material.bottomsheet.BottomSheetBehavior::class.java
+        fun state(name: String) = B.getField(name).getInt(null)
+        try {
+            window.setDragHandler(drags)
+            window.setInputEnabled(true)
+            window.show()
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            window.sheetState(state("STATE_DRAGGING"))
+            // The drag's own slot makes the queue busy; its sheet stays draggable so the drag can finish.
+            window.setMoveBusy(true)
+            assertTrue(window.draggable)
+            window.sheetState(state("STATE_DRAGGING"))
+            window.sheetState(state("STATE_EXPANDED"))
+            window.setMoveBusy(false)
+            assertEquals("Released where it started, straight from dragging", listOf("started", "cancelled"), drags.events)
+            window.sheetState(state("STATE_DRAGGING"))
+            window.sheetState(state("STATE_COLLAPSED"))
+            assertEquals(listOf("started", "cancelled", "started", "cancelled"), drags.events)
+            window.sheetState(state("STATE_DRAGGING"))
+            window.sheetState(state("STATE_SETTLING"))
+            window.sheetState(state("STATE_HIDDEN"))
+            assertEquals(listOf("started", "cancelled", "started", "cancelled", "started", "hid"), drags.events)
+        } finally { window.retire(); activity.finish() }
+        assertEquals("A hidden drag has ended; retiring adds nothing", 6, drags.events.size)
+    }
+
+    @Test fun `retiring a window mid-drag ends the drag, and a refused drag has no end`() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val B = com.google.android.material.bottomsheet.BottomSheetBehavior::class.java
+        fun state(name: String) = B.getField(name).getInt(null)
+        for (admits in listOf(true, false)) {
+            val drags = Drags(admits)
+            val window = ExperienceNativeLayerWindow(activity, FrameLayout(activity),
+                PresentationShell.Sheet(PresentationShell.Sheet.Detent.LARGE, true)) {}
+            window.setDragHandler(drags)
+            window.setInputEnabled(true)
+            window.show()
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            window.sheetState(state("STATE_DRAGGING"))
+            window.retire()
+            assertEquals(if (admits) listOf("started", "cancelled") else listOf("started"), drags.events)
+        }
+        activity.finish()
+    }
+
     @Test fun `loading permits leaving a closedby none sheet before content is revealed`() {
         val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
         var closes = 0
