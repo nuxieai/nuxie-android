@@ -42,8 +42,6 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import ai.nuxie.sdk.experiences.ExperiencePageHostContract
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -104,6 +102,8 @@ internal data class PreparedPresentation(
     val closeLayer: (suspend (PreparedLayerReveal) -> Boolean)? = null,
     val fitsContentHeight: Boolean = shell.fitsContent,
     val layerContentHeight: AtomicReference<Float?> = AtomicReference(null),
+    /** The Experience's one move queue, shared by every Screen and layer in it. */
+    val moves: ExperienceMoveQueue = ExperienceMoveQueue(),
     val isPushPage: Boolean = false,
     val pageHistory: List<String> = emptyList(),
     val isBack: Boolean = false,
@@ -640,7 +640,7 @@ internal class ExperiencePresentationService(
             val screen = active?.let { PresentationRegistry.currentScreen(it.id) }
             val live = active != null && active.ownerDistinctId == currentDistinctId() &&
                 active.journey.fences.isCurrent() &&
-                synchronized(stateLock) { current === active && !transitionInProgress } &&
+                synchronized(stateLock) { current === active && preparation == null } && !active.moves.isBusy &&
                 active.shown.get() && !active.closed.get() &&
                 active.outcomeReason.get() == null && screen?.screenCloseReason() == null &&
                 screen?.purchaseActivity() === activity && activity?.isFinishing == false && activity.window.decorView.isAttachedToWindow
@@ -686,6 +686,8 @@ internal class ExperiencePresentationService(
         val outcomeReason: AtomicReference<CloseReason?> = AtomicReference(),
         var nativePreparationFinished: CompletableDeferred<Unit>? = null,
         val latestViewModelSnapshot: AtomicReference<NuxieViewModelSnapshot?> = AtomicReference(),
+        /** The Experience's one move queue: the root makes it, and every layer above shares it. */
+        val moves: ExperienceMoveQueue,
     )
 
     private class JourneyOutcome(
@@ -780,13 +782,12 @@ internal class ExperiencePresentationService(
     private var current: ActivePresentation? = null
     private val coveredLayers = mutableListOf<ActivePresentation>()
     private var pendingReservation: PendingReservation? = null
-    private val layerNavigation = Mutex()
-    private var transitionInProgress = false
     private var pendingBackNavigation: PendingBackNavigation? = null
     private val identityEpochByOwner = mutableMapOf<String, Long>()
 
     private data class PendingBackNavigation(
         val owner: JourneyPresentationOwner,
+        val steps: Int,
         val target: String,
         val history: ExperiencePageHistory,
         val transition: JsonObject? = null,
@@ -820,7 +821,7 @@ internal class ExperiencePresentationService(
      */
     fun reserveJourney(ownerDistinctId: String): JourneyPresentationReservation? =
         synchronized(stateLock) {
-            if (current != null || pendingReservation != null || transitionInProgress) {
+            if (current != null || pendingReservation != null || preparation != null) {
                 return@synchronized null
             }
             val request = captureRequestLocked(ownerDistinctId)
@@ -864,19 +865,36 @@ internal class ExperiencePresentationService(
                 ExperiencePageHostContract.resolveIntent(transition, synchronized(stateLock) { current?.journey?.screenId }) else transition,
             runValues,
         )
-        if (!ExperiencePageHostContract.isEnabled(release.descriptor)) return present()
-        // Only navigation within an admitted page queues. Competing root acquisition still declines.
-        if (synchronized(stateLock) { current == null && preparation != null }) throw declinedPresentation()
-        return layerNavigation.withLock {
-            val active = synchronized(stateLock) { current?.takeIf { it.isOwnedBy(journeyId, ownerDistinctId) } }
-            if (active?.journey?.screenId == screenId && active.acquired.identity == release.identity &&
-                active.outcomeReason.get() == null && active.journey.navigationDismissal == null &&
-                transition?.string("type") !in setOf("modal", "push") &&
-                synchronized(stateLock) { pendingBackNavigation?.pageId == null } &&
-                fences.isCurrent() && canPresent() && currentDistinctId() == ownerDistinctId) {
-                reservation?.close()
-                active.ref
-            } else present()
+        // Only a move within an admitted Experience queues. A root presentation, or a competing
+        // one, has no queue to wait in: presentPrepared admits it or declines it.
+        val moves = synchronized(stateLock) { current?.takeIf { it.isOwnedBy(journeyId, ownerDistinctId) }?.moves }
+            ?: return present()
+        return try {
+            moves.run {
+                val active = synchronized(stateLock) { current?.takeIf { it.isOwnedBy(journeyId, ownerDistinctId) } }
+                val owner = JourneyPresentationOwner(journeyId, ownerDistinctId)
+                val back = synchronized(stateLock) { pendingBackNavigation?.takeIf { it.owner == owner && it.target == screenId } }
+                // A Back's plan was made on the Screen it was asked from. A move that ran since supersedes it.
+                if (back != null && active != null && backPlan(active, back.steps).let {
+                        it.target != back.target || it.history != back.history || it.pageId != back.pageId || it.pagesToClose != back.pagesToClose
+                    }) {
+                    synchronized(stateLock) { if (pendingBackNavigation === back) pendingBackNavigation = null }
+                    reservation?.close()
+                    throw supersededByIdentityTransition()
+                }
+                if (ExperiencePageHostContract.isEnabled(release.descriptor) &&
+                    active?.journey?.screenId == screenId && active.acquired.identity == release.identity &&
+                    active.outcomeReason.get() == null && active.journey.navigationDismissal == null &&
+                    transition?.string("type") !in setOf("modal", "push") &&
+                    synchronized(stateLock) { pendingBackNavigation?.pageId == null } &&
+                    fences.isCurrent() && canPresent() && currentDistinctId() == ownerDistinctId) {
+                    reservation?.close()
+                    active.ref
+                } else present()
+            }
+        } catch (closed: ExperienceMoveQueue.Closed) {
+            reservation?.close()
+            throw ExperiencePresentationException(ExperiencePresentationException.Reason.SUPERSEDED, "The Experience closed before this move ran", closed)
         }
     }
 
@@ -1068,8 +1086,8 @@ internal class ExperiencePresentationService(
         transition: JsonObject? = null,
         prepare: suspend () -> PreparedSource,
     ): ExperienceRef {
-        // stateLock atomically claims transitionInProgress below. Do not queue another
-        // request behind acquisition, native preparation, or a future recovery wait.
+        // stateLock atomically claims preparation below. A move within the Experience already
+        // holds its queue's slot; a competing root presentation declines rather than wait.
         val active = run {
             val attempt = PreparationAttempt(request, journeyId, Job(currentCoroutineContext()[Job]))
             var transitionClaimed = false
@@ -1104,12 +1122,12 @@ internal class ExperiencePresentationService(
                     if (active == null && !reservationRequired && pendingReservation != null) {
                         throw declinedPresentation()
                     }
-                    if (transitionInProgress) throw declinedPresentation()
-                    transitionInProgress = true
+                    if (preparation != null) throw declinedPresentation()
                     transitionClaimed = true
                     preparation = attempt
                     active
                 }
+                val moves = existing?.moves ?: ExperienceMoveQueue()
                 if (!runtimeAvailable()) {
                     throw ExperiencePresentationException(
                         ExperiencePresentationException.Reason.RUNTIME_UNAVAILABLE,
@@ -1178,6 +1196,7 @@ internal class ExperiencePresentationService(
                         fitsContentHeight = shell.fitsContent,
                         layerContentHeight = if (opensLayer) AtomicReference(null) else
                             existing?.let { PresentationRegistry.resolve(it.id)?.layerContentHeight } ?: AtomicReference(null),
+                        moves = moves,
                         isPushPage = isPushPage || (!opensLayer && existing?.let {
                             PresentationRegistry.resolve(it.id)?.isPushPage
                         } == true),
@@ -1304,7 +1323,7 @@ internal class ExperiencePresentationService(
                 val pending = ActivePresentation(id = id, ref = ref, acquired = source.acquired,
                     ownerDistinctId = request.ownerDistinctId, journey = journey, nativeRecovery = acquiringId != null,
                     experienceShown = existing?.experienceShown ?: AtomicBoolean(false),
-                    firstFrame = CompletableDeferred())
+                    firstFrame = CompletableDeferred(), moves = moves)
                 checkOwnership()
 
                 existing?.let {
@@ -1466,11 +1485,8 @@ internal class ExperiencePresentationService(
                 } finally {
                     synchronized(stateLock) {
                         if (preparation === attempt) preparation = null
-                        if (transitionClaimed) {
-                            transitionInProgress = false
-                            if (!published && reservationId != null && pendingReservation?.id == reservationId) {
-                                pendingReservation = null
-                            }
+                        if (transitionClaimed && !published && reservationId != null && pendingReservation?.id == reservationId) {
+                            pendingReservation = null
                         }
                     }
                     attempt.job.complete()
@@ -1501,26 +1517,18 @@ internal class ExperiencePresentationService(
         (coveredLayers + listOfNotNull(current)).map { it.journey.layerHistory.screens }
     }
 
+    /** Runs inside the move that closes the layer, which the Activity holds: nothing else moves meanwhile. */
     private suspend fun closeLayer(id: String, reveal: PreparedLayerReveal): Boolean {
-        // A completed native dismissal wins over preparation in that layer.
-        // Withdraw only the preparation job, never the Journey worker itself.
-        val pending = synchronized(stateLock) {
-            if (current?.id != id) return false
-            preparation?.takeIf { transitionInProgress }?.also { it.layerDismissed.set(true) }
-        }
-        pending?.job?.cancel()
-        awaitPresentationRetirement { pending?.finished?.await() }
         val count = reveal.pagesToClose
         val (outgoing, incoming, coveredToRetire) = synchronized(stateLock) {
             val outgoing = current ?: return false
             if (count < 1 || count > coveredLayers.size) return false
             val incomingIndex = coveredLayers.size - count
             val incoming = coveredLayers[incomingIndex]
-            if (outgoing.id != id || transitionInProgress || !outgoing.journey.fences.isCurrent()) return false
-            transitionInProgress = true
+            if (outgoing.id != id || !outgoing.journey.fences.isCurrent()) return false
             Triple(outgoing, incoming, coveredLayers.drop(incomingIndex + 1))
         }
-        return try {
+        return run {
             // A navigation checkpoint already in durable flight still owns its
             // one dismissal notification. Join it, then park on the actual
             // retained screen instead of rejecting the completed system close.
@@ -1568,8 +1576,6 @@ internal class ExperiencePresentationService(
             if (!ownsIncoming()) return false
             reveal.activate()
             true
-        } finally {
-            synchronized(stateLock) { transitionInProgress = false }
         }
     }
 
@@ -1638,11 +1644,15 @@ internal class ExperiencePresentationService(
     ): JourneyPresentationActionResult {
         if (JourneyActionType.from(action) == JourneyActionType.BACK &&
             synchronized(stateLock) { current?.let { PresentationRegistry.resolve(it.id)?.descriptor }?.let(ExperiencePageHostContract::isEnabled) == true }) {
-            return layerNavigation.withLock {
-                val active = synchronized(stateLock) { current?.takeIf { it.isOwnedBy(owner.journeyId, owner.distinctId) } }
-                    ?: return@withLock JourneyPresentationActionResult.NoPresentation
-                prepareBackNavigation(owner, active, action)
-            }
+            val moves = synchronized(stateLock) { current?.takeIf { it.isOwnedBy(owner.journeyId, owner.distinctId) }?.moves }
+                ?: return JourneyPresentationActionResult.NoPresentation
+            return try {
+                moves.run {
+                    val active = synchronized(stateLock) { current?.takeIf { it.isOwnedBy(owner.journeyId, owner.distinctId) } }
+                        ?: return@run JourneyPresentationActionResult.NoPresentation
+                    prepareBackNavigation(owner, active, action)
+                }
+            } catch (_: ExperienceMoveQueue.Closed) { JourneyPresentationActionResult.NoPresentation }
         }
         val active = synchronized(stateLock) {
             current?.takeIf { it.isOwnedBy(owner.journeyId, owner.distinctId) }
@@ -1778,13 +1788,10 @@ internal class ExperiencePresentationService(
         } ?: return JourneyPresentationActionResult.Failed
         val history = active.journey.layerHistory
         val page = ExperiencePageHostContract.isEnabled(PresentationRegistry.resolve(active.id)?.descriptor)
-        val covered = if (page) synchronized(stateLock) { coveredLayers.toList() } else emptyList()
-        val back = if (page) ExperiencePageBack.of(steps, covered.map { it.journey.layerHistory } + history) else null
-        val lowerPage = back?.page?.let(covered::getOrNull)
-        val target = back?.target ?: history.backTarget(steps)
-        val shortened = back?.history ?: history.navigate(target, push = false)
-        val pagesToClose = back?.pagesToClose ?: 0
-        val sameScreen = lowerPage == null && target == active.journey.screenId
+        val plan = backPlan(active, steps)
+        val target = plan.target
+        val shortened = plan.history
+        val sameScreen = plan.pageId == null && target == active.journey.screenId
         synchronized(stateLock) {
             if (current !== active || !active.isOwnedBy(owner.journeyId, owner.distinctId)) {
                 return JourneyPresentationActionResult.NoPresentation
@@ -1796,6 +1803,7 @@ internal class ExperiencePresentationService(
             }
             pendingBackNavigation = PendingBackNavigation(
                 owner,
+                steps,
                 target,
                 shortened,
                 PresentationRegistry.resolve(active.id)?.descriptor?.takeIf(ExperiencePageHostContract::isEnabled)
@@ -1806,8 +1814,8 @@ internal class ExperiencePresentationService(
                     } ?: (action["transition"] as? JsonObject)?.takeUnless {
                         ExperiencePageHostContract.isEnabled(PresentationRegistry.resolve(active.id)?.descriptor)
                     },
-                pageId = lowerPage?.id,
-                pagesToClose = pagesToClose.coerceAtLeast(1),
+                pageId = plan.pageId,
+                pagesToClose = plan.pagesToClose,
             )
         }
         if (!sameScreen) return JourneyPresentationActionResult.Navigate(target)
@@ -1820,6 +1828,19 @@ internal class ExperiencePresentationService(
             }
         }
         return JourneyPresentationActionResult.Handled
+    }
+
+    private data class BackPlan(val target: String, val history: ExperiencePageHistory, val pageId: String?, val pagesToClose: Int)
+
+    /** Where a Back of [steps] goes from [active] now, across every page's history in a page host. */
+    private fun backPlan(active: ActivePresentation, steps: Int): BackPlan {
+        val history = active.journey.layerHistory
+        val page = ExperiencePageHostContract.isEnabled(PresentationRegistry.resolve(active.id)?.descriptor)
+        val covered = if (page) synchronized(stateLock) { coveredLayers.toList() } else emptyList()
+        val back = if (page) ExperiencePageBack.of(steps, covered.map { it.journey.layerHistory } + history) else null
+        val target = back?.target ?: history.backTarget(steps)
+        return BackPlan(target, back?.history ?: history.navigate(target, push = false),
+            back?.page?.let(covered::getOrNull)?.id, (back?.pagesToClose ?: 0).coerceAtLeast(1))
     }
 
     private suspend fun permissionResult(
@@ -1949,6 +1970,7 @@ internal class ExperiencePresentationService(
             attempt?.finished?.await()
             return@awaitPresentationRetirement
         }
+        active.moves.revoke()
         val covered = synchronized(stateLock) { coveredLayers.toList().also { coveredLayers.clear() } }
         covered.forEach {
             PresentationRegistry.dismiss(it.id, CloseReason.JourneyNavigation)
@@ -2100,6 +2122,8 @@ internal class ExperiencePresentationService(
             active.runTransitionFinished.complete(Unit)
             return
         }
+        // The Experience closes: what waits in its queue completes as closed.
+        active.moves.revoke()
         val covered = synchronized(stateLock) { coveredLayers.toList().also { coveredLayers.clear() } }
         covered.forEach {
             PresentationRegistry.dismiss(it.id, CloseReason.JourneyNavigation)
