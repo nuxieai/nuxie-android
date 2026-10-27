@@ -29,6 +29,8 @@ internal object ExperiencePageStep {
         }
         suspend fun hidden()
         suspend fun active()
+        /** One ordinary step before the incoming row takes over, so step_end commands reach the row they leave (S8). */
+        suspend fun drain() = Unit
     }
 
     suspend fun perform(source: String, target: String, style: Style, isBack: Boolean,
@@ -117,6 +119,10 @@ internal object ExperiencePageStep {
                     operations.phases(active, "")
                 }
             }
+            // step_end commands arrive on the next player step. Deliver that result
+            // while the outgoing row still owns host commands, even after retirement.
+            operations.drain()
+            currentCoroutineContext().ensureActive()
             operations.hidden()
             currentCoroutineContext().ensureActive()
             operations.active()

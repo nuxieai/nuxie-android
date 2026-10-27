@@ -370,6 +370,7 @@ internal class ExperienceMountedScreen(
                         if (phasePresented) super<ExperiencePageStep.Operations>.wait(completions, milliseconds)
                     }
                     override suspend fun hidden() = Unit
+                    override suspend fun drain() { surface.layerOperation { surface.stepZeroDeltaOnLane() } }
                     override suspend fun active() {
                         prepared = target
                         activeListener = checkNotNull(rows[targetId]).listener
