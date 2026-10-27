@@ -23,15 +23,44 @@ internal data class ExperiencePageHistory(val screens: List<String>,
         return ExperiencePageHistory(screens.take(count), transitions.take(count))
     }
 
-    fun backTransition(steps: Int, target: String, descriptor: kotlinx.serialization.json.JsonObject): kotlinx.serialization.json.JsonObject? {
-        if (steps == 1) return transitions.last()
-        val render = descriptor["render"] as kotlinx.serialization.json.JsonObject
-        val pair = ai.nuxie.sdk.experiences.ExperiencePageHostContract.transitions(render).firstOrNull {
+    fun backTransition(steps: Int, target: String, descriptor: kotlinx.serialization.json.JsonObject): kotlinx.serialization.json.JsonObject? =
+        backTransition(steps, target) {
+            ai.nuxie.sdk.experiences.ExperiencePageHostContract.transitions(descriptor["render"] as kotlinx.serialization.json.JsonObject)
+        }
+
+    fun backTransition(steps: Int, target: String,
+        declarations: () -> List<ai.nuxie.sdk.experiences.ExperiencePageHostContract.Transition>): kotlinx.serialization.json.JsonObject? {
+        // Steps past the page's first Screen are not taken: a Back that goes one Screen reverses it (B2).
+        if (minOf(steps, screens.size - 1) <= 1) return transitions.last()
+        val pair = declarations().firstOrNull {
             it.isDefaultPair && it.sourceScreenId == screens.last() && it.destinationScreenId == target
         } ?: return null
         return kotlinx.serialization.json.buildJsonObject {
             put("type", kotlinx.serialization.json.JsonPrimitive("magic-move"))
             put("transitionId", kotlinx.serialization.json.JsonPrimitive(pair.id))
+        }
+    }
+}
+
+/** A page Back across every page's history, the top page last (B1 to B4, P7). */
+internal data class ExperiencePageBack(
+    /** The page it lands on, counted from the bottom. */
+    val page: Int,
+    val target: String,
+    /** The landing page's history after the Back. */
+    val history: ExperiencePageHistory,
+    /** The pages above the landing page, which close. */
+    val pagesToClose: Int,
+) {
+    companion object {
+        /** The steps-th Screen before the current one, counted across pages and clamped to the first. */
+        fun of(steps: Int, histories: List<ExperiencePageHistory>): ExperiencePageBack {
+            val locations = histories.flatMapIndexed { page, history -> history.screens.indices.map { page to it } }
+            val (page, entry) = locations[maxOf(0, locations.lastIndex - maxOf(1, steps))]
+            val history = histories[page]
+            val popped = history.screens.lastIndex - entry
+            return ExperiencePageBack(page, history.screens[entry],
+                if (popped == 0) history else history.popping(popped), histories.lastIndex - page)
         }
     }
 }
