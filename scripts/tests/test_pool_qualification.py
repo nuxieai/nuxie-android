@@ -30,6 +30,32 @@ class CompleteQualificationRoutingTests(unittest.TestCase):
                 self.assertIn('build/maven-consumer/unsafe-test-store.log',recorded['outputs'])
                 self.assertIn('build/minified-native-logging-consumer/raw.log',recorded['outputs'])
 
+    def test_executor_contract_stages_only_the_runtime_for_a_compatible_host(self):
+        import importlib.util
+        from unittest.mock import patch
+        spec = importlib.util.spec_from_file_location('executor_pool', ROOT / 'scripts/pool.py')
+        pool = importlib.util.module_from_spec(spec); spec.loader.exec_module(pool)
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            helper = home / '.local/share/nuxie-homelab/sdk-task.py'
+            helper.parent.mkdir(parents=True)
+            helper.write_text("import json,os\nfrom pathlib import Path\ndef route(root,args,**kwargs):\n Path(os.environ['RECORDED']).write_text(json.dumps({'platform':kwargs['platform'],'tools':kwargs['requirements'],'inputs':list(kwargs['input_files']),'environment':kwargs['environment'],'outputs':list(kwargs['outputs'])}))\n return 17\n")
+            library = home / 'libnux_capi.dylib'
+            library.write_bytes(b'portable runtime')
+            with patch.object(pool.Path, 'home', return_value=home), patch.dict(os.environ, {
+                'NUXIE_HOMELAB': '1', 'NUXIE_EXECUTION': 'pool', '_NUXIE_POOL_NESTED': '0',
+                'NUXIE_CI_RUNNER_POLICY_VERSION': '0', 'RECORDED': str(home / 'record.json'),
+                'NUXIE_HOST_CAPI_LIB': str(library), 'VK_ICD_FILENAMES': '/missing/driver.json',
+            }, clear=True):
+                for task in ('executorContractTest', 'compileExecutorBridge'):
+                    self.assertEqual(pool.dispatch('gradle', [':nuxie-android:' + task]), 17)
+                    recorded = json.loads((home / 'record.json').read_text())
+                    self.assertEqual(recorded['platform'], 'macos' if sys.platform == 'darwin' else 'linux')
+                    self.assertIn('native-host@' + sys.platform + '-' + os.uname().machine, recorded['tools'])
+                    self.assertIn('.nuxie/sdk-inputs/host-runtime/libnux_capi.dylib', recorded['inputs'])
+                    self.assertEqual(recorded['environment'], {'NUXIE_HOST_CAPI_LIB': str(library.resolve())})
+                    self.assertIn('nuxie-android/build/executor-contract/native', recorded['outputs'])
+
     def test_root_gradle_project_keeps_canonical_paths(self):
         import importlib.util
         from unittest.mock import patch

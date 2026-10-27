@@ -26,13 +26,16 @@ private class NativeRuntimeLane : NuxieRuntimeLane {
         NuxieRuntimeBridge.nativeExecutorNew().also { check(it != 0L) { "Runtime worker startup failed" } }
     } else 0L
     private var closing = false
-    private var terminated = handle == 0L
-    private val terminationCallbacks = mutableListOf<() -> Unit>()
+    // One hold for native drain, plus one per observer until JNI releases it.
+    // The runtime owns callback storage/order. These holds only keep its handle
+    // available to concurrent registration and waits through the last callback.
+    private var terminationHolds = if (handle == 0L) 0 else 1
 
     // JNI invokes run/close by name; consumer-rules.pro retains both methods.
     private class Job(
         private var operation: (() -> Unit)?,
         private var abandoned: (() -> Unit)?,
+        private var released: (() -> Unit)? = null,
     ) : Runnable, Closeable {
         override fun run() {
             val body = operation
@@ -42,10 +45,16 @@ private class NativeRuntimeLane : NuxieRuntimeLane {
         }
 
         override fun close() {
-            operation = null
-            val callback = abandoned
-            abandoned = null
-            callback?.invoke()
+            try {
+                operation = null
+                val callback = abandoned
+                abandoned = null
+                callback?.invoke()
+            } finally {
+                val callback = released
+                released = null
+                callback?.invoke()
+            }
         }
     }
 
@@ -88,15 +97,9 @@ private class NativeRuntimeLane : NuxieRuntimeLane {
         }
         if (native == 0L) return
         try {
-            val registered = NuxieRuntimeBridge.nativeExecutorOnTerminated(native, Job({
-                val callbacks = synchronized(lock) {
-                    terminated = true
-                    terminationCallbacks.toList().also { terminationCallbacks.clear() }
-                }
-                callbacks.forEach(::runTerminationCallback)
-                val owner = synchronized(lock) { handle.also { handle = 0L } }
-                if (owner != 0L) NuxieRuntimeBridge.nativeExecutorRelease(owner)
-            }, null))
+            val registered = NuxieRuntimeBridge.nativeExecutorOnTerminated(
+                native, Job({}, null, ::releaseTerminationHold),
+            )
             if (!registered) {
                 synchronized(lock) { closing = false }
                 error("Runtime termination observer registration failed")
@@ -116,18 +119,45 @@ private class NativeRuntimeLane : NuxieRuntimeLane {
     }
 
     override fun afterTermination(callback: () -> Unit) {
-        val runNow = synchronized(lock) {
-            if (terminated) true else {
-                terminationCallbacks += callback
-                false
+        val native = synchronized(lock) {
+            handle.also {
+                if (it != 0L) {
+                    NuxieRuntimeBridge.nativeExecutorRetain(it)
+                    terminationHolds++
+                }
             }
         }
-        if (runNow) runTerminationCallback(callback)
+        if (native == 0L) {
+            runTerminationCallback(callback)
+            return
+        }
+        var registered = false
+        try {
+            val run = { runTerminationCallback(callback) }
+            registered = NuxieRuntimeBridge.nativeExecutorOnTerminated(
+                native, Job(run, run, ::releaseTerminationHold),
+            )
+            check(registered) { "Runtime termination observer registration failed" }
+        } finally {
+            // Rejection never transfers the Job to JNI, so no release callback
+            // will discharge its hold. Never run resource cleanup before drain.
+            if (!registered) releaseTerminationHold()
+            NuxieRuntimeBridge.nativeExecutorRelease(native)
+        }
+    }
+
+    private fun releaseTerminationHold() {
+        val owner = synchronized(lock) {
+            check(terminationHolds > 0)
+            terminationHolds--
+            if (terminationHolds == 0) handle.also { handle = 0L } else 0L
+        }
+        if (owner != 0L) NuxieRuntimeBridge.nativeExecutorRelease(owner)
     }
 
     override fun awaitQuiescence(timeoutMs: Long): Boolean {
         val native = retainedHandle()
-        if (native == 0L) return synchronized(lock) { terminated }
+        if (native == 0L) return true
         return try {
             NuxieRuntimeBridge.nativeExecutorWait(native, timeoutMs.coerceAtLeast(0))
         } finally {

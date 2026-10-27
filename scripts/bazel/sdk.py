@@ -402,7 +402,7 @@ def prepare(args):
 
 
 @contextlib.contextmanager
-def host_inputs():
+def host_inputs(*, include_graphics=True):
     library = Path(os.environ.get('NUXIE_HOST_CAPI_LIB', '')).expanduser().resolve()
     if not library.is_file(): raise ValueError('NUXIE_HOST_CAPI_LIB must name a prepared host library')
     state = ROOT / '.nuxie'; state.mkdir(exist_ok=True)
@@ -410,6 +410,9 @@ def host_inputs():
     with tempfile.TemporaryDirectory(dir=state, prefix='sdk-drivers-') as temporary:
         files = {'.nuxie/sdk-inputs/host-runtime/' + library.name: library}
         env = {'NUXIE_HOST_CAPI_LIB': str(library)}
+        if not include_graphics:
+            yield files, env
+            return
         if os.environ.get('NUXIE_MOLTENVK_LIBRARY'):
             selected = Path(os.environ['NUXIE_MOLTENVK_LIBRARY']).expanduser().resolve(strict=True)
             files['.nuxie/sdk-inputs/moltenvk/' + selected.name] = selected

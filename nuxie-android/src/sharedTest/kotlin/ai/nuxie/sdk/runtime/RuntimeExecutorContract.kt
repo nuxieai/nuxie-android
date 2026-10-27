@@ -177,4 +177,126 @@ abstract class RuntimeExecutorContract {
         }
         assertTrue(lane.awaitQuiescence(timeoutMs = 2_000))
     }
+
+    @Test
+    fun `nested termination observers follow already registered cleanup`() {
+        val lane = NuxieRuntimeLane()
+        val workStarted = CountDownLatch(1)
+        val releaseWork = CountDownLatch(1)
+        val order = CopyOnWriteArrayList<String>()
+        lane.enqueue { workStarted.countDown(); releaseWork.await(5, TimeUnit.SECONDS) }
+        try {
+            assertTrue(workStarted.await(2, TimeUnit.SECONDS))
+            lane.afterTermination {
+                order += "first"
+                lane.afterTermination { order += "nested" }
+            }
+            lane.afterTermination { order += "second" }
+            lane.shutdown()
+            releaseWork.countDown()
+            assertTrue(lane.awaitQuiescence(5_000))
+            assertEquals(listOf("first", "second", "nested"), order.toList())
+        } finally {
+            releaseWork.countDown()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(5_000))
+        }
+    }
+
+    @Test
+    fun `registration during teardown returns without running cleanup on the caller and wait includes it`() {
+        val lane = NuxieRuntimeLane()
+        val firstStarted = CountDownLatch(1)
+        val releaseFirst = CountDownLatch(1)
+        val registered = CountDownLatch(1)
+        val secondStarted = CountDownLatch(1)
+        val releaseSecond = CountDownLatch(1)
+        val selfWait = java.util.concurrent.atomic.AtomicBoolean(true)
+        val registrationError = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+        lane.afterTermination {
+            firstStarted.countDown()
+            releaseFirst.await(5, TimeUnit.SECONDS)
+        }
+        lane.shutdown()
+        val registrar = Thread {
+            try {
+                lane.afterTermination {
+                    selfWait.set(lane.awaitQuiescence(0))
+                    secondStarted.countDown()
+                    releaseSecond.await(5, TimeUnit.SECONDS)
+                }
+            } catch (error: Throwable) {
+                registrationError.set(error)
+            } finally {
+                registered.countDown()
+            }
+        }
+        try {
+            assertTrue(firstStarted.await(2, TimeUnit.SECONDS))
+            registrar.start()
+            assertTrue("An unfinished executor owns newly registered callbacks", registered.await(2, TimeUnit.SECONDS))
+            assertEquals(null, registrationError.get())
+            releaseFirst.countDown()
+            assertTrue(secondStarted.await(2, TimeUnit.SECONDS))
+            assertFalse("An observer must not wait on its own worker", selfWait.get())
+            assertFalse("All cleanup must finish before quiescence", lane.awaitQuiescence(50))
+        } finally {
+            releaseFirst.countDown()
+            releaseSecond.countDown()
+            registrar.join(5_000)
+            assertTrue(lane.awaitQuiescence(5_000))
+        }
+        val caller = Thread.currentThread().id
+        var lateThread = 0L
+        lane.afterTermination { lateThread = Thread.currentThread().id }
+        assertEquals("Completed executors run late cleanup inline", caller, lateThread)
+    }
+
+    @Test
+    fun `concurrent registration shutdown and waits deliver every observer exactly once`() {
+        val callers = java.util.concurrent.Executors.newFixedThreadPool(4)
+        try {
+            repeat(20) {
+                val lane = NuxieRuntimeLane()
+                val start = CountDownLatch(1)
+                val calls = java.util.concurrent.atomic.AtomicIntegerArray(16)
+                val futures = (0 until 16).map { index ->
+                    callers.submit {
+                        start.await(5, TimeUnit.SECONDS)
+                        lane.afterTermination { calls.incrementAndGet(index) }
+                        if (index % 3 == 0) lane.shutdown()
+                        lane.awaitQuiescence(1)
+                    }
+                }
+                start.countDown()
+                try {
+                    futures.forEach { it.get(5, TimeUnit.SECONDS) }
+                    lane.shutdown()
+                    assertTrue(lane.awaitQuiescence(5_000))
+                    repeat(16) { assertEquals(1, calls.get(it)) }
+                } finally {
+                    lane.shutdown()
+                    assertTrue(lane.awaitQuiescence(5_000))
+                }
+            }
+        } finally {
+            callers.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `throwing termination cleanup does not strand later cleanup or its native owner`() {
+        val lane = NuxieRuntimeLane()
+        val completed = java.util.concurrent.atomic.AtomicInteger()
+        lane.afterTermination { throw IllegalStateException("Expected termination callback failure") }
+        lane.afterTermination { completed.incrementAndGet() }
+        lane.shutdown()
+        assertTrue(lane.awaitQuiescence(5_000))
+        assertEquals(1, completed.get())
+        lane.afterTermination { completed.incrementAndGet() }
+        assertEquals(2, completed.get())
+        lane.shutdown()
+        assertTrue(lane.awaitQuiescence(0))
+    }
+
 }

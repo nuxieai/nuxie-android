@@ -252,6 +252,63 @@ val compileHostRenderBridge by tasks.registering(Exec::class) {
   }
 }
 
+// Executor qualification uses the real portable runtime and production JNI
+// callbacks, without loading the rendering bridge or its GPU/scripting hooks.
+val executorBridgeDirectory = layout.buildDirectory.dir("executor-contract/native")
+val executorBridgeLibrary = executorBridgeDirectory.map {
+  it.file("libnuxie_runtime_android.$hostLibrarySuffix")
+}
+val compileExecutorBridge by tasks.registering(Exec::class) {
+  group = "verification"
+  description = "Compiles the executor-only host JNI bridge against NUXIE_HOST_CAPI_LIB."
+  dependsOn(":runtime:fetch")
+  inputs.files("src/main/cpp/nuxie_executor_jni.c", "src/main/cpp/nuxie_jni_attachment.c",
+    "src/main/cpp/nuxie_jni_attachment.h")
+  inputs.file(rootProject.file("runtime/prebuilt/include/nux_capi.generated.h"))
+  hostCapiLibrary.orNull?.let { inputs.file(it) }
+  outputs.file(executorBridgeLibrary)
+  doFirst {
+    check(hostIsMac || hostIsLinux) { "Executor qualification supports macOS and Linux." }
+    val capi = hostCapiLibrary.orNull?.let(::file)?.canonicalFile
+      ?: throw GradleException("Set NUXIE_HOST_CAPI_LIB to a host nux_capi library (no GPU features required).")
+    check(capi.isFile) { "NUXIE_HOST_CAPI_LIB is not a file: $capi" }
+    val output = executorBridgeLibrary.get().asFile
+    output.parentFile.mkdirs()
+    val javaHome = file(System.getProperty("java.home"))
+    val platformInclude = if (hostIsMac) "darwin" else "linux"
+    commandLine(buildList<Any> {
+      add(if (hostIsMac) "clang" else "cc")
+      add(if (hostIsMac) "-dynamiclib" else "-shared")
+      addAll(listOf("-fPIC", "-O2", "-pthread", "-I${javaHome.resolve("include")}",
+        "-I${javaHome.resolve("include/$platformInclude")}",
+        "-I${rootProject.file("runtime/prebuilt/include")}",
+        file("src/main/cpp/nuxie_executor_jni.c"), file("src/main/cpp/nuxie_jni_attachment.c"),
+        capi, "-Wl,-rpath,${capi.parentFile}"))
+      if (hostIsLinux) add("-Wl,-z,defs")
+      addAll(listOf("-o", output))
+    })
+  }
+}
+
+tasks.register<Test>("executorContractTest") {
+  group = "verification"
+  description = "Runs the real native executor lifecycle contracts without rendering or a device."
+  dependsOn(compileExecutorBridge, "compileDebugUnitTestKotlin", "compileDebugUnitTestJavaWithJavac",
+    "processDebugUnitTestJavaRes")
+  testClassesDirs = tasks.named<Test>("testDebugUnitTest").get().testClassesDirs
+  classpath = tasks.named<Test>("testDebugUnitTest").get().classpath
+  filter.includeTestsMatching("ai.nuxie.sdk.runtime.RuntimeExecutorHostTest")
+  maxParallelForks = 1
+  forkEvery = 1
+  // Load the isolated executor bridge through the ordinary library loader.
+  // The rendering harness's separate loader requires Vulkan and scripting.
+  environment("NUXIE_HOST_CAPI_LIB", "")
+  systemProperty("java.library.path", executorBridgeDirectory.get().asFile.absolutePath)
+  hostCapiLibrary.orNull?.let { systemProperty("nuxie.executor.capi.lib", file(it).absolutePath) }
+  jvmArgs("-Xcheck:jni")
+  inputs.file(executorBridgeLibrary)
+}
+
 tasks.register<JavaExec>("hostRenderHarness") {
   group = "host render"
   description = "Renders a published Experience to deterministic headless Vulkan CPU frames."
@@ -276,6 +333,7 @@ tasks.withType<Test>().matching {
   it.name.startsWith("test") && it.name.endsWith("UnitTest")
 }.configureEach {
   filter.excludeTestsMatching("ai.nuxie.sdk.hostrender.HostRenderSmokeTest")
+  filter.excludeTestsMatching("ai.nuxie.sdk.runtime.RuntimeExecutorHostTest")
   // Host runtime selection is process-wide. Keep ordinary unit tests isolated
   // from a developer shell that happens to configure the live host harness.
   environment("NUXIE_HOST_CAPI_LIB", "")

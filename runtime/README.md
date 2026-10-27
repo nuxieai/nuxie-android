@@ -25,3 +25,36 @@ calls outside the JNI shim after removing comments. `:nuxie-android:lint`
 depends on it because the boundary is a static source rule and lint is part of
 the documented PR gate. This pragmatic source scanner intentionally does not
 detect reflective access or inspect compiled bytecode.
+
+## Executor lifecycle qualification
+
+The lane delegates termination callback ordering to the runtime. Observers
+registered during teardown run on its worker after already registered observers;
+callbacks registered after completion run inline. Kotlin retains only handle
+ownership holds, so concurrent waits cannot lose the handle while cleanup is
+still pending.
+
+Run the focused executor contracts with a prepared host runtime. From a
+`nuxie-runtime` checkout, build the portable library (GPU and scripting features
+are unnecessary):
+
+```sh
+python3 tools/bazel/runtime.py build -p nux-capi
+```
+
+Then, from this Android SDK checkout:
+
+```sh
+NUXIE_HOST_CAPI_LIB=/absolute/path/to/nuxie-runtime/target/debug/libnux_capi.dylib \
+  ./gradlew :nuxie-android:executorContractTest
+```
+
+Use `libnux_capi.so` on Linux. This target links the production JNI executor and
+attachment helpers, loads the real command queue in an isolated JVM with
+`-Xcheck:jni`, and runs the shared lifecycle contracts without a GPU, render
+fixtures, scripting initialization, or a device. It is separate from ordinary
+unit tests so an ambient host library cannot change their runtime-availability
+behavior. The same contracts also run in the host rendering and Android device
+suites. With pool execution, the target selects a host matching the prepared
+library's platform and stages only that library, ignoring rendering-driver
+settings.
