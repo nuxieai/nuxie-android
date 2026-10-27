@@ -25,6 +25,7 @@
 #include "nux_capi.generated.h"
 #include "nuxie_logging_policy.h"
 #include "nuxie_host_installs.h"
+#include "nuxie_jni_attachment.h"
 
 // Native diagnostics use the same Kotlin policy as every other SDK log.
 #if defined(__ANDROID__)
@@ -40,18 +41,11 @@ static jclass font_class;
 static jmethodID font_request;
 static bool font_hook_installed;
 static _Thread_local uint16_t original_font_weight = 400;
-static pthread_key_t font_attachment_key;
-static bool font_attachment_key_ready;
 #if defined(NUXIE_FONT_TESTING)
 static atomic_bool font_suppressed;
 static _Thread_local uint16_t forwarded_font_weight;
 static _Thread_local int font_attach_count;
 #endif
-
-static void detach_font_thread(void *attached_vm) {
-  JavaVM *vm = attached_vm;
-  if (vm != NULL) (*vm)->DetachCurrentThread(vm);
-}
 
 static void log_font_exception(JNIEnv *env) {
   // JNI forbids Java calls with a pending exception. Retain the original until
@@ -73,20 +67,12 @@ static const struct NuxFont *system_font_fallback(void *context, uint32_t missin
   forwarded_font_weight = original_font_weight;
 #endif
   if (font_vm == NULL || font_class == NULL) return NULL;
-  JNIEnv *env = NULL;
-  jint status = (*font_vm)->GetEnv(font_vm, (void **)&env, JNI_VERSION_1_6);
-  if (status == JNI_EDETACHED) {
-    if (!font_attachment_key_ready ||
-        (*font_vm)->AttachCurrentThread(font_vm, &env, NULL) != JNI_OK) return NULL;
-    // A foreign worker attaches once; pthread exit owns the matching detach.
-    if (pthread_setspecific(font_attachment_key, font_vm) != 0) {
-      (*font_vm)->DetachCurrentThread(font_vm);
-      return NULL;
-    }
+  bool attached = false;
+  JNIEnv *env = nuxie_jni_env(font_vm, NUXIE_JNI_ATTACH_NORMAL, &attached);
+  if (env == NULL) return NULL;
 #if defined(NUXIE_FONT_TESTING)
-    font_attach_count++;
+  if (attached) font_attach_count++;
 #endif
-  } else if (status != JNI_OK) return NULL;
   // Never consume an exception that belongs to a Java caller.
   if ((*env)->ExceptionCheck(env)) return NULL;
   jlong handle = (*env)->CallStaticLongMethod(env, font_class, font_request,
@@ -106,9 +92,7 @@ static void install_font_fallback(JNIEnv *env, JavaVM *vm) {
   if (font_class != NULL && !(*env)->ExceptionCheck(env))
     font_request = (*env)->GetStaticMethodID(env, font_class, "request", "(III)J");
   if ((*env)->ExceptionCheck(env)) log_font_exception(env);
-  if (font_request != NULL && font_class != NULL &&
-      pthread_key_create(&font_attachment_key, detach_font_thread) == 0) {
-    font_attachment_key_ready = true;
+  if (font_request != NULL && font_class != NULL && nuxie_jni_attachment_init()) {
     font_vm = vm;
     NuxStatus status = nux_font_set_fallback_proc(system_font_fallback, NULL);
     if (status == NUX_STATUS_OK) {
@@ -124,8 +108,6 @@ static void install_font_fallback(JNIEnv *env, JavaVM *vm) {
   font_class = NULL;
   font_request = NULL;
   font_vm = NULL;
-  if (font_attachment_key_ready) pthread_key_delete(font_attachment_key);
-  font_attachment_key_ready = false;
 }
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {

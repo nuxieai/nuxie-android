@@ -512,8 +512,20 @@ val nativeLoggingPolicy by tasks.registering(Exec::class) {
   commandLine("python3", "scripts/test-native-logging-policy.py")
 }
 
+val jniAttachmentContract by tasks.registering(Exec::class) {
+  group = "verification"
+  description = "Checks JNI attachment ownership, thread exit, and failure handling."
+  inputs.files(
+    "scripts/test-jni-attachment.sh",
+    "nuxie-android/src/test/cpp/jni_attachment_test.c",
+    "nuxie-android/src/main/cpp/nuxie_jni_attachment.c",
+    "nuxie-android/src/main/cpp/nuxie_jni_attachment.h",
+  )
+  commandLine("bash", "scripts/test-jni-attachment.sh", "${System.getProperty("java.home")}/include")
+}
+
 val runtimeBoundary by tasks.registering {
-  dependsOn(nativeLoggingPolicy)
+  dependsOn(nativeLoggingPolicy, jniAttachmentContract)
   group = "verification"
   description =
     "Checks source-level runtime boundary references; intentionally does not inspect reflection or compiled bytecode."
