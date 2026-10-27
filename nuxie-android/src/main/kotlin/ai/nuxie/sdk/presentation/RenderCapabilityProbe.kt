@@ -28,33 +28,33 @@ internal object AndroidRenderCapability {
     private val runtime = NuxieRuntime.shared
     private val probe = RenderCapabilityProbe(
         libraryAvailable = { runtime.isAvailable },
-        probeRenderer = ::probeNativeRenderer,
+        probeRenderer = { probeNativeRenderer(runtime, NuxieRuntimeLane()) },
     )
 
     fun isAvailable(): Boolean = probe.isAvailable()
+}
 
-    private fun probeNativeRenderer(): Boolean {
-        val completed = CountDownLatch(1)
-        val capable = AtomicBoolean(false)
-        val lane = NuxieRuntimeLane()
-        val accepted = lane.enqueue {
-            try {
-                val renderer = runtime.newAndroidVulkanRenderer(1, 1)
-                if (renderer != null) {
-                    renderer.close()
-                    capable.set(true)
-                }
-            } finally {
-                completed.countDown()
-            }
+/** Creates and frees the probe renderer on the supplied lane, then closes that lane. */
+internal fun probeNativeRenderer(
+    runtime: NuxieRuntime,
+    lane: NuxieRuntimeLane,
+    timeoutMillis: Long = 5_000L,
+): Boolean {
+    val completed = CountDownLatch(1)
+    val capable = AtomicBoolean(false)
+    val accepted = lane.enqueue {
+        val renderer = runtime.newAndroidVulkanRenderer(1, 1)
+        if (renderer != null) {
+            renderer.close()
+            capable.set(true)
         }
-        lane.shutdown()
-        if (!accepted || !completed.await(PROBE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
-            return false
-        }
-        lane.awaitQuiescence(PROBE_TIMEOUT_MILLIS)
-        return capable.get()
     }
-
-    private const val PROBE_TIMEOUT_MILLIS = 5_000L
+    lane.shutdown { completed.countDown() }
+    if (!accepted) return false
+    return try {
+        completed.await(timeoutMillis, TimeUnit.MILLISECONDS) && capable.get()
+    } catch (_: InterruptedException) {
+        Thread.currentThread().interrupt()
+        false
+    }
 }
