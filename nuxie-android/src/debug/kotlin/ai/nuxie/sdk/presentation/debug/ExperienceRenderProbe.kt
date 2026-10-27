@@ -37,41 +37,7 @@ object ExperienceRenderProbe {
             "Nuxie runtime library is unavailable"
         }
 
-        val completed = CountDownLatch(1)
-        val lane = NuxieRuntimeLane()
-        var catalogFailure: Throwable? = null
-        var imageAsset: InspectedImageAsset? = null
-        val accepted = lane.enqueue {
-            runCatching {
-                val catalog = checkNotNull(runtime.inspectFileAssets(sceneBytes)) {
-                    "Runtime could not inspect the Experience asset catalog"
-                }
-                val image = catalog.singleOrNull { it.kind == FileAssetKind.IMAGE }
-                    ?: error("Expected exactly one image in the Experience asset catalog")
-                InspectedImageAsset(
-                    name = image.name,
-                    authoredId = checkNotNull(image.authoredId) {
-                        "Inspected image has no authored id"
-                    },
-                )
-            }.fold(
-                onSuccess = { imageAsset = it },
-                onFailure = { catalogFailure = it },
-            )
-            completed.countDown()
-        }
-        lane.shutdown()
-
-        val inspected = accepted && try {
-            completed.await(INSPECTION_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
-            false
-        }
-        check(inspected) { "Timed out inspecting the Experience asset catalog" }
-        lane.awaitQuiescence(INSPECTION_TIMEOUT_MILLIS)
-        catalogFailure?.let { throw IllegalStateException(it.message, it) }
-        return checkNotNull(imageAsset) { "Runtime returned no inspected image asset" }
+        return inspectImageAssetOnLane(runtime, NuxieRuntimeLane(), sceneBytes)
     }
 
     /**
@@ -133,5 +99,45 @@ object ExperienceRenderProbe {
     }
 
     private const val CLEAR_COLOR_OPAQUE_BLACK = 0xFF000000.toInt()
-    private const val INSPECTION_TIMEOUT_MILLIS = 5_000L
+}
+
+/** Inspects on the supplied lane and takes responsibility for shutting it down. */
+internal fun inspectImageAssetOnLane(
+    runtime: NuxieRuntime,
+    lane: NuxieRuntimeLane,
+    sceneBytes: ByteArray,
+    timeoutMillis: Long = 5_000L,
+): ExperienceRenderProbe.InspectedImageAsset {
+    val completed = CountDownLatch(1)
+    var catalogFailure: Throwable? = null
+    var imageAsset: ExperienceRenderProbe.InspectedImageAsset? = null
+    val accepted = lane.enqueue {
+        runCatching {
+            val catalog = checkNotNull(runtime.inspectFileAssets(sceneBytes)) {
+                "Runtime could not inspect the Experience asset catalog"
+            }
+            val image = catalog.singleOrNull { it.kind == FileAssetKind.IMAGE }
+                ?: error("Expected exactly one image in the Experience asset catalog")
+            ExperienceRenderProbe.InspectedImageAsset(
+                name = image.name,
+                authoredId = checkNotNull(image.authoredId) {
+                    "Inspected image has no authored id"
+                },
+            )
+        }.fold(
+            onSuccess = { imageAsset = it },
+            onFailure = { catalogFailure = it },
+        )
+    }
+    lane.shutdown { completed.countDown() }
+
+    val inspected = accepted && try {
+        completed.await(timeoutMillis, TimeUnit.MILLISECONDS)
+    } catch (_: InterruptedException) {
+        Thread.currentThread().interrupt()
+        false
+    }
+    check(inspected) { "Timed out inspecting the Experience asset catalog" }
+    catalogFailure?.let { throw IllegalStateException(it.message, it) }
+    return checkNotNull(imageAsset) { "Runtime returned no inspected image asset" }
 }
