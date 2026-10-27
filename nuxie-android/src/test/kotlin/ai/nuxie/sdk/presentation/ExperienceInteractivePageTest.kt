@@ -206,7 +206,7 @@ class ExperienceInteractivePageTest {
             assertEquals(NuxieViewModelScalarValue.NumberValue(1.0), layer.lifecycle("b")["screen/appearances"])
         }
     }
-    @Test fun `events use unique graph owner and exact names and removal never advances`() = runBlocking {
+    @Test fun `events use their graph owner and exact names, a shared instance goes to the Screen on top, and removal never advances`() = runBlocking {
         withLayer { layer, native ->
             layer.insertIncoming("a", Style.MAGIC_MOVE, false)
             layer.insertIncoming("b", Style.MAGIC_MOVE, false)
@@ -217,9 +217,16 @@ class ExperienceInteractivePageTest {
                 event("missing", 777), event("zero", 0))
             val frame = layer.step(0.1)
             assertTrue(a.isCompleted); assertTrue(b.isCompleted); assertFalse(suffix.isCompleted)
-            assertEquals(listOf("done"), frame.rows.getValue("a").outcome.events.map { it.name })
+            // Instance 999 is in both rows' graphs; "a" is on top until another row is selected (F1).
+            assertEquals(listOf("done", "shared"), frame.rows.getValue("a").outcome.events.map { it.name })
             assertEquals(listOf("done"), frame.rows.getValue("b").outcome.events.map { it.name })
-            assertEquals(listOf("shared", "missing", "zero"), frame.unattributedEvents.map { it.name })
+            assertEquals(listOf("missing", "zero"), frame.unattributedEvents.map { it.name })
+            layer.selectActive("b")
+            native.events = arrayOf(event("shared", 999))
+            val selected = layer.step(0.1)
+            assertEquals(emptyList<String>(), selected.rows.getValue("a").outcome.events.map { it.name })
+            assertEquals(listOf("shared"), selected.rows.getValue("b").outcome.events.map { it.name })
+            layer.selectActive("a")
             assertEquals(setOf("alias-a"), frame.rows.getValue("a").snapshot.instanceAliases(200))
             assertTrue(runCatching { layer.remove("a") }.isFailure)
             layer.removeCompletion("a", suffix)
