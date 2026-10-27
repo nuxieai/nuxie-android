@@ -94,8 +94,9 @@ internal class ExperienceTextInputOverlay(
             }
         }
         if (fields.isNotEmpty()) checkNotNull(nativeWriter) { "Native input writer is unavailable" }
-        val incoming = fields.associateBy { it.target }
-        bindings.filter { binding -> incoming[binding.field.target]?.ownerId != binding.field.ownerId }.toList().forEach { binding ->
+        // A binding follows its node and owner: a move can carry a field to another declaration (F3b).
+        val incoming = fields.associateBy { it.target.nodeId }
+        bindings.filter { binding -> incoming[binding.field.target.nodeId]?.ownerId != binding.field.ownerId }.toList().forEach { binding ->
             binding.editor.onChange = {}
             binding.editor.onReturn = null
             binding.draft.withdraw()
@@ -108,7 +109,7 @@ internal class ExperienceTextInputOverlay(
         }
         for (field in fields) {
             val input = checkNotNull(nativeInputs[field.target.inputId]) { "Undeclared native input" }
-            val binding = bindings.firstOrNull { it.field.target == field.target } ?: run {
+            val binding = bindings.firstOrNull { it.field.target.nodeId == field.target.nodeId } ?: run {
                 val editor = Editor(context, input.copy(value = field.text))
                 editor.tag = "nuxie-text-input-${input.id}-${field.target.nodeId}"
                 editor.setTextColor(Color.TRANSPARENT)
@@ -152,6 +153,8 @@ internal class ExperienceTextInputOverlay(
                 binding.editor.updateDeclaration(input)
                 binding.input = input
             }
+            // Keyed by the declaration it now edits, so later writes go to that input.
+            if (binding.field.target != field.target) binding.editor.tag = "nuxie-text-input-${input.id}-${field.target.nodeId}"
             binding.field = field
             binding.editor.semanticNode = field.node
             binding.editor.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES

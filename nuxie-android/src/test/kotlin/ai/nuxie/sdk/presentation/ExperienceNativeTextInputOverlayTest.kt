@@ -173,6 +173,32 @@ class ExperienceNativeTextInputOverlayTest {
             android.os.Bundle().apply { putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "12345") }))
     }
 
+    @Test fun `a field a move carries to another declaration keeps its editor and focus and edits that declaration`() = withOverlay { overlay, writes, _ ->
+        val first = ExperienceTextInput.forScreen(textInputDescriptor(), "survey").single().copy(maxLength = null)
+        for (multiline in listOf(false, true)) {
+            val second = first.copy(id = "email", placeholder = "Email", multiline = multiline)
+            overlay.updateDeclarations(listOf(first))
+            overlay.updateNativeFields(listOf(field(10, "abc")))
+            val original = editor(overlay, 10)
+            assertTrue(original.requestFocus())
+            overlay.setInputEnabled(false, preserveFocus = true)
+            overlay.updateDeclarations(listOf(second))
+            overlay.updateNativeFields(listOf(field(10, "abc", captureId = 2, inputId = "email")))
+            overlay.setInputEnabled(true, preserveFocus = true)
+            assertSame("The carried field keeps its editor", original,
+                overlay.findViewWithTag<EditText>("nuxie-text-input-email-10"))
+            assertTrue(original.hasFocus())
+            assertEquals("abc", original.text.toString())
+            assertEquals("Email", original.hint.toString())
+            assertEquals(multiline, original.inputType and android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE != 0)
+            original.setText("abcd")
+            assertEquals(ExperienceTextFieldTarget("email", 10), writes.last().target)
+            writes.last().done(ExperienceSemanticTextDraft.Outcome.ACCEPTED)
+            overlay.updateNativeFields(emptyList())
+            writes.clear()
+        }
+    }
+
     private fun withOverlay(block: (ExperienceTextInputOverlay, MutableList<Pending>, MutableList<Pair<Long, String>>) -> Unit) {
         val controller = Robolectric.buildActivity(Activity::class.java).setup()
         val writes = mutableListOf<Pending>()
@@ -194,10 +220,11 @@ class ExperienceNativeTextInputOverlayTest {
     private fun editor(overlay: ExperienceTextInputOverlay, id: Long): EditText =
         requireNotNull(overlay.findViewWithTag("nuxie-text-input-name-$id"))
 
-    private fun field(id: Long, text: String, ownerId: Long = id, captureId: Long = 1, obscured: Boolean = false): ExperienceNativeTextField {
+    private fun field(id: Long, text: String, ownerId: Long = id, captureId: Long = 1, obscured: Boolean = false,
+        inputId: String = "name"): ExperienceNativeTextField {
         val transform = NuxieTextRunGeometry.Transform(1f, 0f, 0f, 1f, 0f, 0f)
         val bounds = NuxieTextRunGeometry.Bounds(0f, 0f, 100f, 40f)
-        return ExperienceNativeTextField(ExperienceTextFieldTarget("name", id), ownerId, captureId,
+        return ExperienceNativeTextField(ExperienceTextFieldTarget(inputId, id), ownerId, captureId,
             NativeSemanticNode(id, -1, 0, NativeSemanticRole.TEXT_FIELD, 0, 0, 0, 0,
                 0f, 0f, 100f, 40f, "Name", "", ""),
             NuxieTextInputGeometry(1u, transform, bounds, NuxieTextRunGeometry.Layout(transform, bounds),
