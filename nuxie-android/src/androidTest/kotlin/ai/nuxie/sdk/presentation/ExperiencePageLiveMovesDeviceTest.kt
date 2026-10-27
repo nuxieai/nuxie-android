@@ -85,6 +85,8 @@ class ExperiencePageLiveMovesDeviceTest {
                         if (present) page.step(0.0)
                     }
                     override suspend fun takeIncoming() { mutations += { it.takeIncomingOnLane(target, source, transition == "back") } }
+                    // R3c: without this zero-time step, B's second arrival never plays.
+                    override suspend fun settle() { mutations += { it.stepOnLane(0.0) } }
                     override suspend fun phases(values: List<Pair<String, ExperienceScreenLifecycle.Phase>>, transition: String) {
                         mutations += { it.setPhasesOnLane(values, transition) }
                     }

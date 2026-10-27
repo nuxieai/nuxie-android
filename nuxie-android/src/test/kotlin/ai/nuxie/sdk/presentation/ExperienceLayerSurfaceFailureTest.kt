@@ -466,7 +466,7 @@ class ExperienceLayerSurfaceFailureTest {
         }
     }
 
-    @Test fun `recreated page Back positions missing destination below current Screen for visible and covered cuts`() = runBlocking {
+    @Test fun `recreated page Back positions missing destination below current Screen and settles it for visible and covered cuts`() = runBlocking {
         for (covered in listOf(false, true)) withSurface(prepareTarget = false) { surface, page, native, lane ->
             val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
             val scene = java.io.File.createTempFile("page-recreated-back", ".riv").apply { writeBytes(byteArrayOf(1)) }
@@ -496,8 +496,9 @@ class ExperienceLayerSurfaceFailureTest {
                     mounted.prepareRow(target, listener)
                     mounted.navigateLayer(target, isBack = true)
                 }
-                assertEquals(listOf("insert:1", "move:1:0", "begin:B:null"), native.trace.take(3))
-                assertFalse(native.trace.any { it.startsWith("step:") })
+                // R3c: one ordinary zero-time step once the row is placed, before the step begins.
+                assertEquals(listOf("insert:1", "move:1:0", "step:0.0", "begin:B:null"), native.trace.take(4))
+                assertEquals(1, native.trace.count { it.startsWith("step:") })
                 assertEquals(listOf("b"), page.mountedScreenIds())
             } finally {
                 native.onStep = {}
@@ -633,6 +634,7 @@ class ExperienceLayerSurfaceFailureTest {
                                 if (ended) currentCoroutineContext().cancel()
                             }
                             override suspend fun takeIncoming() { mutations += { it.takeIncomingOnLane("b", "a", false) } }
+                            override suspend fun settle() = Unit
                             override suspend fun phases(values: List<Pair<String, ExperienceScreenLifecycle.Phase>>, transition: String) {
                                 mutations += { it.setPhasesOnLane(values, transition) }
                             }
