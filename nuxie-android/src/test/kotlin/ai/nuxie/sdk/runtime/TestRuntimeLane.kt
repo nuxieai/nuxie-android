@@ -1,8 +1,8 @@
 package ai.nuxie.sdk.runtime
 
 import ai.nuxie.sdk.logging.NuxieLog as Log
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -12,40 +12,42 @@ import kotlin.coroutines.resumeWithException
 /** Test-only execution for JVM tests with fake native handles and no runtime binary. */
 internal class TestRuntimeLane : NuxieRuntimeLane {
     private val terminationLock = Any()
+    private var closing = false
     private var terminated = false
     private val terminationCallbacks = mutableListOf<() -> Unit>()
-    private val executor = object : ThreadPoolExecutor(
+    private val completion = CountDownLatch(1)
+    @Volatile private var workerThread: Thread? = null
+    private val executor = ThreadPoolExecutor(
         1,
         1,
         0L,
         TimeUnit.MILLISECONDS,
         LinkedBlockingQueue(),
-        { runnable -> Thread(runnable, THREAD_NAME).apply { isDaemon = true } },
-    ) {
-        override fun terminated() {
-            val callbacks = synchronized(terminationLock) {
-                terminated = true
-                terminationCallbacks.toList().also { terminationCallbacks.clear() }
+        { runnable ->
+            Thread(runnable, THREAD_NAME).apply {
+                isDaemon = true
+                workerThread = this
             }
-            callbacks.forEach(::runTerminationCallback)
-            super.terminated()
+        },
+    )
+
+    private fun submit(block: () -> Unit): Boolean = synchronized(terminationLock) {
+        if (closing) false else {
+            executor.execute(block)
+            true
         }
     }
 
     /** Run [block] on the runtime lane and await its result. */
     override suspend fun <T> call(block: () -> T): T = suspendCancellableCoroutine { continuation ->
-        try {
-            executor.execute {
-                val result = runCatching(block)
-                result.fold(
-                    onSuccess = { continuation.resume(it) },
-                    onFailure = { continuation.resumeWithException(it) },
-                )
-            }
-        } catch (rejected: RejectedExecutionException) {
-            continuation.resumeWithException(
-                IllegalStateException("Runtime lane is shut down", rejected),
+        val accepted = submit {
+            runCatching(block).fold(
+                onSuccess = { continuation.resume(it) },
+                onFailure = { continuation.resumeWithException(it) },
             )
+        }
+        if (!accepted) {
+            continuation.resumeWithException(IllegalStateException("Runtime lane is shut down"))
         }
     }
 
@@ -55,20 +57,37 @@ internal class TestRuntimeLane : NuxieRuntimeLane {
      * waiting on a completion signal from the task can skip the wait.
      */
     override fun enqueue(block: () -> Unit): Boolean {
-        return try {
-            executor.execute {
-                runCatching(block).onFailure { Log.w(LOG_TAG, "Runtime lane task failed", it) }
-            }
-            true
-        } catch (_: RejectedExecutionException) {
-            Log.w(LOG_TAG, "Runtime lane task rejected after shutdown")
-            false
+        val accepted = submit {
+            runCatching(block).onFailure { Log.w(LOG_TAG, "Runtime lane task failed", it) }
         }
+        if (!accepted) Log.w(LOG_TAG, "Runtime lane task rejected after shutdown")
+        return accepted
     }
 
     /** Run remaining work, then stop the lane. */
     override fun shutdown() {
-        executor.shutdown()
+        synchronized(terminationLock) {
+            if (closing) return
+            closing = true
+            // An ordinary final task keeps callbacks off the caller and outside the
+            // ThreadPoolExecutor termination hook's lock, including an unused lane.
+            executor.execute(::finishTermination)
+            executor.shutdown()
+        }
+    }
+
+    private fun finishTermination() {
+        while (true) {
+            val callbacks = synchronized(terminationLock) {
+                if (terminationCallbacks.isEmpty()) {
+                    terminated = true
+                    completion.countDown()
+                    return
+                }
+                terminationCallbacks.toList().also { terminationCallbacks.clear() }
+            }
+            callbacks.forEach(::runTerminationCallback)
+        }
     }
 
     /**
@@ -78,7 +97,7 @@ internal class TestRuntimeLane : NuxieRuntimeLane {
      */
     override fun shutdown(onTerminated: () -> Unit) {
         afterTermination(onTerminated)
-        executor.shutdown()
+        shutdown()
     }
 
     /** Register independent cleanup without replacing another owner's completion. */
@@ -98,8 +117,9 @@ internal class TestRuntimeLane : NuxieRuntimeLane {
      * lane was never shut down.
      */
     override fun awaitQuiescence(timeoutMs: Long): Boolean {
+        if (Thread.currentThread() === workerThread) return false
         return try {
-            executor.awaitTermination(timeoutMs, TimeUnit.MILLISECONDS)
+            completion.await(timeoutMs.coerceAtLeast(0), TimeUnit.MILLISECONDS)
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
             false
