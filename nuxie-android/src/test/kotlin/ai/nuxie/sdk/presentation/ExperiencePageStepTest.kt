@@ -22,6 +22,7 @@ class ExperiencePageStepTest {
             events += "batch"; writes(); events += "commit:$present"
         }
         override suspend fun takeIncoming() { events += "take"; assertFalse(enabled) }
+        override suspend fun settle() { events += "settle"; assertFalse(enabled) }
         override suspend fun phases(values: List<Pair<String, ExperienceScreenLifecycle.Phase>>, transition: String) {
             events += values.joinToString(",") { "${it.first}:${it.second.wireValue}" } + ":$transition"
             assertFalse(enabled)
@@ -35,13 +36,14 @@ class ExperiencePageStepTest {
         override suspend fun active() { events += "active" }
     }
     private suspend fun perform(trace: Trace, style: Style, plan: ExperienceScreenTransitionPlan.Custom? = this.plan,
-        reduced: Boolean = false, target: String = "b", exit: ExperiencePageStep.Exit = ExperiencePageStep.Exit("declared", 350)) =
-        ExperiencePageStep.perform("a", target, style, false, plan, exit, reduced, trace)
+        reduced: Boolean = false, target: String = "b", exit: ExperiencePageStep.Exit = ExperiencePageStep.Exit("declared", 350),
+        coveredCut: Boolean = false) =
+        ExperiencePageStep.perform("a", target, style, false, plan, exit, reduced, trace, coveredCut)
 
     @Test fun `together step begins in phase batch and ends before outgoing retirement`() = runBlocking {
         for (style in listOf(Style.MAGIC_MOVE, Style.FADE)) {
             val trace = Trace(); perform(trace, style)
-            assertEquals(listOf("input:false", "prepare", "batch", "take", "register:a:leave", "register:b:arrive",
+            assertEquals(listOf("input:false", "prepare", "batch", "take", "settle", "register:a:leave", "register:b:arrive",
                 "a:exiting,b:entering:pair", "begin:pair", "commit:true", "present", "wait:2:650", "batch",
                 "end:pair", "retire", "a:hidden,b:active:", "commit:false", "hidden", "active", "input:true"), trace.events)
         }
@@ -49,7 +51,7 @@ class ExperiencePageStepTest {
     @Test fun `cut with transition waits for each published half and swaps after begin`() = runBlocking {
         val trace = Trace(); perform(trace, Style.NONE)
         assertEquals(listOf("input:false", "prepare", "register:a:leave", "batch", "a:exiting:pair", "commit:true",
-            "present", "wait:1:650", "batch", "take", "register:b:arrive", "b:entering:pair", "begin:pair", "retire",
+            "present", "wait:1:650", "batch", "take", "settle", "register:b:arrive", "b:entering:pair", "begin:pair", "retire",
             "a:hidden:", "commit:true", "present", "wait:1:650", "batch", "end:pair", "b:active:", "commit:false",
             "hidden", "active", "input:true"), trace.events)
     }
@@ -70,8 +72,15 @@ class ExperiencePageStepTest {
     @Test fun `reduced motion calls begin and end in one batch and never waits`() = runBlocking {
         for (style in listOf(Style.MAGIC_MOVE, Style.FADE, Style.NONE)) {
             val trace = Trace(); perform(trace, style, reduced = true)
-            assertEquals(listOf("input:false", "prepare", "batch", "take", "a:exiting:pair", "b:entering:pair",
+            assertEquals(listOf("input:false", "prepare", "batch", "take", "settle", "a:exiting:pair", "b:entering:pair",
                 "begin:pair", "end:pair", "retire", "a:hidden,b:active:", "commit:false", "hidden", "active", "input:true"), trace.events)
+        }
+    }
+    @Test fun `covered cut keeps both rows hidden and settles the woken row before a nameless step`() = runBlocking {
+        for (style in listOf(Style.MAGIC_MOVE, Style.FADE, Style.NONE)) {
+            val trace = Trace(); perform(trace, style, reduced = style == Style.FADE, coveredCut = true)
+            assertEquals(listOf("input:false", "prepare", "batch", "a:hidden,b:hidden:", "take", "settle",
+                "begin:null", "end:null", "retire", "commit:false", "hidden", "active", "input:true"), trace.events)
         }
     }
     @Test fun `primitive fade without a published id cuts with a null step name`() = runBlocking {
