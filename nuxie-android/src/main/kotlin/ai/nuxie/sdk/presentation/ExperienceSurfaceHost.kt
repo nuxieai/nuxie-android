@@ -171,6 +171,7 @@ internal class ExperienceSurfaceHost(
     }
 
     internal suspend fun selectLayerRow(screenId: String) = layerOperation { layer ->
+        layer.selectActiveOnLane(screenId)
         activeRowId = screenId
         viewModelState = layer.valuesOnLane(screenId)
         textInputs = layer.textInputsOnLane(screenId).associateBy(ExperienceTextInput::id)
