@@ -217,20 +217,6 @@ internal class ExperienceSurfaceHost(
         }
     }
 
-    internal suspend fun restoreLayerRow(sourceId: String, targetId: String, keepTarget: Boolean = false) = layerOperation { layer ->
-        if (sourceId != targetId) {
-            layer.cancelStepOnLane(sourceId, targetId)
-            val targetMounted = targetId in layer.mountedScreenIdsOnLane()
-            // Cancelled preparation may not have created the target row.
-            layer.setPhasesOnLane(listOfNotNull((targetId to ExperienceScreenLifecycle.Phase.HIDDEN).takeIf { targetMounted },
-                sourceId to ExperienceScreenLifecycle.Phase.ACTIVE))
-            if (targetMounted) {
-                if (keepTarget) layer.setCollapsedOnLane(targetId, true)
-                else layer.removeOnLane(targetId)
-            }
-        }
-    }
-
     private var videoPlayback: ExperienceVideoPlayback? = null
     private var file: NuxieRuntimeFile? = null
     private var artboard: NuxieRuntimeArtboard? = null

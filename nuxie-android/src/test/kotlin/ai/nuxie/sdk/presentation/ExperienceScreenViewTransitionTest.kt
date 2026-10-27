@@ -27,7 +27,7 @@ class ExperienceScreenViewTransitionTest {
     }
 
     @Test
-    fun `standard animation transforms and rollback match the shared contract`() {
+    fun `standard animation transforms match the shared contract`() {
         for (value in contract.getValue("cases").jsonArray) {
             val case = value.jsonObject
             val source = screen()
@@ -40,13 +40,6 @@ class ExperienceScreenViewTransitionTest {
             assertEquals(case.getValue("sourceX").jsonPrimitive.float, source.translationX, 0.0001f)
             assertEquals(case.getValue("targetX").jsonPrimitive.float, target.translationX, 0.0001f)
             assertEquals(case.getValue("targetY").jsonPrimitive.float, target.translationY, 0.0001f)
-            transition.restoreSource()
-            val rollback = contract.getValue("rollback").jsonObject
-            assertEquals(rollback.getValue("sourceAlpha").jsonPrimitive.float, source.alpha, 0f)
-            assertEquals(rollback.getValue("targetAlpha").jsonPrimitive.float, target.alpha, 0f)
-            for (offset in listOf(source.translationX, source.translationY, target.translationX, target.translationY)) {
-                assertEquals(rollback.getValue("translation").jsonPrimitive.float, offset, 0f)
-            }
         }
     }
 

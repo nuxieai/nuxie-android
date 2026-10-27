@@ -397,15 +397,6 @@ internal class ExperienceMountedScreen(
             "Experience phase presentation watchdog expired", null, NuxieLog.sensitive("watchdogMs", milliseconds))
     }
 
-    suspend fun restoreRow(source: PreparedPresentation, targetId: String) {
-        val sourceId = checkNotNull(source.screenId)
-        surface.restoreLayerRow(sourceId, targetId, keepTarget = targetId in source.pageHistory)
-        prepared = source
-        activeListener = checkNotNull(rows[sourceId]).listener
-        bindTextOverlay()
-        surface.selectLayerRow(sourceId)
-    }
-
     private fun bindTextOverlay() {
         val root = content as? FrameLayout ?: return
         val inputs = ExperienceTextInput.forScreen(prepared.descriptor, prepared.screenId)

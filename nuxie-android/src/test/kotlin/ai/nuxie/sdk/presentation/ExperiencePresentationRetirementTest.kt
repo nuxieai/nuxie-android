@@ -52,12 +52,12 @@ class ExperiencePresentationRetirementTest {
         assertFalse("Cancelled work must not run after the dispatcher recovers", cleaned.get())
     }
 
-    @Test fun `noncancellable rollback stops waiting on a stalled lane without freeing its owner`() = runTest {
+    @Test fun `noncancellable landing stops waiting on a stalled lane without freeing its owner`() = runTest {
         val lane = TestRuntimeLane()
         val entered = CountDownLatch(1)
         val unblock = CountDownLatch(1)
         val released = AtomicBoolean(false)
-        val rollback = async {
+        val landing = async {
             runCatching {
                 withContext(NonCancellable) {
                     awaitPresentationRetirement {
@@ -75,9 +75,9 @@ class ExperiencePresentationRetirementTest {
             lane.shutdown { released.set(true) }
             advanceTimeBy(5_001)
             runCurrent()
-            assertTrue(rollback.isCompleted)
+            assertTrue(landing.isCompleted)
             assertEquals(ExperiencePresentationException.Reason.HOST_FAILED,
-                (rollback.await() as ExperiencePresentationException).reason)
+                (landing.await() as ExperiencePresentationException).reason)
             assertFalse("A cancelled waiter cannot retire native ownership", released.get())
         } finally {
             unblock.countDown()
@@ -96,7 +96,6 @@ class ExperiencePresentationRetirementTest {
         try {
             val originals = listOf(null, kotlinx.coroutines.CancellationException("page step cancelled"),
                 ExperiencePresentationException(ExperiencePresentationException.Reason.SUPERSEDED, "withdrawn"),
-                ExperiencePresentationException(ExperiencePresentationException.Reason.LAYER_DISMISSED, "dismissed"),
                 IllegalStateException("step failed"))
             for (original in originals) {
                 var blockCompleted = false

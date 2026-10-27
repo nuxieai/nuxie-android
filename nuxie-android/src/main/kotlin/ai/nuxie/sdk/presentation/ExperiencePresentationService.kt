@@ -75,7 +75,6 @@ internal class ExperiencePresentationException(
         PRODUCTS_UNAVAILABLE,
         FIRST_FRAME_TIMEOUT,
         SUPERSEDED,
-        LAYER_DISMISSED,
         DECLINED,
     }
 }
@@ -773,7 +772,6 @@ internal class ExperiencePresentationService(
         val journeyId: String?,
         val job: CompletableJob,
         val finished: CompletableDeferred<Unit> = CompletableDeferred(),
-        val layerDismissed: AtomicBoolean = AtomicBoolean(false),
     )
 
     private var preparation: PreparationAttempt? = null
@@ -1463,9 +1461,7 @@ internal class ExperiencePresentationService(
                     } else {
                         // Owned withdrawal is a presentation result, not cancellation of the Journey worker.
                         ExperiencePresentationException(
-                            if (attempt.layerDismissed.get()) ExperiencePresentationException.Reason.LAYER_DISMISSED
-                            else ExperiencePresentationException.Reason.SUPERSEDED,
-                            "Presentation preparation was withdrawn", error,
+                            ExperiencePresentationException.Reason.SUPERSEDED, "Presentation preparation was withdrawn", error,
                         )
                     }
                 } else error
@@ -1891,7 +1887,16 @@ internal class ExperiencePresentationService(
         else -> JourneyPermissionRequest.UNSUPPORTED
     }
 
+    /** A close of the Experience lets a started move land, then closes the Screen it landed on (S1c). */
     fun dismiss(reason: CloseReason = CloseReason.UserDismissed) {
+        val moves = synchronized(stateLock) { current?.moves } ?: return dismissNow(reason)
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            moves.closeAfterLanding()
+            dismissNow(reason)
+        }
+    }
+
+    private fun dismissNow(reason: CloseReason) {
         val active = synchronized(stateLock) {
             preparation?.job?.cancel()
             current
@@ -1902,7 +1907,12 @@ internal class ExperiencePresentationService(
         }
     }
 
-    suspend fun dismissFromHost(initiatingDistinctId: String) = awaitPresentationRetirement {
+    suspend fun dismissFromHost(initiatingDistinctId: String) {
+        synchronized(stateLock) { current?.moves }?.closeAfterLanding()
+        dismissFromHostNow(initiatingDistinctId)
+    }
+
+    private suspend fun dismissFromHostNow(initiatingDistinctId: String) = awaitPresentationRetirement {
         val (active, attempt) = synchronized(stateLock) {
             preparation?.job?.cancel()
             current to preparation
@@ -1932,7 +1942,12 @@ internal class ExperiencePresentationService(
      * Tears down a presentation owned by the departing customer and attempts
      * an owner-attributed identity terminal transition without a close fact.
      */
-    suspend fun shutdownOwnedBy(ownerDistinctId: String) = awaitPresentationRetirement {
+    suspend fun shutdownOwnedBy(ownerDistinctId: String) {
+        synchronized(stateLock) { current?.takeIf { it.ownerDistinctId == ownerDistinctId }?.moves }?.closeAfterLanding()
+        shutdownOwnedByNow(ownerDistinctId)
+    }
+
+    private suspend fun shutdownOwnedByNow(ownerDistinctId: String) = awaitPresentationRetirement {
         val (active, attempt) = synchronized(stateLock) {
             val departing = current?.takeIf { it.ownerDistinctId == ownerDistinctId }
             identityEpochByOwner[ownerDistinctId] =
@@ -1959,7 +1974,12 @@ internal class ExperiencePresentationService(
     }
 
     /** Closes only the terminal Journey surface without injecting another outcome. */
-    suspend fun shutdownJourney(ownerDistinctId: String, journeyId: String) = awaitPresentationRetirement {
+    suspend fun shutdownJourney(ownerDistinctId: String, journeyId: String) {
+        synchronized(stateLock) { current?.takeIf { it.isOwnedBy(journeyId, ownerDistinctId) }?.moves }?.closeAfterLanding()
+        shutdownJourneyNow(ownerDistinctId, journeyId)
+    }
+
+    private suspend fun shutdownJourneyNow(ownerDistinctId: String, journeyId: String) = awaitPresentationRetirement {
         val (active, attempt) = synchronized(stateLock) {
             val pending = preparation?.takeIf {
                 it.request.ownerDistinctId == ownerDistinctId && it.journeyId == journeyId

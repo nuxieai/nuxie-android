@@ -1,5 +1,6 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.logging.NuxieLog
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
@@ -36,7 +37,14 @@ internal class ExperienceMoveQueue {
             private set
         internal val released = CompletableDeferred<Unit>()
 
-        fun start() { started = true }
+        /**
+         * Admits the move's first change on screen (S1c). Refused once a close has revoked the
+         * queue: either the move started first and the close waits for it, or it never starts.
+         */
+        fun start(): Boolean = synchronized(lock) {
+            if (!revoked) started = true
+            started
+        }
 
         /** Ends a move taken with [tryTake], once. */
         fun release() = this@ExperienceMoveQueue.release(this)
@@ -65,6 +73,9 @@ internal class ExperienceMoveQueue {
 
     /** The running move, when the caller is that move's own work. */
     suspend fun joined(): Move? = coroutineContext[Key]?.takeIf { it.queue === this && it === running }
+
+    /** Admits the caller's first change on screen; false once the Experience is closing. Work outside a move proceeds. */
+    suspend fun markStarted(): Boolean = joined()?.start() ?: !isRevoked
 
     /** Runs [block] in the slot once every move ahead of it has landed. */
     suspend fun <T> run(closes: Any? = null, block: suspend (Move) -> T): T {
@@ -133,6 +144,23 @@ internal class ExperienceMoveQueue {
         dropped.forEach { (_, turn) -> turn.completeExceptionally(Closed()) }
         if (running == null && dropped.isNotEmpty()) busyListener?.invoke(false)
         return running
+    }
+
+    /**
+     * A close of the Experience (S1c): revokes the queue, then lets a started move land within the
+     * close's time limit, unless the caller is that move's own work or the Activity is stopped. A
+     * move still preparing has changed nothing on screen, so the caller cancels it as before.
+     */
+    suspend fun closeAfterLanding() {
+        val running = revoke()?.takeIf { it.started } ?: return
+        if (joined() === running) return
+        try {
+            awaitPresentationRetirement { awaitLanding(running) }
+        } catch (stalled: ExperiencePresentationException) {
+            // A wedged native step must not hold the close: the close proceeds, and the step's
+            // own retirement still owns its native work.
+            NuxieLog.w("ExperienceMoveQueue", "A started move did not land within the close's limit", stalled)
+        }
     }
 
     /** The Activity's started fact: while stopped nothing is on screen, so a close need not wait. */

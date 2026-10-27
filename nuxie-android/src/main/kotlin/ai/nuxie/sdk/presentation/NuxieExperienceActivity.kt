@@ -20,6 +20,7 @@ import android.widget.FrameLayout
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
@@ -231,7 +232,13 @@ internal class NuxieExperienceActivity : Activity() {
             withContext(Dispatchers.Main.immediate) {
                 val layer = layers.firstOrNull { it.screen === this@Screen } ?: return@withContext null
                 check(layer !== layers.last()) { "Hidden cut requires a covered page" }
-                checkNotNull(mounted).cutCoveredPage(target, this@Screen).also { prepared = it }
+                // Admission, once before the first change (S1c): the covered page's cut lands, and a
+                // failure during it ends the Experience instead of leaving the page half cut.
+                check(moves?.markStarted() != false) { "The Experience closed before this cut started" }
+                withContext(NonCancellable) {
+                    try { checkNotNull(mounted).cutCoveredPage(target, this@Screen).also { prepared = it } }
+                    catch (error: Throwable) { this@NuxieExperienceActivity.finishTerminal(CloseReason.Error(error)); throw error }
+                }
             }
         override suspend fun updatePageHistory(history: List<String>) = withContext(Dispatchers.Main.immediate) {
             checkNotNull(mounted).updatePageHistory(history)
@@ -375,6 +382,9 @@ internal class NuxieExperienceActivity : Activity() {
             source.prepared.descriptor == target.prepared.descriptor
         var blocksInput = false
             private set
+        /** Admitted to make its first change (S1c): from here it lands, and nothing of it is undone. */
+        private var started = false
+        private var landingFailure: Throwable? = null
         private var animation: ExperienceScreenViewTransition? = null
         private var sourceAccessibility: Int? = null
         private var targetAccessibility: Int? = null
@@ -413,10 +423,21 @@ internal class NuxieExperienceActivity : Activity() {
             check(navigation === this@Navigation && currentScreen === source && !isFinishing && !isDestroyed) {
                 "Navigation source is no longer active"
             }
+            // Admission, once before the first change (S1c): a page step needs its page on top.
+            if (reusesLayer) check(layers.lastOrNull()?.screen === source) { "Page step source is no longer on top" }
+            check(moves?.markStarted() != false) { "The Experience closed before this move started" }
+            started = true
+            // A started move lands: a close waits for it, and nothing cancels it halfway.
+            withContext(NonCancellable) {
+                try { land() } catch (error: Throwable) { landingFailure = error; throw error }
+            }
+        }
+
+        private suspend fun land() {
             if (reusesLayer) {
                 source.mounted!!.navigateLayer(target.prepared, target.prepared.isBack)
                 target.failure?.let { throw it }
-                return@withContext Unit
+                return
             }
             val render = target.prepared.descriptor?.get("render") as? JsonObject
             val plan = ExperienceScreenTransitionPlan.resolve(
@@ -458,7 +479,6 @@ internal class NuxieExperienceActivity : Activity() {
                 }
             }
             target.failure?.let { throw it }
-            Unit
         }
 
         override fun activate() {
@@ -528,19 +548,17 @@ internal class NuxieExperienceActivity : Activity() {
         override suspend fun abort() = withContext(NonCancellable) {
             awaitPresentationRetirement {
                 withContext(Dispatchers.Main.immediate) {
-                    animation?.restoreSource()
-                    if (reusesLayer && currentScreen === source && source.screenCloseReason() == null) {
-                        runCatching { source.mounted?.restoreRow(source.prepared, checkNotNull(target.prepared.screenId)) }
-                            .onFailure { source.fail(it) }
-                    }
                     restoreInput()
                     if (navigation === this@Navigation) navigation = null
                     if (!reusesLayer) target.view?.let { (it.parent as? android.view.ViewGroup)?.removeView(it) }
                     target.close(false)
                     screens.remove(target)
                     if (currentScreen === source) {
+                        // Nothing is undone halfway (S1c): a started move that did not take over ends the Experience.
+                        if (started && source.screenCloseReason() == null)
+                            source.fail(landingFailure ?: IllegalStateException("A started move ended before its Screen took over"))
                         if (source.screenCloseReason() != null) finish()
-                        else if (closingLayer == null && !target.prepared.opensLayer) source.mounted?.activate()
+                        else if (!started && closingLayer == null && !target.prepared.opensLayer) source.mounted?.activate()
                     }
                     target.closed.await()
                 }
@@ -932,6 +950,12 @@ internal class NuxieExperienceActivity : Activity() {
     private suspend fun closeLayerNow(layer: Layer, authored: Boolean, method: String, pageCount: Int): Boolean {
         // closingLayer guards a re-entrant close from the move's own callbacks; moves never overlap.
         if (layers.lastOrNull() !== layer || pageCount < 1 || pageCount >= layers.size || closingLayer != null) return false
+        // The close's first change is next (S1c): from here it lands, and a close of the Experience waits for it.
+        if (moves?.markStarted() == false) return false
+        return withContext(NonCancellable) { closeStartedLayer(layer, authored, method, pageCount) }
+    }
+
+    private suspend fun closeStartedLayer(layer: Layer, authored: Boolean, method: String, pageCount: Int): Boolean {
         closingLayer = layer
         layers.forEach { it.sheet?.setInputEnabled(false) }
         val source = layer.screen
@@ -1209,9 +1233,23 @@ internal class NuxieExperienceActivity : Activity() {
         else -> error("Permission request has no Android runtime permission")
     }
 
+    /**
+     * The Experience closes: what waits in its queue completes as closed. A started move lands
+     * first, then the close closes the Screen it landed on (S1c). An error closes at once.
+     */
     private fun finishTerminal(reason: CloseReason) {
-        // The Experience closes: what waits in its queue completes as closed.
-        moves?.revoke()
+        val moves = moves
+        if (moves == null || reason is CloseReason.Error) {
+            moves?.revoke()
+            return finishTerminalNow(reason)
+        }
+        registryScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            moves.closeAfterLanding()
+            finishTerminalNow(reason)
+        }
+    }
+
+    private fun finishTerminalNow(reason: CloseReason) {
         acquiringScreen?.finishTerminal(reason) ?: currentScreen?.finishTerminal(reason)
     }
 

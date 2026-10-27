@@ -163,16 +163,6 @@ internal class ExperienceInteractivePage private constructor(
         liveStep = null
     }
 
-    internal fun cancelStepOnLane(source: String, target: String) = checked {
-        liveStep?.let { (incoming, transition) -> endOnLane(incoming, transition) }
-        // Retirement may have removed the source, even when step_end already ran.
-        // Restore its retained values into a fresh instance before taking it back.
-        prepareOnLane(source)
-        takeIncomingOnLane(source, target.takeIf { it in mounted }, isBack = true)
-        beginOnLane(source, null)
-        endOnLane(source, null)
-    }
-
     /** The new history determines all reachable rows, including repeated visits. */
     internal fun retireOnLane(reachable: Set<String>, active: String) = checked {
         // Collapse applies pending list changes. Removals need no settlement advance.
