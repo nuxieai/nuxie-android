@@ -217,6 +217,18 @@ internal class ExperienceMountedScreen(
         content?.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
     }
 
+    /**
+     * Authored time on a page whose clock can't run ends only at its watchdog, so a debug app stops there.
+     * It reads the page's own facts, not "started": a wait may rightly begin while the Activity is stopped.
+     */
+    private fun checkPageClock() {
+        if (!isLayer || (presented && !hiddenBelow && !checkpointHold)) return
+        NuxieLog.w("ExperienceMountedScreen", "Page has authored time on a stopped clock")
+        check(activity.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE == 0) {
+            "Page clock: authored time on a stopped clock"
+        }
+    }
+
     private fun applyClock(preservePendingInput: Boolean = false) {
         val runs = presented && !hiddenBelow && started
         if (runs) {
@@ -256,6 +268,7 @@ internal class ExperienceMountedScreen(
     }
 
     suspend fun awaitExit(reason: ExperienceScreenLifecycle.ExitReason) {
+        checkPageClock()
         if (isLayer) {
             val id = checkNotNull(prepared.screenId)
             val exit = layerExit(prepared)
@@ -403,6 +416,7 @@ internal class ExperienceMountedScreen(
                     }
                     override suspend fun present() = Unit
                     override suspend fun wait(completions: List<kotlinx.coroutines.Deferred<Unit>>, milliseconds: Long) {
+                        checkPageClock()
                         if (phasePresented) super<ExperiencePageStep.Operations>.wait(completions, milliseconds)
                     }
                     override suspend fun hidden() = Unit
