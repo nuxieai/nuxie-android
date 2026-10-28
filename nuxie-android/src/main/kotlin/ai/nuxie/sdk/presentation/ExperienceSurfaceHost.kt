@@ -207,7 +207,19 @@ internal class ExperienceSurfaceHost(
         reason: ExperienceScreenLifecycle.ExitReason = ExperienceScreenLifecycle.ExitReason.NONE) {
         lane.enqueue {
             pendingTextWrites.addLast {
-                if (!released.get() && !failureReported.get()) interactiveLayer?.setPhasesOnLane(phases, exitReason = reason)
+                val layer = interactiveLayer
+                if (!released.get() && !failureReported.get() && layer != null) try {
+                    // Environment values deferred behind a submission first, so the phase is chosen with them (C2).
+                    if (runtimeValuesPending || pendingRuntimeWrites.isNotEmpty()) {
+                        completeRuntimeWrites(applyRuntimeValues(runtimeValues))
+                        runtimeValuesPending = false
+                    }
+                    layer.setPhasesOnLane(phases, exitReason = reason)
+                    // A phase and its zero-delta step are one task, so the state machine sees every phase (section 3).
+                    stepZeroDeltaOnLane()
+                } catch (error: Throwable) {
+                    reportFailure(ExperiencePresentationException.Reason.HOST_FAILED, "Experience phase step failed", error)
+                }
             }
             drainTextWrites()
         }
@@ -1339,7 +1351,11 @@ internal class ExperienceSurfaceHost(
             // lane; clearing on the UI thread could race its final enqueue.
             lane.enqueue {
                 pointerInput.reset()
-                if (retireSubmission()) settleHiddenTransitions()
+                if (retireSubmission()) {
+                    // Writes queued behind the retired submission, phases among them, don't wait for drawing (C3).
+                    drainTextWrites()
+                    settleHiddenTransitions()
+                }
             }
             Choreographer.getInstance().removeFrameCallback(this)
         }

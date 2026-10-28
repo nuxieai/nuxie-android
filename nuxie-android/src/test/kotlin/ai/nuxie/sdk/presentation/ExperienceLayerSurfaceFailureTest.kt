@@ -474,8 +474,9 @@ class ExperienceLayerSurfaceFailureTest {
             // Warm recreation restores only current A, retaining the earlier B visit in history.
             val source = PreparedPresentation(scene, "A", 0, PresentationShell.FullScreen(), "a", descriptor,
                 pageHistory = listOf("b", "a"))
+            // Each Screen keeps its own values, as the recreated Back's destination does.
             val target = source.copy(screenId = "b", artboardName = "B", pageHistory = listOf("b"),
-                screenLifecycle = ExperienceScreenLifecycle())
+                screenLifecycle = ExperienceScreenLifecycle(), retainedViewModel = java.util.concurrent.atomic.AtomicReference())
             val listener = object : ExperienceSurfaceHost.Listener {
                 override fun onFirstFrame() = Unit
                 override fun onFailure(error: ExperiencePresentationException) { throw AssertionError(error) }
@@ -496,8 +497,10 @@ class ExperienceLayerSurfaceFailureTest {
                     mounted.prepareRow(target, listener)
                     mounted.navigateLayer(target, isBack = true)
                 }
+                // A covered page is live, so it is hidden first, with that phase's own step (section 3).
+                val cut = if (covered) native.trace.drop(1).also { assertEquals("step:0.0", native.trace.first()) } else native.trace
                 // R3c: one ordinary zero-time step once the row is placed, before the step begins.
-                assertEquals(listOf("insert:1", "move:1:0", "step:0.0", "begin:B:null"), native.trace.take(4))
+                assertEquals(listOf("insert:1", "move:1:0", "step:0.0", "begin:B:null"), cut.take(4))
                 // The drain's own step comes after the step ends (S8).
                 assertEquals(listOf("step:0.0"), native.trace.dropWhile { !it.startsWith("end:") }.filter { it.startsWith("step:") })
                 assertEquals(listOf("b"), page.mountedScreenIds())
@@ -677,6 +680,54 @@ class ExperienceLayerSurfaceFailureTest {
             } finally { retireAndDrain(surface, lane); navigation.cancelAndJoin(); scene.delete() }
         }
     }
+
+    @Test fun `each page phase write is stepped before the next write, drawing or not`() = runBlocking {
+        for (drawing in listOf(false, true)) withSurface { surface, _, native, lane ->
+            lane.blockingCall { set(surface, "running", drawing); native.tracePhases = true; native.trace.clear() }
+            surface.queueLayerPhases(listOf("a" to ExperienceScreenLifecycle.Phase.ENTERING))
+            surface.queueLayerPhases(listOf("a" to ExperienceScreenLifecycle.Phase.ACTIVE))
+            val after = surface.layerOperation { native.trace.toList() }
+            assertEquals("drawing=$drawing", listOf("phase:1", "step:0.0", "phase:2", "step:0.0"), phasesAndSteps(after))
+        }
+    }
+
+    @Test fun `a page phase step applies environment values deferred behind a submission`() = runTest {
+        withSurface(globals = true) { surface, layer, native, lane ->
+            installPendingSubmission(surface, native, lane)
+            val update = surface.updateRuntimeValues(mapOf("env/reduceMotion" to NuxieViewModelScalarValue.BooleanValue(true)))
+            lane.blockingCall {}
+            assertFalse(update.isCompleted)
+            var reducedAtStep: Boolean? = null
+            native.onStep = { if (reducedAtStep == null) reducedAtStep = native.writes.any { it.first == 500L && it.second.path == "reduceMotion" && it.second.boolValue } }
+            surface.queueLayerPhases(listOf("a" to ExperienceScreenLifecycle.Phase.EXITING))
+            try {
+                retireAndDrain(surface, lane); runCurrent()
+                assertEquals("The phase's step sees the deferred environment value", true, reducedAtStep)
+                assertTrue(update.isCompleted)
+                assertEquals(NuxieViewModelScalarValue.StringValue("exiting"), layer.lifecycle("a")["screen/phase"])
+            } finally { native.onStep = {} }
+        }
+    }
+
+    @Test fun `a phase queued behind a submission is stepped when the page stops drawing`() = runTest {
+        withSurface { surface, layer, native, lane ->
+            installPendingSubmission(surface, native, lane)
+            lane.blockingCall { native.tracePhases = true; native.trace.clear() }
+            surface.queueLayerPhases(listOf("a" to ExperienceScreenLifecycle.Phase.HIDDEN))
+            lane.blockingCall {}
+            assertTrue("Queued behind the submission", native.trace.none { it.startsWith("phase:") })
+            // Hidden below: drawing stops and the submission is retired, with no further frame.
+            surface.setPresentationVisible(false)
+            lane.blockingCall {}
+            try {
+                assertEquals(listOf("phase:0", "step:0.0"), phasesAndSteps(native.trace))
+                assertEquals(NuxieViewModelScalarValue.StringValue("hidden"), layer.lifecycle("a")["screen/phase"])
+            } finally { retireAndDrain(surface, lane) }
+        }
+    }
+
+    private fun phasesAndSteps(trace: List<String>) = trace.filter { it.startsWith("phase:") || it.startsWith("step:") }
+        .map { it.replace(Regex("^phase:\\d+:"), "phase:") }
 
     @Test fun `layer phase preserves queued environment updates for the next frame and their completion`() = runTest {
         withSurface(globals = true) { surface, layer, native, lane ->
