@@ -377,6 +377,37 @@ class ExperiencePagePresentationHeightTest {
         }
     }
 
+    @Test fun `a field under a sheet follows the page as it plays, disabled and out of TalkBack`() = runBlocking {
+        withPushPages(field = true) { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame()
+            // Publications start once the first frame is composed, so the field is drawn from the next one.
+            p.showField("Ada", x = 0f)
+            p.frame()
+            val editor = p.fieldEditor
+            assertTrue("Before the sheet the field is editable", editor.isEnabled)
+            assertEquals(0f, (editor.parent as View).x, 0.001f)
+            val nested = ActivityPage(content.copy(isPushPage = false, layerContentHeight = AtomicReference(),
+                screenLifecycle = ExperienceScreenLifecycle()), lower = p)
+            try {
+                nested.start(); nested.frame()
+                // The page plays on under the sheet: its field moves and its text changes.
+                p.showField("Ada Lovelace", x = 40f)
+                p.frame()
+                assertSame(editor, p.fieldEditor)
+                assertEquals("Its editor follows the text", "Ada Lovelace", editor.text.toString())
+                assertEquals("and the spot", 40f, (editor.parent as View).x, 0.001f)
+                assertFalse("It stays disabled", editor.isEnabled)
+                assertEquals("It isn't announced", View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS, p.accessibility)
+                assertTrue("The content gate waits for input to return", p.awaitingPublication)
+                nested.pop()
+                nested.settle { nested.layerCount() == 2 }
+            } finally { nested.close() }
+            p.frame()
+            assertFalse("The first publication after input returns lifts the gate", p.awaitingPublication)
+            assertTrue(editor.isEnabled)
+        }
+    }
+
     @Test fun `a held checkpoint stops authored time and keeps the page drawn`() = runBlocking {
         withPushPages { a, p, _ ->
             a.start(); a.frame(); p.start(); p.frame(); p.frame()
@@ -404,13 +435,21 @@ class ExperiencePagePresentationHeightTest {
         }
     }
 
-    private suspend fun withPushPages(
+    /** [field]: Screen b has one text field, which [ActivityPage.showField] draws. */
+    private suspend fun withPushPages(field: Boolean = false,
         exercise: suspend (ActivityPage, ActivityPage, PreparedPresentation) -> Unit) {
         val scene = java.io.File.createTempFile("page-push-height", ".riv").apply { writeBytes(byteArrayOf(1)) }
+        val inputs = if (!field) "" else ""","textInputs":[{"id":"name","screenId":"b","textInputName":"headline","value":"",
+            "editable":true,"secureTextEntry":false,"multiline":false,
+            "geometry":{"xPath":"x","yPath":"y","widthPath":"width","heightPath":"height",
+              "rotationPath":"rotation","scaleXPath":"scaleX","scaleYPath":"scaleY"},
+            "style":{"fontFamily":"sans-serif","fontWeight":"400","fontStyle":"normal","fontSize":16,
+              "lineHeight":20,"letterSpacing":0,"color":4278190080,"fontAssetUniqueName":"font"}}]"""
         val descriptor = Json.parseToJsonElement("""{"state":{},"responses":{},"ruleGroups":[],
             "leg":{"screens":[{"id":"a","defaultViewModelName":"A"},{"id":"b","defaultViewModelName":"B"}]},
-            "render":{"assets":[],"screens":[{"id":"a","artboardName":"A"},{"id":"b","artboardName":"B"}]}}""").jsonObject
-        val lower = PreparedPresentation(scene, "A", 0, fitContent, "a", descriptor, pageHistory = listOf("a"))
+            "render":{"assets":[],"screens":[{"id":"a","artboardName":"A"},{"id":"b","artboardName":"B"}]$inputs}}""").jsonObject
+        val lower = PreparedPresentation(scene, "A", 0, fitContent, "a", descriptor, pageHistory = listOf("a"),
+            artboardSize = if (field) ExperienceArtboardSize(393f, 852f) else null)
         val pushed = lower.copy(artboardName = "B", screenId = "b", pageHistory = listOf("b"),
             isPushPage = true, opensLayer = true, layerAncestors = listOf("height-lower"),
             layerContentHeight = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle(), retainedViewModel = AtomicReference())
@@ -449,6 +488,9 @@ class ExperiencePagePresentationHeightTest {
         private var destroyed = false
         /** The close reasons the registry hears for this Screen. */
         val outcomes = mutableListOf<CloseReason>()
+        /** This page's one text field as the runtime draws it, or none. */
+        @Volatile private var fieldText: String? = null
+        @Volatile private var fieldX = 0f
 
         /** The Activity's own lifecycle, through Robolectric's controller. */
         fun stopActivity() { controller.stop() }
@@ -478,7 +520,16 @@ class ExperiencePagePresentationHeightTest {
                 override fun installRuleGroups(file: Long, entries: Array<NativeRuleGroup>) = 0
                 override fun enableSemantics(player: Long) = 0
                 override fun captureSemantics(player: Long) = NativeCallResult(0, 99L)
-                override fun semanticInfo(snapshot: Long) = NativeCallResult(0, longArrayOf(1, 1, 0))
+                override fun semanticInfo(snapshot: Long) = NativeCallResult(0, longArrayOf(1, 1, if (fieldText == null) 0 else 1))
+                override fun semanticNode(snapshot: Long, index: Int) = NativeCallResult(0, NativeSemanticNode(10, -1, 0,
+                    NativeSemanticRole.TEXT_FIELD, 0, 0, 0, 0, fieldX, 0f, 100f, 40f, "Name", "", ""))
+                override fun textInputGeometry(player: Long, snapshot: Long, nodeId: Long, name: String) = NativeCallResult(0,
+                    NativeTextInputGeometry(1, floatArrayOf(1f, 0f, 0f, 1f, fieldX, 0f), floatArrayOf(0f, 0f, 100f, 40f), true,
+                        floatArrayOf(1f, 0f, 0f, 1f, fieldX, 0f), floatArrayOf(0f, 0f, 100f, 40f), false, 0f, false, false))
+                override fun fieldStringCopy(player: Long, snapshot: Long, nodeId: Long, name: String) =
+                    NativeCallResult(0, checkNotNull(fieldText).encodeToByteArray())
+                override fun fieldViewModel(player: Long, snapshot: Long, nodeId: Long, name: String) = NativeCallResult(0, FIELD_OWNER)
+                override fun freeViewModel(handle: Long) = if (handle == FIELD_OWNER) 0 else native.freeViewModel(handle)
                 override fun validateSemantics(player: Long, snapshot: Long) = 0
                 override fun freeSemantics(snapshot: Long) = 0
                 override fun acquireWindow(surface: android.view.Surface) = 5L
@@ -488,6 +539,8 @@ class ExperiencePagePresentationHeightTest {
                 }
                 override fun playerLayoutSize(playerHandle: Long) = NativeCallResult(0, size)
                 override fun snapshotViewModel(viewModelHandle: Long): NativeCallResult<NativeViewModelSnapshot> {
+                    if (viewModelHandle == FIELD_OWNER) return NativeCallResult(0, NativeViewModelSnapshot(FIELD_OWNER,
+                        arrayOf(NativeViewModelSnapshotInstance(FIELD_OWNER, 0)), emptyArray()))
                     val snapshot = checkNotNull(native.snapshotViewModel(viewModelHandle).value)
                     val label = native.writes.lastOrNull { it.first == viewModelHandle && it.second.path == "label" }
                         ?.second?.bytesValue ?: return NativeCallResult(0, snapshot)
@@ -649,6 +702,15 @@ class ExperiencePagePresentationHeightTest {
         }
         private val movedIds = mutableListOf<String>()
         fun hold(held: Boolean) { mounted.setCheckpointHold(held); idle() }
+        /** The runtime draws this page's field with [text] at [x]; the next [frame] captures it. */
+        fun showField(text: String, x: Float) {
+            fieldText = text; fieldX = x
+            // Robolectric need not lay the window out; the overlay places its editors only at a real size.
+            val overlay = field(mounted, "textOverlay") as ExperienceTextInputOverlay
+            if (overlay.width == 0) { overlay.layout(0, 0, 393, 852); idle() }
+        }
+        val fieldEditor: android.widget.EditText get() =
+            (field(mounted, "textOverlay") as ExperienceTextInputOverlay).semanticViews().getValue(10) as android.widget.EditText
         suspend fun steps(): List<String> = lane.call { native.trace.filter { it.startsWith("step:") } }
         suspend fun clearTrace() = lane.call { native.trace.clear() }
         fun reduceMotion() = set(mounted, "reduceMotionEnabled", true)
@@ -741,6 +803,7 @@ class ExperiencePagePresentationHeightTest {
         }
 
         companion object {
+            private const val FIELD_OWNER = 4101L
             private fun field(owner: Any, name: String): Any? = owner.javaClass.getDeclaredField(name)
                 .apply { isAccessible = true }.get(owner)
             private fun set(owner: Any, name: String, value: Any?) = owner.javaClass.getDeclaredField(name)

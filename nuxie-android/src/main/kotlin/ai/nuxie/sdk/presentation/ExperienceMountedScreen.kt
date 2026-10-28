@@ -197,8 +197,8 @@ internal class ExperienceMountedScreen(
     /** A Journey checkpoint before a page step: held until it returns or the page starts its exit. */
     fun setCheckpointHold(held: Boolean) { checkpointHold = held; surface.setTimelineHeld(held) }
 
-    /** Shown again: presented, and no longer hidden below. */
-    fun reveal() { presented = true; hiddenBelow = false; applyClock() }
+    /** Shown again: presented, no longer hidden below, and no longer covered. */
+    fun reveal() { presented = true; hiddenBelow = false; covered = false; applyClock(); applyFieldLook() }
 
     val isHiddenBelow: Boolean get() = hiddenBelow
 
@@ -212,7 +212,15 @@ internal class ExperienceMountedScreen(
         textOverlay?.endEditing()
         awaitingSemanticPublication = true
         applyAccessibility()
+        covered = true
+        applyFieldLook()
     }
+
+    // A covered page's fields follow the player for their look (C4), worked out from two facts:
+    // a sheet or modal covers the page, and none of its steps is running.
+    private var covered = false
+    private var stepping = false
+    private fun applyFieldLook() { surface.setFieldLookOnly(covered && !stepping) }
 
     // The content's place in TalkBack (C1) is worked out from two facts and written nowhere else:
     // a move in progress, and a page that has yet to publish since mounting or being covered.
@@ -380,6 +388,8 @@ internal class ExperienceMountedScreen(
         val mutations = mutableListOf<(ExperienceInteractivePage) -> Unit>()
         var collecting = false
         var failure: Throwable? = null
+        stepping = true
+        applyFieldLook()
         try {
             ExperiencePageStep.perform(sourceId, targetId, style, isBack, plan, layerExit(prepared), reduceMotionEnabled,
                 coveredCut = covered, operations = object : ExperiencePageStep.Operations {
@@ -443,6 +453,8 @@ internal class ExperienceMountedScreen(
             failure = error
             throw error
         } finally {
+            stepping = false
+            applyFieldLook()
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
                 runPresentationCleanup(failure) {
                     awaitPresentationRetirement {
