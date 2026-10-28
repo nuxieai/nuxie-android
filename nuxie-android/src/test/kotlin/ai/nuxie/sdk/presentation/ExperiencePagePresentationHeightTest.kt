@@ -408,6 +408,75 @@ class ExperiencePagePresentationHeightTest {
         }
     }
 
+    @Test fun `a host close while a page pop is paused at onStop closes at once`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame()
+            val pop = p.popSliding()
+            try {
+                p.frameUntil { p.sliding }
+                a.stopActivity()
+                p.idleFor(1_000)
+                assertTrue("Stopped, the slide waits", p.sliding)
+                withTimeout(1_000) { content.moves.closeAfterLanding() }
+                assertFalse("No slot is held after the close", content.moves.isBusy)
+            } finally { a.startActivity() }
+        }
+    }
+
+    @Test fun `a page pop paused at onStop resumes at onStart and lands once`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame()
+            val appearances = a.lifecycle.appearances
+            val pop = p.popSliding()
+            p.frameUntil { p.sliding }
+            a.stopActivity()
+            p.idleFor(1_000)
+            assertFalse("Stopped, the pop waits", pop.isCompleted)
+            a.startActivity()
+            p.settleFor { pop.isCompleted }
+            assertTrue(pop.await())
+            assertEquals(1, a.layerCount())
+            assertFalse(content.moves.isBusy)
+            assertEquals("The page beneath enters once", appearances + 1uL, a.lifecycle.appearances)
+        }
+    }
+
+    @Test fun `a drag held at onStop ends when the platform settles the sheet`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame()
+            val nested = ActivityPage(content.copy(isPushPage = false, layerContentHeight = AtomicReference(),
+                screenLifecycle = ExperienceScreenLifecycle()), lower = p)
+            try {
+                nested.start(); nested.frame(); nested.enableSheetInput()
+                nested.sheetState("STATE_DRAGGING")
+                assertTrue(content.moves.isBusy)
+                p.stopActivity()
+                // The window leaves the screen: the system cancels the touch, and Material settles the sheet.
+                nested.sheetState("STATE_SETTLING"); nested.sheetState("STATE_EXPANDED")
+                assertFalse("The drag's move ended at one of its ends", content.moves.isBusy)
+                assertEquals(3, nested.layerCount())
+            } finally { p.startActivity(); nested.close() }
+        }
+    }
+
+    @Test fun `system Back during a drag that hides the sheet runs on the page beneath once the dismissal lands`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame()
+            p.reduceMotion()
+            val nested = ActivityPage(content.copy(isPushPage = false, layerContentHeight = AtomicReference(),
+                screenLifecycle = ExperienceScreenLifecycle()), lower = p)
+            try {
+                nested.start(); nested.frame(); nested.enableSheetInput()
+                nested.sheetState("STATE_DRAGGING")
+                nested.pressBack()
+                assertEquals("Back waits behind the drag", 3, nested.layerCount())
+                nested.sheetState("STATE_SETTLING"); nested.sheetState("STATE_HIDDEN")
+                // The sheet's dismissal closes it, and then Back closes the page that sheet covered.
+                nested.settle { nested.layerCount() == 1 && !content.moves.isBusy }
+            } finally { nested.close() }
+        }
+    }
+
     @Test fun `a held checkpoint stops authored time and keeps the page drawn`() = runBlocking {
         withPushPages { a, p, _ ->
             a.start(); a.frame(); p.start(); p.frame(); p.frame()
@@ -728,6 +797,31 @@ class ExperiencePagePresentationHeightTest {
             return trace.filter { it.startsWith("phase:") }.map { listOf("hidden", "entering", "active", "exiting")[it.substringAfterLast(':').toInt()] }
         }
         fun idle() = shadowOf(Looper.getMainLooper()).idle()
+        /** Moves the main looper's clock on, which runs view animations such as a page pop's slide. */
+        fun idleFor(millis: Long) = shadowOf(Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(millis))
+        suspend fun settleFor(done: () -> Boolean) {
+            withTimeout(5_000) { while (!done()) { idleFor(16); delay(1) } }
+        }
+        /** Draws frames until [done]. With motion on, a close's exit waits for a presented frame before its slide. */
+        suspend fun frameUntil(done: () -> Boolean) {
+            withTimeout(5_000) { while (!done()) { frame(); delay(1) } }
+        }
+        /**
+         * A Journey pop of this page with its slide: the Activity's own close, motion on. It isn't a child of the
+         * test's runBlocking: once the body ends nothing runs the main looper, so a pop left mid-landing would hold
+         * runBlocking forever. [close] cancels it. Robolectric's Choreographer would run the whole slide inside one
+         * idle, so it is paused here: the slide moves only when the test moves the clock ([idleFor]).
+         */
+        fun popSliding(): kotlinx.coroutines.Deferred<Boolean> {
+            org.robolectric.shadows.ShadowChoreographer.setPaused(true)
+            return kotlinx.coroutines.CoroutineScope(detached + kotlinx.coroutines.Dispatchers.Main.immediate)
+                .async(start = CoroutineStart.UNDISPATCHED) { (current as PresentationScreenHandle).dismissPagesFromJourney(1) }
+        }
+        private val detached = kotlinx.coroutines.SupervisorJob()
+        val sliding: Boolean get() = field(activity, "pagePopAnimation") != null
+        /** The system Back button, as the Activity hears it. */
+        @Suppress("DEPRECATION")
+        fun pressBack() { activity.onBackPressed(); idle() }
 
         /** Material's own state path, with its callbacks: what a drag or TalkBack's dismiss action selects. */
         fun sheetState(name: String) {
@@ -793,6 +887,8 @@ class ExperiencePagePresentationHeightTest {
         fun close(forRetry: Boolean = false) {
             if (closed) return
             closed = true
+            detached.cancel()
+            org.robolectric.shadows.ShadowChoreographer.setPaused(false)
             screenClass.getDeclaredMethod("close", Boolean::class.javaPrimitiveType).apply { isAccessible = true }.invoke(current, forRetry)
             assertTrue(lane.awaitQuiescence(5_000))
             texture.release()
