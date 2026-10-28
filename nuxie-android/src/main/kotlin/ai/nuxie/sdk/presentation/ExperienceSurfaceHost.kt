@@ -243,6 +243,8 @@ internal class ExperienceSurfaceHost(
     private val semanticActionPending = AtomicBoolean(false)
     private val sceneInputEnabled = AtomicBoolean(true)
     private val semanticEpoch = AtomicLong()
+    // C4: with input off, a covered page's native fields still follow its frames, for their look only.
+    @Volatile private var fieldLookOnly = false
     private val accessibility = ExperienceAccessibilityProvider(this,
         bounds = { semanticBounds(this, layoutBounds, it) }, dispatch = ::dispatchSemanticAction)
 
@@ -397,7 +399,8 @@ internal class ExperienceSurfaceHost(
     private val acceptedNativeText = mutableMapOf<ExperienceTextFieldTarget, AcceptedNativeText>()
 
     private fun publishSemantics(active: NuxieRuntimePlayer, generation: Long, epoch: Long) {
-        if (!semanticsEnabled || epoch != semanticEpoch.get() || (interactiveLayer != null && !sceneInputEnabled.get())) return
+        if (!semanticsEnabled || epoch != semanticEpoch.get() ||
+            (interactiveLayer != null && !sceneInputEnabled.get() && !fieldLookOnly)) return
         val next = active.captureSemantics()
         val fields = emptyMap<String, NativeSemanticNode>()
         val nextCaptureId = nativeTextCaptureId + 1
@@ -434,16 +437,23 @@ internal class ExperienceSurfaceHost(
     private fun postSemanticTree(tree: NuxieSemanticTree, fields: Map<String, NativeSemanticNode>,
         nativeInputs: List<ExperienceNativeTextField>, generation: Long, epoch: Long) {
         post {
-            if (!released.get() && running && sceneInputEnabled.get() && firstFrameComposed && generation == frameGeneration.get() && epoch == semanticEpoch.get()) {
-                try {
-                    val nativeFields = listener?.onSemanticFields(fields).orEmpty() +
-                        listener?.onNativeTextFields(nativeInputs).orEmpty()
-                    accessibility.publish(tree, nativeFields)
-                    listener?.onSemanticTreePublished()
-                } catch (error: Exception) {
-                    retireSemantics()
-                    reportFailure(ExperiencePresentationException.Reason.HOST_FAILED, "Experience semantic publication failed", error)
+            if (released.get() || !running || !firstFrameComposed || generation != frameGeneration.get() || epoch != semanticEpoch.get()) return@post
+            val lookOnly = !sceneInputEnabled.get()
+            if (lookOnly && !fieldLookOnly) return@post
+            try {
+                if (lookOnly) {
+                    // Text, spot and placeholder only: no semantic tree, so neither the veil nor the
+                    // content gate lifts. Both wait for the first publication after input returns.
+                    listener?.onNativeTextFields(nativeInputs)
+                    return@post
                 }
+                val nativeFields = listener?.onSemanticFields(fields).orEmpty() +
+                    listener?.onNativeTextFields(nativeInputs).orEmpty()
+                accessibility.publish(tree, nativeFields)
+                listener?.onSemanticTreePublished()
+            } catch (error: Exception) {
+                retireSemantics()
+                reportFailure(ExperiencePresentationException.Reason.HOST_FAILED, "Experience semantic publication failed", error)
             }
         }
     }
@@ -1315,6 +1325,17 @@ internal class ExperienceSurfaceHost(
         if (!enabled) {
             accessibility.withdraw()
         } else accessibility.invalidateState()
+    }
+
+    /**
+     * C4: while a sheet or modal covers the page, and no step runs, each frame's native fields follow
+     * the player for their look. Editors stay disabled and nothing is announced.
+     */
+    fun setFieldLookOnly(value: Boolean) {
+        if (fieldLookOnly == value) return
+        fieldLookOnly = value
+        // A publication already on its way belongs to the old rule. With input on the rule changes nothing.
+        if (!sceneInputEnabled.get()) semanticEpoch.incrementAndGet()
     }
 
     /** UI-thread visibility input; a paused but visible Activity remains active. */
