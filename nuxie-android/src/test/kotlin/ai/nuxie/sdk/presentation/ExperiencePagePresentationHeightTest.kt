@@ -123,6 +123,57 @@ class ExperiencePagePresentationHeightTest {
         }
     }
 
+    @Test fun `a rebuild closes the Experience as the host's close`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame()
+            // The Activity both pages share; the page at the base owns its destroy.
+            a.rebuildActivity()
+            p.settle { p.outcomes.isNotEmpty() && a.outcomes.isNotEmpty() }
+            assertEquals("The Screen on top closes as the host's close", listOf(CloseReason.HostDismissed), p.outcomes)
+            assertEquals("The page beneath it closes as a navigation", listOf(CloseReason.JourneyNavigation), a.outcomes)
+            assertFalse("No slot is held after a rebuild", content.moves.isBusy)
+        }
+    }
+
+    @Test fun `a rebuild ends the running move as closed, and a request behind it is closed too`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame()
+            val lands = CompletableDeferred<Unit>()
+            val move = launch(start = CoroutineStart.UNDISPATCHED) {
+                content.moves.run { check(it.start()); withContext(NonCancellable) { lands.await() } }
+            }
+            val behind = async(start = CoroutineStart.UNDISPATCHED) { runCatching { content.moves.run { } } }
+            try {
+                a.rebuildActivity()
+                assertFalse("No slot is held once the Activity is rebuilt", content.moves.isBusy)
+                assertTrue(behind.await().exceptionOrNull() is ExperienceMoveQueue.Closed)
+            } finally { lands.complete(Unit); move.join() }
+        }
+    }
+
+    @Test fun `a rebuilt Activity finishes without touching its presentation`() {
+        val id = java.util.UUID.randomUUID().toString()
+        val scene = java.io.File.createTempFile("page-rebuilt", ".riv").apply { writeBytes(byteArrayOf(1)) }
+        val descriptor = Json.parseToJsonElement("""{"state":{},"responses":{},"ruleGroups":[],
+            "leg":{"screens":[{"id":"a","defaultViewModelName":"A"}]},
+            "render":{"assets":[],"screens":[{"id":"a","artboardName":"A"}]}}""").jsonObject
+        val failures = mutableListOf<Throwable>()
+        PresentationRegistry.register(id, PreparedPresentation(scene, "A", 0, fitContent, "a", descriptor),
+            {}, { failures += it }, {}, {})
+        try {
+            val intent = android.content.Intent(org.robolectric.RuntimeEnvironment.getApplication(), NuxieExperienceActivity::class.java)
+                .putExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID, id)
+            // What Android hands the Activity it builds after a rebuild: the old one's saved state.
+            val controller = Robolectric.buildActivity(NuxieExperienceActivity::class.java, intent).create(android.os.Bundle())
+            shadowOf(Looper.getMainLooper()).idle()
+            assertTrue(controller.get().isFinishing)
+            assertTrue("The rebuilt Activity reports nothing: $failures", failures.isEmpty())
+            assertNull(PresentationRegistry.currentScreen(id))
+            assertTrue(PresentationRegistry.observe(id)?.value is PresentationContentState.Ready)
+            controller.destroy()
+        } finally { PresentationRegistry.dismiss(id, CloseReason.HostDismissed); scene.delete() }
+    }
+
     @Test fun `a nested sheet refuses a drag and outside taps while a move runs`() = runBlocking {
         withPushPages { a, p, content ->
             a.start(); a.frame(); p.start(); p.frame()
@@ -244,11 +295,18 @@ class ExperiencePagePresentationHeightTest {
         private var clock = 1_000_000_000L
         private var closed = false
         private var destroyed = false
+        /** The close reasons the registry hears for this Screen. */
+        val outcomes = mutableListOf<CloseReason>()
 
         /** The Activity's own lifecycle, through Robolectric's controller. */
         fun stopActivity() { controller.stop() }
         fun startActivity() { controller.start() }
         fun destroyActivity() { destroyed = true; controller.destroy() }
+        /** A rebuild Android forces, such as a language change the manifest doesn't list. */
+        fun rebuildActivity() {
+            org.robolectric.util.ReflectionHelpers.setField(Activity::class.java, activity, "mChangingConfigurations", true)
+            destroyActivity()
+        }
 
         /** As a queue the Activity sees for the first time: it forgets the one it watches and watches again. */
         fun watchMovesAfresh() {
@@ -315,7 +373,10 @@ class ExperiencePagePresentationHeightTest {
             set(activity, "contentRoot", root)
             set(activity, "visible", true)
             PresentationRegistry.register(registryId,
-                prepared, {}, { throw AssertionError(it) }, {}, {})
+                prepared, {}, { throw AssertionError(it) }, {}, { synchronized(outcomes) { outcomes += it } })
+            set(current, "registered", true)
+            @Suppress("UNCHECKED_CAST")
+            (field(activity, "screens") as MutableSet<Any>).add(current)
             if (lower == null) {
                 set(layer, "sheet", window)
                 window.show()
@@ -444,15 +505,18 @@ class ExperiencePagePresentationHeightTest {
             screenClass.getDeclaredMethod("takeLayerOwnership", screenClass).apply { isAccessible = true }
                 .invoke(next, current)
             screenClass.getDeclaredMethod("close", Boolean::class.javaPrimitiveType).apply { isAccessible = true }.invoke(current, false)
+            @Suppress("UNCHECKED_CAST")
+            (field(activity, "screens") as MutableSet<Any>).apply { remove(current); add(next) }
             current = next
             prepared = target
             set(activity, "currentScreen", next)
         }
 
-        fun close(recreating: Boolean = false) {
+        /** [forRetry] retires the Screen as a native retry does, keeping its final state. */
+        fun close(forRetry: Boolean = false) {
             if (closed) return
             closed = true
-            screenClass.getDeclaredMethod("close", Boolean::class.javaPrimitiveType).apply { isAccessible = true }.invoke(current, recreating)
+            screenClass.getDeclaredMethod("close", Boolean::class.javaPrimitiveType).apply { isAccessible = true }.invoke(current, forRetry)
             assertTrue(lane.awaitQuiescence(5_000))
             texture.release()
             (field(layer, "sheet") as? ExperienceNativeLayerWindow)?.retire()
@@ -477,7 +541,7 @@ class ExperiencePagePresentationHeightTest {
                 page.valuesOnLane("b").setValue("label", NuxieViewModelScalarValue.StringValue("after the last frame"))
             }
             // No intervening ordinary step is allowed to refresh the retained capture.
-            p.close(recreating = true)
+            p.close(forRetry = true)
             assertEquals("after the last frame", checkNotNull(retained.get()).resolveString("label"))
         }
     }

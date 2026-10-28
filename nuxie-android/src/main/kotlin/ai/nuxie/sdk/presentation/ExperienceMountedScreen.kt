@@ -427,7 +427,7 @@ internal class ExperienceMountedScreen(
     }
 
     /** Completion follows native handle release, so the owner can release its artifact lease. */
-    fun close(changingConfigurations: Boolean, completion: () -> Unit) {
+    fun close(forRetry: Boolean, completion: () -> Unit) {
         content = null
         transitionEvents.close()
         reducedMotion?.close()
@@ -439,7 +439,7 @@ internal class ExperienceMountedScreen(
         captionOverlay = null
         textOverlay?.close()
         textOverlay = null
-        val finalState = if (changingConfigurations) lifecycle.snapshot()
+        val finalState = if (forRetry) lifecycle.snapshot()
             else lifecycle.move(ExperienceScreenLifecycle.Phase.HIDDEN, exitReason = ExperienceScreenLifecycle.ExitReason.NONE)
         val nativeArtifacts = artifactLease.also { artifactLease = null }
         val retirement = ExperienceScreenRetirement {

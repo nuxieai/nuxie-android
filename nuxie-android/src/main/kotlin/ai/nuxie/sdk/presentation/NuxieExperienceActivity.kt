@@ -41,13 +41,14 @@ internal class ScreenCloseState(
 
     fun select(reason: CloseReason): Boolean = selected.compareAndSet(null, reason)
 
-    fun prepareForTeardown(isChangingConfigurations: Boolean) {
-        if (reason == null && isChangingConfigurations) return
+    /** A native retry retires a Screen without choosing a close reason; any other teardown is the person's. */
+    fun prepareForTeardown(forRetry: Boolean) {
+        if (reason == null && forRetry) return
         select(CloseReason.UserDismissed)
     }
 
-    fun reportAtTeardown(isChangingConfigurations: Boolean) {
-        prepareForTeardown(isChangingConfigurations)
+    fun reportAtTeardown(forRetry: Boolean) {
+        prepareForTeardown(forRetry)
         if (reason == null) return
         if (reported.compareAndSet(false, true)) report(requireNotNull(reason))
     }
@@ -60,6 +61,9 @@ internal class ScreenCloseState(
  *
  * Process-death policy (decision 10): a cold-recreated instance (no live
  * SDK state behind it) finishes immediately and never re-presents.
+ *
+ * A rebuild Android forces closes the Experience as a system close (decision 174), so a
+ * rebuilt instance finishes the same way and nothing is restored.
  */
 internal class NuxieExperienceActivity : Activity() {
     private val registryScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -87,7 +91,6 @@ internal class NuxieExperienceActivity : Activity() {
     private var closingLayer: Layer? = null
     private var returningPage: Screen? = null
     private var pagePopAnimation: ExperienceScreenViewTransition? = null
-    private var restoringLayerScreen: Screen? = null
     private val screens = mutableSetOf<Screen>()
     private var navigation: Navigation? = null
     /** The Experience's one move queue; every Screen in it carries the same one. */
@@ -104,8 +107,8 @@ internal class NuxieExperienceActivity : Activity() {
         override fun requestCloseFromService(reason: CloseReason) = closeState.select(reason)
         override fun screenCloseReason() = closeState.reason
         override fun finishAfterServiceClose() { runOnUiThread { finish() } }
-        fun close(recreating: Boolean) {
-            closeState.reportAtTeardown(recreating)
+        fun close() {
+            closeState.reportAtTeardown(forRetry = false)
             PresentationRegistry.detach(id, this)
         }
         fun finishTerminal(reason: CloseReason) {
@@ -142,13 +145,13 @@ internal class NuxieExperienceActivity : Activity() {
             }
         }
 
-        fun mount(covered: Boolean = false): View {
+        fun mount(): View {
             val resources = ExperienceMountedScreen(
                 this@NuxieExperienceActivity, prepared, this, ::fail,
                 videoDecoderPool = ai.nuxie.sdk.runtime.ExperienceVideoDecoderPool.shared,
             )
             mounted = resources
-            return resources.mount(entering = !covered).also { view = it }
+            return resources.mount().also { view = it }
         }
 
         fun shareLayer(source: Screen) {
@@ -162,21 +165,22 @@ internal class NuxieExperienceActivity : Activity() {
             ownsMounted = true
         }
 
-        fun close(changingConfigurations: Boolean) {
+        /** [forRetry] retires this Screen for a native retry, which mounts it again without a close reason. */
+        fun close(forRetry: Boolean) {
             if (closing) return
             closing = true
             rendererEffects.retire()
             synchronized(effectsLock) { pendingEffects.clear() }
             ready.completeExceptionally(IllegalStateException("Screen closed during preparation"))
-            closeState.prepareForTeardown(changingConfigurations)
+            closeState.prepareForTeardown(forRetry)
             val complete: () -> Unit = {
                 if (registered) {
-                    closeState.reportAtTeardown(changingConfigurations)
+                    closeState.reportAtTeardown(forRetry)
                     PresentationRegistry.detach(id, this)
                 }
                 closed.complete(Unit)
             }
-            if (ownsMounted) mounted?.close(changingConfigurations, complete) ?: complete() else complete()
+            if (ownsMounted) mounted?.close(forRetry, complete) ?: complete() else complete()
             mounted = null
         }
 
@@ -308,14 +312,6 @@ internal class NuxieExperienceActivity : Activity() {
                     PresentationRegistry.reportRuntimeStep(id, outcome, correlationId, viewModelSnapshot, this, frameSaves)
                 }
             }
-        }
-
-        fun retainCoveredFrame() {
-            synchronized(effectsLock) {
-                provisional = false
-                pendingEffects.clear()
-            }
-            mounted?.setVisible(visible)
         }
 
         fun publishPreparedFrame() {
@@ -615,7 +611,8 @@ internal class NuxieExperienceActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val id = intent.getStringExtra(EXTRA_PRESENTATION_ID)
-        if (isColdRecreation(savedInstanceState, id) || id == null) {
+        // A rebuilt instance finishes: its Experience closed with the old one (decision 174).
+        if (savedInstanceState != null || id == null) {
             finish()
             return
         }
@@ -798,46 +795,8 @@ internal class NuxieExperienceActivity : Activity() {
     }
 
     private suspend fun mountReadyScreen(id: String, prepared: PreparedPresentation) {
-        // Recreation must consume the prior renderer's final authored state before import.
+        // A native retry must consume the prior renderer's final authored state before import.
         PresentationRegistry.drainRetiredScreens(id)
-        try {
-            if (layers.isEmpty() && prepared.layerAncestors.isNotEmpty()) {
-                for (ancestorId in prepared.layerAncestors) {
-                    val ancestor = (PresentationRegistry.observe(ancestorId)?.value as? PresentationContentState.Ready)?.content
-                        ?: throw IllegalStateException("Covered presentation is no longer owned")
-                    PresentationRegistry.drainRetiredScreens(ancestorId)
-                    val retained = Screen(ancestorId, ancestor, provisional = true)
-                    check(PresentationRegistry.attach(ancestorId, retained))
-                    retained.registered = true
-                    screens += retained
-                    val root = ExperienceFocusRoot(this)
-                    root.addView(retained.mount(covered = true), FrameLayout.LayoutParams(-1, -1))
-                    val lower = layers.lastOrNull()
-                    val layer = Layer(root, retained, ancestor.shell, ancestor.isPushPage)
-                    layers += layer
-                    if (layers.size == 1) {
-                        setContentView(shellView(root, ancestor.shell))
-                        layer.sheet = baseWindow
-                    } else if (layer.pushed) installPushedPage(layer, checkNotNull(lower))
-                    else installLayerWindow(layer)
-                    retained.mounted?.observeWindow()
-                    restoringLayerScreen = retained
-                    retained.mounted?.setInputEnabled(false)
-                    retained.mounted?.setVisible(visible)
-                    retained.ready.await()
-                    retained.retainCoveredFrame()
-                    if (retained.mounted?.isLayer == true) retained.mounted?.hide()
-                    restoringLayerScreen = null
-                    retained.mounted?.setInputEnabled(false)
-                    layer.sheet?.setInputEnabled(false)
-                }
-            }
-        } catch (error: Throwable) {
-            if (error is kotlinx.coroutines.CancellationException) throw error
-            PresentationRegistry.reportFailure(id, error)
-            finish()
-            return
-        } finally { restoringLayerScreen = null }
         val screen = Screen(id, prepared)
         if (!PresentationRegistry.attach(id, screen)) {
             finish()
@@ -850,21 +809,15 @@ internal class NuxieExperienceActivity : Activity() {
         dismissible = true
         try {
             val retryLayer = layers.lastOrNull()?.takeIf { it.screen.id == id }
-            val restoredUpperLayer = retryLayer == null && layers.isNotEmpty() && prepared.layerAncestors.isNotEmpty()
-            val newRoot = !::contentRoot.isInitialized || restoredUpperLayer
+            val newRoot = !::contentRoot.isInitialized
             if (newRoot) contentRoot = ExperienceFocusRoot(this)
             contentRoot.addView(screen.mount().apply { alpha = 0f }, 0, FrameLayout.LayoutParams(-1, -1))
             if (retryLayer != null) retryLayer.screen = screen else {
-                val lower = layers.lastOrNull()
                 val layer = Layer(contentRoot, screen, prepared.shell, prepared.isPushPage)
                 layers += layer
-                if (restoredUpperLayer && layer.pushed) installPushedPage(layer, checkNotNull(lower))
-                else if (restoredUpperLayer) installLayerWindow(layer)
-                else {
-                    if (newRoot) setContentView(shellView(contentRoot, prepared.shell))
-                    layer.sheet = baseWindow
-                    if (screen.mounted?.isLayer == true) layer.sheet?.setBackHandler(::closeTopLayerOrExperience)
-                }
+                if (newRoot) setContentView(shellView(contentRoot, prepared.shell))
+                layer.sheet = baseWindow
+                if (screen.mounted?.isLayer == true) layer.sheet?.setBackHandler(::closeTopLayerOrExperience)
             }
             watchMoves()
             contentRoot.setBackgroundColor(prepared.clearColor)
@@ -1077,7 +1030,7 @@ internal class NuxieExperienceActivity : Activity() {
         pagePopAnimation?.setVisible(true)
         screens.forEach {
             val exposed = it === currentScreen || it === returningPage || it === navigation?.source ||
-                it === navigation?.target || it === restoringLayerScreen ||
+                it === navigation?.target ||
                 (it.mounted?.isLayer != true && layers.any { layer -> layer.screen === it })
             if (!it.rendererEffects.isRetired && exposed) it.mounted?.setVisible(true)
         }
@@ -1108,7 +1061,9 @@ internal class NuxieExperienceActivity : Activity() {
 
     override fun onDestroy() {
         // A started move can't land without its Activity, so it ends as closed and frees the slot.
-        if (!isChangingConfigurations) moves?.endAsClosed()
+        moves?.endAsClosed()
+        // A rebuild closes the Experience as a system close (decision 174); any other destroy is the person's.
+        val reason = if (isChangingConfigurations) CloseReason.HostDismissed else null
         watchedMoves?.onBusyChanged(null)
         watchedMoves = null
         // A retired window promises no further state callback, so a held drag ends here.
@@ -1117,7 +1072,7 @@ internal class NuxieExperienceActivity : Activity() {
         registryScope.cancel()
         clearAcquisitionRecovery()
         removeLoadingView()
-        acquiringScreen?.close(isChangingConfigurations)
+        acquiringScreen?.apply { reason?.let(::requestCloseFromService) }?.close()
         acquiringScreen = null
         navigation?.cancel()
         pagePopAnimation?.cancel()
@@ -1128,8 +1083,9 @@ internal class NuxieExperienceActivity : Activity() {
         baseWindow?.retire()
         baseWindow = null
         screens.forEach {
-            if (!isChangingConfigurations && it !== currentScreen) it.requestCloseFromService(CloseReason.JourneyNavigation)
-            it.close(isChangingConfigurations && (it !== navigation?.target))
+            if (it !== currentScreen) it.requestCloseFromService(CloseReason.JourneyNavigation)
+            else reason?.let(it::requestCloseFromService)
+            it.close(forRetry = false)
         }
         layers.clear()
         screens.clear()
@@ -1338,9 +1294,5 @@ internal class NuxieExperienceActivity : Activity() {
         const val EXTRA_PRESENTATION_ID = "ai.nuxie.sdk.internal.PRESENTATION_ID"
         const val PERMISSION_REQUEST_CODE_START = 0x4E00
         const val PERMISSION_REQUEST_CODE_END = 0x4EFF
-
-        internal fun isColdRecreation(savedInstanceState: Bundle?, presentationId: String?): Boolean =
-            savedInstanceState != null &&
-                (presentationId == null || PresentationRegistry.observe(presentationId) == null)
     }
 }

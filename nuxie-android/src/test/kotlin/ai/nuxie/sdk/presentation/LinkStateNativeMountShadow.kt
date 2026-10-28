@@ -11,7 +11,7 @@ import org.robolectric.util.ReflectionHelpers
 @Implements(className = "ai.nuxie.sdk.presentation.NuxieExperienceActivity\$Screen", isInAndroidSdk = false)
 internal class LinkStateNativeMountShadow {
     @RealObject lateinit var screen: Any
-    @Implementation fun mount(covered: Boolean): View {
+    @Implementation fun mount(): View {
         val activity = ReflectionHelpers.getField<Activity>(screen, "this\$0")
         return View(activity).also { ReflectionHelpers.setField(screen, "view", it) }
     }

@@ -900,12 +900,12 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun backgroundAndRecreationPreserveScreenAppearanceAndRenderedContent() {
+    fun backgroundPreservesScreenAppearanceAndRenderedContentAndARebuildCloses() {
         repeat(5) { iteration ->
             try {
                 exerciseBackgroundAndRecreation()
             } catch (error: AssertionError) {
-                throw AssertionError("Recreation cycle ${iteration + 1}: ${error.message}", error)
+                throw AssertionError("Background and rebuild cycle ${iteration + 1}: ${error.message}", error)
             }
         }
     }
@@ -918,7 +918,7 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun systemFontScaleReachesMountedScreenAcrossHomeAndRecreation() {
+    fun systemFontScaleReachesMountedScreenAcrossHomeAndARebuildCloses() {
         exerciseBackgroundAndRecreation(fontScaleChanges = true)
     }
 
@@ -939,6 +939,7 @@ class PublishedTextInputDeviceTest {
         val firstFrame = CountDownLatch(1)
         val dismissed = CountDownLatch(1)
         val failure = AtomicReference<Throwable?>()
+        val closeReason = AtomicReference<CloseReason?>()
         val prepared = PreparedPresentation(fixture.riv, screen.getValue("artboardName").jsonPrimitive.content,
             0xff000000.toInt(), PresentationShell.FullScreen(), screen.getValue("id").jsonPrimitive.content,
             fixture.release.descriptor, fixture.assets,
@@ -972,7 +973,7 @@ class PublishedTextInputDeviceTest {
         var before: Bitmap? = null
         var after: Bitmap? = null
         PresentationRegistry.register(id, prepared, onFirstFrame = { approveFixtureFrame(id); firstFrame.countDown() },
-            onFailure = { failure.set(it) }, onDismissed = { dismissed.countDown() }, onOutcome = {})
+            onFailure = { failure.set(it) }, onDismissed = { dismissed.countDown() }, onOutcome = { closeReason.set(it) })
         try {
             if (fontScaleChanges) setFontScale(1.3f)
             context.startActivity(Intent(context, NuxieExperienceActivity::class.java).apply {
@@ -1095,13 +1096,24 @@ class PublishedTextInputDeviceTest {
                     assertEquals(1uL, prepared.screenLifecycle.appearances)
                     original.recreate()
                 }
+                // A rebuild closes the Experience as the host's close, and the rebuilt Activity finishes (decision 174).
+                val rebuilt = checkNotNull(monitor.waitForActivityWithTimeout(15_000))
+                activity = rebuilt
+                assertTrue("A rebuild closes the Experience", dismissed.await(15, TimeUnit.SECONDS))
+                assertEquals(CloseReason.HostDismissed, closeReason.get())
+                val finishDeadline = SystemClock.uptimeMillis() + 10_000
+                while (!rebuilt.isFinishing && !rebuilt.isDestroyed && SystemClock.uptimeMillis() < finishDeadline) SystemClock.sleep(25)
+                assertTrue("The rebuilt Activity finishes", rebuilt.isFinishing || rebuilt.isDestroyed)
+                assertNull(PresentationRegistry.currentScreen(id))
+                assertEquals(null, failure.get())
+                return
             }
-            val replacement = if (rotate) original else checkNotNull(monitor.waitForActivityWithTimeout(15_000))
+            // Rotation is handled in place: the same Activity carries on.
+            val replacement = original
             activity = replacement
-            assertEquals("Only explicit recreation replaces the Activity", !rotate, replacement !== original)
             if (fontScaleChanges) awaitFontScale(2f)
             instrumentation.waitForIdleSync()
-            assertEquals(!rotate, original.isDestroyed)
+            assertFalse(original.isDestroyed)
             if (rotate) {
                 val portraitDeadline = SystemClock.uptimeMillis() + 15_000
                 var portraitSized = false
@@ -2084,43 +2096,35 @@ class PublishedTextInputDeviceTest {
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun nativeLoadFailureRetriesWithinTheAuthenticatedShell() = verifyNativeRecovery(false)
+    fun nativeLoadFailureRetriesWithinTheAuthenticatedShell() = verifyNativeRecovery()
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun nativeFailureRecoverySurvivesActivityRecreation() = verifyNativeRecovery(true)
+    fun nativeRetryUserCloseWaitsForTheOriginalRuntimeLane() = verifyNativeRecovery("close")
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun nativeRetryRecreationWaitsForTheOriginalRuntimeLane() = verifyNativeRecovery(false, "recreate")
+    fun nativeRetryIdentityWithdrawalWaitsForTheOriginalRuntimeLane() = verifyNativeRecovery("identity")
 
     @Test
     @SdkSuppress(minSdkVersion = 26)
-    fun nativeRetryUserCloseWaitsForTheOriginalRuntimeLane() = verifyNativeRecovery(false, "close")
-
-    @Test
-    @SdkSuppress(minSdkVersion = 26)
-    fun nativeRetryIdentityWithdrawalWaitsForTheOriginalRuntimeLane() = verifyNativeRecovery(false, "identity")
-
-    @Test
-    @SdkSuppress(minSdkVersion = 26)
-    fun nativeRetryHostDismissalWaitsForTheOriginalRuntimeLane() = verifyNativeRecovery(false, "host")
+    fun nativeRetryHostDismissalWaitsForTheOriginalRuntimeLane() = verifyNativeRecovery("host")
 
     @Test
     @SdkSuppress(minSdkVersion = 34)
     fun talkBackRetriesInitialNativeFailure() {
         org.junit.Assume.assumeTrue(InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true")
-        verifyNativeRecovery(false, useTalkBack = true)
+        verifyNativeRecovery(useTalkBack = true)
     }
 
     @Test
     @SdkSuppress(minSdkVersion = 34)
     fun talkBackClosesInitialNativeRetryDuringDrain() {
         org.junit.Assume.assumeTrue(InstrumentationRegistry.getArguments().getString("nuxieTalkBackQualification") == "true")
-        verifyNativeRecovery(false, "close", useTalkBack = true)
+        verifyNativeRecovery("close", useTalkBack = true)
     }
 
-    private fun verifyNativeRecovery(recreate: Boolean, drainAction: String? = null, useTalkBack: Boolean = false) {
+    private fun verifyNativeRecovery(drainAction: String? = null, useTalkBack: Boolean = false) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val input = if (useTalkBack) recoveryTalkBackInput(instrumentation) else null
         assertTrue(NuxieRuntime.shared.isAvailable)
@@ -2166,24 +2170,7 @@ class PublishedTextInputDeviceTest {
                 }
                 return checkNotNull(retry) { "Native failure must retain an actionable recovery shell" }
             }
-            var retry = awaitRetry()
-            if (recreate) {
-                val original = activity
-                instrumentation.runOnMainSync { original.recreate() }
-                val replacementDeadline = SystemClock.elapsedRealtime() + 10_000
-                var replacement: Activity? = null
-                while (replacement == null && SystemClock.elapsedRealtime() < replacementDeadline) {
-                    replacement = monitor.waitForActivityWithTimeout(500)?.takeUnless { it === original }
-                }
-                activity = checkNotNull(replacement) { "Recreation must provide a distinct Activity" }
-                instrumentation.waitForIdleSync()
-                instrumentation.runOnMainSync {
-                    root = activity.findViewById<ViewGroup>(android.R.id.content).getChildAt(0)
-                }
-                retry = awaitRetry()
-                val id = checkNotNull(activity.intent.getStringExtra(NuxieExperienceActivity.EXTRA_PRESENTATION_ID))
-                assertEquals(1L, PresentationRegistry.nativeProgress(id)?.generation)
-            }
+            val retry = awaitRetry()
             assertFalse(pending.isCompleted)
             assertEquals(0, shown.get())
             assertEquals(0, closed.get())
@@ -2221,26 +2208,7 @@ class PublishedTextInputDeviceTest {
                 assertEquals(2L, PresentationRegistry.nativeProgress(id)?.generation)
                 assertFalse(pending.isCompleted)
                 assertEquals(0, closed.get())
-                if (drainAction == "recreate") {
-                    val original = activity
-                    instrumentation.runOnMainSync { original.recreate() }
-                    val deadline = SystemClock.elapsedRealtime() + 10_000
-                    var replacement: Activity? = null
-                    while (replacement == null && SystemClock.elapsedRealtime() < deadline) {
-                        replacement = monitor.waitForActivityWithTimeout(500)?.takeUnless { it === original }
-                    }
-                    activity = checkNotNull(replacement)
-                    instrumentation.waitForIdleSync()
-                    instrumentation.runOnMainSync {
-                        root = activity.findViewById<ViewGroup>(android.R.id.content).getChildAt(0)
-                        assertTrue("Replacement must not mount before original native drain",
-                            descendants(checkNotNull(root)).none { it is ExperienceSurfaceHost })
-                    }
-                    assertEquals(AcquisitionProgress.Phase.RETRYING, PresentationRegistry.nativeProgress(id)?.phase)
-                    assertFalse(pending.isCompleted)
-                    assertEquals(0, shown.get())
-                    assertEquals(0, closed.get())
-                } else {
+                run {
                     val terminal = if (drainAction in listOf("identity", "host")) scope.async {
                         if (drainAction == "identity") service.shutdownOwnedBy("native-recovery-owner")
                         else service.dismissFromHost("native-recovery-owner")
@@ -2278,7 +2246,7 @@ class PublishedTextInputDeviceTest {
             }
             runBlocking { kotlinx.coroutines.withTimeout(30_000) { pending.await() } }
             assertHostedScreen(instrumentation, activity, "screen_1")
-            assertEquals("Recreation and Retry must not launch another presentation Intent", 1, monitor.hits)
+            assertEquals("Retry must not launch another presentation Intent", 1, monitor.hits)
             assertEquals(1, shown.get())
             instrumentation.runOnMainSync {
                 assertSame(root, activity.findViewById<ViewGroup>(android.R.id.content).getChildAt(0))
@@ -2789,18 +2757,6 @@ class PublishedTextInputDeviceTest {
     }
 
     @Test
-    fun signedPurchaseKeepsAuthoredSelectionAcrossActivityRecreation() {
-        exerciseDurableNativeEmission(PublishedBehavior.PURCHASE, purchaseX = 240f, selectPlan = true,
-            purchaseNavigationFixture = true, recreateAfterSelection = true)
-    }
-
-    @Test
-    fun signedPurchaseWaitsForFinalStateDuringActivityRecreation() {
-        exerciseDurableNativeEmission(PublishedBehavior.PURCHASE, purchaseX = 240f,
-            purchaseNavigationFixture = true, recreateAfterSelection = true, delayFinalCapture = true)
-    }
-
-    @Test
     fun signedConditionReadsSavedFormSelectionBeforeNavigation() {
         exerciseDurableNativeEmission(PublishedBehavior.SCRIPT, conditionGate = true)
         exerciseDurableNativeEmission(PublishedBehavior.SEMANTIC_SCRIPT, conditionGate = true)
@@ -2808,13 +2764,12 @@ class PublishedTextInputDeviceTest {
 
     private enum class PublishedBehavior { TEXT_INPUT, SCRIPT, SEMANTIC_SCRIPT, SEMANTIC_ROLES, PURCHASE }
 
-    private fun exerciseDurableNativeEmission(behavior: PublishedBehavior, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false, roleProbe: AuthoredRoleProbe = AuthoredRoleProbe.COMPLETE, purchaseX: Float = 80f, selectPlan: Boolean = false, purchaseRoundTrip: Boolean = false, purchaseNavigationFixture: Boolean = purchaseRoundTrip, recreateAfterSelection: Boolean = false, delayFinalCapture: Boolean = false, conditionGate: Boolean = false, absolutePurchase: Boolean = false) {
+    private fun exerciseDurableNativeEmission(behavior: PublishedBehavior, failScript: Boolean = false, accessibilityEdit: Boolean = false, interruptPress: Boolean = false, shutdownAfterAdmission: Boolean = false, roleProbe: AuthoredRoleProbe = AuthoredRoleProbe.COMPLETE, purchaseX: Float = 80f, selectPlan: Boolean = false, purchaseRoundTrip: Boolean = false, purchaseNavigationFixture: Boolean = purchaseRoundTrip, conditionGate: Boolean = false, absolutePurchase: Boolean = false) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         assertTrue(NuxieRuntime.shared.isAvailable)
         val purchasing = behavior == PublishedBehavior.PURCHASE
         val purchases = LinkedBlockingQueue<String>()
-        val releaseOldLane = CountDownLatch(1)
         val scripted = behavior == PublishedBehavior.SCRIPT || behavior == PublishedBehavior.SEMANTIC_SCRIPT
         val candidateSemantics = behavior == PublishedBehavior.SEMANTIC_SCRIPT || behavior == PublishedBehavior.SEMANTIC_ROLES
         val fixturePath = if (absolutePurchase) "journeys/rendered-purchase-absolute" else if (conditionGate) "journeys/rendered-${if (candidateSemantics) "semantic-" else ""}screen-control-condition" else if (purchaseNavigationFixture) "journeys/rendered-purchase-navigation" else if (purchasing) "journeys/rendered-purchase-scopes" else if (behavior == PublishedBehavior.SEMANTIC_ROLES) "journeys/rendered-semantic-roles"
@@ -2979,40 +2934,6 @@ class PublishedTextInputDeviceTest {
                     awaitDeliveredPointer(target, down = false)
                     assertTrue("Selection must not dispatch a purchase", purchases.isEmpty())
                 }
-                if (recreateAfterSelection) {
-                    val original = first
-                    val previous = target
-                    if (delayFinalCapture) {
-                        val oldLane = ExperienceSurfaceHost::class.java.getDeclaredField("lane").apply { isAccessible = true }.get(previous) as NuxieRuntimeLane
-                        val mutated = CountDownLatch(1)
-                        assertTrue(oldLane.enqueue {
-                            previous.fixtureActivePageRowOnLane().setValue("second/placementId", NuxieViewModelScalarValue.StringValue("plan:lifetime"))
-                            mutated.countDown()
-                            check(releaseOldLane.await(15, TimeUnit.SECONDS))
-                        })
-                        assertTrue("Mutation must precede recreation", mutated.await(5, TimeUnit.SECONDS))
-                    }
-                    instrumentation.runOnMainSync { original.recreate() }
-                    val deadline = SystemClock.elapsedRealtime() + 10_000
-                    var replacement: Activity? = null
-                    while (replacement == null && SystemClock.elapsedRealtime() < deadline) {
-                        replacement = monitor.waitForActivityWithTimeout(500)?.takeUnless { it === original }
-                    }
-                    first = checkNotNull(replacement) { "Recreation must provide a distinct Activity" }
-                    if (delayFinalCapture) {
-                        val earlySurface = runCatching { awaitSurface(previous, timeoutMillis = 500) }.getOrNull()
-                        if (earlySurface != null) {
-                            val newLane = ExperienceSurfaceHost::class.java.getDeclaredField("lane").apply { isAccessible = true }.get(earlySurface) as NuxieRuntimeLane
-                            val mounted = CountDownLatch(1)
-                            assertTrue(newLane.enqueue { mounted.countDown() })
-                            assertTrue(mounted.await(5, TimeUnit.SECONDS))
-                        }
-                        releaseOldLane.countDown()
-                    }
-                    target = awaitSurface(previous)
-                    assertTrue("Recreation must not dispatch checkout", purchases.isEmpty())
-                    assertEquals("Recreation must keep the same Journey screen", 1, presentationCount.get())
-                }
                 if (purchaseRoundTrip) {
                     assertEquals("screen", revealedScreens.poll(10, TimeUnit.SECONDS))
                     for ((screenId, eventName) in listOf("details" to "details_requested", "screen" to "return_requested")) {
@@ -3035,7 +2956,7 @@ class PublishedTextInputDeviceTest {
                 dispatch(MotionEvent.ACTION_UP)
                 val dispatched = purchases.poll(10, TimeUnit.SECONDS)
                 assertEquals("batches=${accepted.map { it.source to it.emissions.map { emission -> emission.name } }} outcomes=$terminalOutcomes errors=$errorDismissals",
-                    if (absolutePurchase) "plan:monthly" else if (selectPlan || delayFinalCapture) "plan:lifetime" else if (purchaseX == 80f) "plan:monthly" else "plan:annual", dispatched)
+                    if (absolutePurchase) "plan:monthly" else if (selectPlan) "plan:lifetime" else if (purchaseX == 80f) "plan:monthly" else "plan:annual", dispatched)
                 val batch = checkNotNull(accepted.poll(10, TimeUnit.SECONDS))
                 assertEquals(if (purchaseX == 80f) "plan.first" else "plan.second", batch.source.instanceId)
                 assertEquals(listOf("purchase_requested"), batch.emissions.map { it.name })
@@ -3257,7 +3178,6 @@ class PublishedTextInputDeviceTest {
             assertEquals("durable@example.com", checkNotNull(retainedText).let { (state, key) -> state.committedValue(key) })
             assertTrue(journalRun().context.getValue("responses").jsonObject.isEmpty())
         } finally {
-            releaseOldLane.countDown()
             runBlocking {
                 presentations.shutdownOwnedBy(owner)
                 scope.coroutineContext[Job]?.cancelAndJoin()
