@@ -315,6 +315,27 @@ class ExperiencePagePresentationHeightTest {
         }
     }
 
+    @Test fun `in a debug app authored time on a stopped page clock stops the app`() = runBlocking {
+        withPushPages { a, p, _ ->
+            a.start(); a.frame(); p.start(); p.frame()
+            p.debuggable(); a.reduceMotion(); p.reduceMotion()
+            assertEquals("Hidden below a push", "Page clock: authored time on a stopped clock", a.exitFailure()?.message)
+            p.hold(true)
+            assertEquals("Held at a checkpoint", "Page clock: authored time on a stopped clock", p.exitFailure()?.message)
+            p.hold(false)
+            assertNull("A running page may wait", p.exitFailure())
+        }
+    }
+
+    @Test fun `in a debug app a page whose Activity is stopped may wait on authored time`() = runBlocking {
+        withPushPages { a, p, _ ->
+            a.start(); a.frame(); p.start(); p.frame()
+            p.debuggable(); p.reduceMotion()
+            p.stopActivity()
+            try { assertNull(p.exitFailure()) } finally { p.startActivity() }
+        }
+    }
+
     @Test fun `a held checkpoint stops authored time and keeps the page drawn`() = runBlocking {
         withPushPages { a, p, _ ->
             a.start(); a.frame(); p.start(); p.frame(); p.frame()
@@ -572,6 +593,12 @@ class ExperiencePagePresentationHeightTest {
         suspend fun steps(): List<String> = lane.call { native.trace.filter { it.startsWith("step:") } }
         suspend fun clearTrace() = lane.call { native.trace.clear() }
         fun reduceMotion() = set(mounted, "reduceMotionEnabled", true)
+        /** A debug build of the host app, where the page clock check stops the app. */
+        fun debuggable() { activity.applicationInfo.flags = activity.applicationInfo.flags or android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE }
+        /** This page's own exit, as a close or a Journey move plays it. */
+        suspend fun exitFailure(): Throwable? = runCatching {
+            activityCall { mounted.awaitExit(ExperienceScreenLifecycle.ExitReason.DISMISSED) }
+        }.exceptionOrNull()
         suspend fun tracePhases() = lane.call { native.tracePhases = true; native.trace.clear() }
         /** The phases this page's rows were written, as the fake's labels: hidden, entering, active, exiting. */
         suspend fun phaseTrace(): List<String> {
