@@ -89,6 +89,7 @@ class ExperienceLayerHostNavigationDeviceTest {
         val events = CopyOnWriteArrayList<Pair<String,String>>()
         val revealedPhases = CopyOnWriteArrayList<String>()
         val retirements = java.util.concurrent.ConcurrentHashMap<String, CountDownLatch>()
+        val outcomes = java.util.concurrent.ConcurrentHashMap<String, CloseReason>()
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         lateinit var activity: Activity
             private set
@@ -147,7 +148,7 @@ class ExperienceLayerHostNavigationDeviceTest {
                     }
                 },
                 onFailure = { failures.compareAndSet(null, it); ready.countDown() }, onDismissed = { retired.countDown() },
-                onOutcome = {}, onRuntimeStep = { outcome, _, _, _, _ ->
+                onOutcome = { outcomes[id] = it }, onRuntimeStep = { outcome, _, _, _, _ ->
                     outcome.events.forEach { events += checkNotNull(prepared.screenId) to it.name }
                 })
             return ready
@@ -170,17 +171,18 @@ class ExperienceLayerHostNavigationDeviceTest {
             checkFailure()
             return mounted().surface
         }
-        fun recreate() {
+        /** A rebuild Android forces closes the Experience, and the rebuilt Activity finishes (decision 174). */
+        fun rebuild() {
             val previous = activity
-            val phases = revealedPhases.size
-            val recreation = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
-            instrumentation.addMonitor(recreation)
+            val rebuilt = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
+            instrumentation.addMonitor(rebuilt)
             try {
                 instrumentation.runOnMainSync { previous.recreate() }
-                activity = checkNotNull(recreation.waitForActivityWithTimeout(15_000))
-            } finally { instrumentation.removeMonitor(recreation) }
+                activity = checkNotNull(rebuilt.waitForActivityWithTimeout(15_000))
+            } finally { instrumentation.removeMonitor(rebuilt) }
             assertNotSame(previous, activity)
-            eventually { revealedPhases.size > phases }
+            assertTrue("Layer retirement", checkNotNull(retirements[id]).await(15, TimeUnit.SECONDS))
+            eventually { activity.isFinishing || activity.isDestroyed }
             checkFailure()
         }
         fun checkFailure() { failures.get()?.let { throw AssertionError("Layer failed", it) } }
@@ -422,86 +424,24 @@ class ExperienceLayerHostNavigationDeviceTest {
         } finally { directory.deleteRecursively() }
     }
 
-    @Test fun revisitedScreenKeepsItsLifecycleAndAuthoredValuesAcrossActivityRecreation() = runBlocking {
+    @Test fun aRebuildClosesTheExperienceAsTheHostsClose() = runBlocking {
         val directory = directory()
         try {
-            var a = hostedLiveMoveFixture(directory).copy(pageHistory = listOf("A"))
+            val a = hostedLiveMoveFixture(directory).copy(pageHistory = listOf("A"))
             Harness(a).use { harness ->
-                val first = harness.mounted().surface
-                first.layerOperation { it.applyJourneyValuesOnLane("A", mapOf("offset" to NuxieViewModelScalarValue.NumberValue(42.0))) }
-                suspend fun revisit(staleLifecycle: Boolean = false) {
-                    val b = a.copy(screenId = "B", artboardName = "B", transition = pair,
+                harness.navigate(a.copy(screenId = "B", artboardName = "B", transition = pair,
                     pageHistory = listOf("A", "B"),
-                        retainedViewModel = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle())
-                    harness.navigate(b)
-                    a = a.copy(transition = pair, isBack = true, screenLifecycle = if (staleLifecycle)
-                        ExperienceScreenLifecycle() else a.screenLifecycle.copyForPreparation())
-                    harness.navigate(a)
-                }
-                revisit()
-                assertEquals(2L, (first.layerOperation { it.snapshotOnLane("A").resolveScalar(listOf("screen", "appearances")) }
-                    as NuxieViewModelScalarValue.NumberValue).value.toLong())
-                for (appearances in listOf(2L, 3L)) {
-                    val before = harness.mounted().surface
-                    harness.recreate()
-                    val restored = harness.mounted().surface
-                    assertNotSame(before, restored)
-                    val values = restored.layerOperation { it.snapshotOnLane("A") }
-                    assertEquals("Recreation must preserve the cumulative appearance count", appearances,
-                        (values.resolveScalar(listOf("screen", "appearances")) as NuxieViewModelScalarValue.NumberValue).value.toLong())
-                    assertEquals(42.0, (values.resolveScalar(listOf("offset")) as NuxieViewModelScalarValue.NumberValue).value, 0.01)
-                    assertEquals(appearances.toULong(), a.screenLifecycle.appearances)
-                    assertEquals(ExperienceScreenLifecycle.Phase.ACTIVE, a.screenLifecycle.phase)
-                    if (appearances == 2L) revisit(staleLifecycle = true)
-                }
+                    retainedViewModel = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle()))
+                val id = harness.id
+                harness.rebuild()
+                assertEquals(CloseReason.HostDismissed, harness.outcomes[id])
+                assertNull(PresentationRegistry.currentScreen(id))
             }
         } finally { directory.deleteRecursively() }
     }
 
     @org.junit.Ignore("Stage C: A/B fixture has only incoming completion events; cannot prove delivery of both authored halves")
     @Test fun rowInitiatedCaptureDeliversBothHalvesAndARemovedRowsLateAdvance() = Unit
-
-    @Test fun authoredBackCutsRecreatedCoveredPageToRetainedAThenPopsOnce() = runBlocking {
-        val directory = directory()
-        try {
-            val a = hostedLiveMoveFixture(directory).copy(pageHistory = listOf("A"))
-            Harness(a).use { harness ->
-                harness.mounted().surface.layerOperation {
-                    it.applyJourneyValuesOnLane("A", mapOf("offset" to NuxieViewModelScalarValue.NumberValue(42.0)))
-                    a.retainedViewModel.set(it.snapshotOnLane("A"))
-                }
-                harness.navigate(a.copy(screenId = "B", artboardName = "B", transition = pair,
-                    pageHistory = listOf("A", "B"),
-                    retainedViewModel = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle()))
-                val lowerId = harness.id
-                val original = harness.mounted().surface
-                var pops = 0
-                harness.navigate(a.copy(opensLayer = true, isPushPage = true,
-                    transition = Json.parseToJsonElement("""{"type":"push"}""").jsonObject,
-                    layerAncestors = listOf(lowerId), retainedViewModel = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle(),
-                    closeLayer = { reveal ->
-                        pops++
-                        PresentationRegistry.dismiss(harness.id, CloseReason.JourneyNavigation)
-                        reveal.prepare(); reveal.activate(); true
-                    }))
-                harness.recreate()
-                val lower = checkNotNull(PresentationRegistry.currentScreen(lowerId))
-                val mounted = lower.javaClass.getDeclaredField("mounted").apply { isAccessible = true }.get(lower) as ExperienceMountedScreen
-                assertNotSame(original, mounted.surface)
-                assertEquals(listOf("B"), mounted.surface.layerOperation { it.mountedScreenIdsOnLane() })
-                // The service supplies A's retained preparation, even though this player has only B.
-                val restored = checkNotNull(lower.cutCoveredPage(a.copy(isBack = true)))
-                PresentationRegistry.replaceCoveredContent(lowerId, restored)
-                assertTrue(checkNotNull(PresentationRegistry.currentScreen(harness.id)).dismissPagesFromJourney(1))
-                harness.id = lowerId
-                assertEquals(1, pops)
-                assertEquals(listOf("A"), harness.mounted().surface.layerOperation { it.mountedScreenIdsOnLane() })
-                val values = harness.mounted().surface.layerOperation { it.snapshotOnLane("A") }
-                assertEquals(42.0, (values.resolveScalar(listOf("offset")) as NuxieViewModelScalarValue.NumberValue).value, 0.01)
-                harness.checkFailure()
-            }
-        } finally { directory.deleteRecursively() }
-    }
 
     @Test fun modalLayerOwnsAnotherPlayerAndDismissesBackToBase() = runBlocking {
         val directory = directory()
