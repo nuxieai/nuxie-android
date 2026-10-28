@@ -113,8 +113,8 @@ internal class ExperienceMountedScreen(
             override fun onSemanticTreePublished() {
                 if (awaitingSemanticPublication) {
                     // Reveal the native and virtual hierarchy together, once this occurrence is complete.
-                    content?.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
                     awaitingSemanticPublication = false
+                    applyAccessibility()
                 }
             }
 
@@ -147,9 +147,6 @@ internal class ExperienceMountedScreen(
             enteringPage = entering,
         )
         return ExperienceInputContainer(activity, surface::dispatchExperienceKeyEvent, surface::semanticKeyboardEntry).apply {
-            if (awaitingSemanticPublication) {
-                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
-            }
             setBackgroundColor(prepared.clearColor)
             addView(surface, FrameLayout.LayoutParams(-1, -1))
             captionOverlay = ExperienceVideoCaptionOverlay(activity).also {
@@ -162,7 +159,7 @@ internal class ExperienceMountedScreen(
                 textOverlay = overlay
                 addView(overlay, FrameLayout.LayoutParams(-1, -1))
             }
-        }.also { content = it }
+        }.also { content = it; applyAccessibility() }
     }
 
     /** Before a new layer's window exists, lay the screen out for the space that layer gives it. */
@@ -214,7 +211,16 @@ internal class ExperienceMountedScreen(
         setInputEnabled(false)
         textOverlay?.endEditing()
         awaitingSemanticPublication = true
-        content?.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        applyAccessibility()
+    }
+
+    // The content's place in TalkBack (C1) is worked out from two facts and written nowhere else:
+    // a move in progress, and a page that has yet to publish since mounting or being covered.
+    private var navigating = false
+    fun setNavigating(value: Boolean) { navigating = value; applyAccessibility() }
+    private fun applyAccessibility() {
+        content?.importantForAccessibility = if (navigating || awaitingSemanticPublication)
+            View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS else View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
     }
 
     /**

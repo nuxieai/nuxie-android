@@ -336,6 +336,28 @@ class ExperiencePagePresentationHeightTest {
         }
     }
 
+    @Test fun `a page move that starts before a reveal's first publication leaves the page in TalkBack`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame()
+            val nested = ActivityPage(content.copy(isPushPage = false, layerContentHeight = AtomicReference(),
+                screenLifecycle = ExperienceScreenLifecycle()), lower = p)
+            try {
+                nested.start(); nested.frame()
+                nested.pop()
+                nested.settle { nested.layerCount() == 2 }
+            } finally { nested.close() }
+            assertTrue("Revealed, it waits for its first publication", p.awaitingPublication)
+            val move = p.pageMove("a")
+            assertEquals("Out of TalkBack during the move", View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS, p.accessibility)
+            p.land(move)
+            // The step gives input back as it ends, so the page publishes before the move's landing.
+            p.frame()
+            assertFalse("It published", p.awaitingPublication)
+            p.activate(move)
+            assertEquals("After landing it is in TalkBack", View.IMPORTANT_FOR_ACCESSIBILITY_AUTO, p.accessibility)
+        }
+    }
+
     @Test fun `a held checkpoint stops authored time and keeps the page drawn`() = runBlocking {
         withPushPages { a, p, _ ->
             a.start(); a.frame(); p.start(); p.frame(); p.frame()
@@ -588,7 +610,25 @@ class ExperiencePagePresentationHeightTest {
         /** The page's clock: whether its surface draws and steps. */
         val running: Boolean get() = field(surface, "running") as Boolean
         val lifecycle: ExperienceScreenLifecycle get() = prepared.screenLifecycle
-        val accessibility: Int get() = (field(current, "view") as View).importantForAccessibility
+        val accessibility: Int get() = (field(mounted, "content") as View).importantForAccessibility
+        val awaitingPublication: Boolean get() = field(mounted, "awaitingSemanticPublication") as Boolean
+        /** A Journey move to another Screen in this page, through the Activity's own navigation. */
+        suspend fun pageMove(screenId: String): PreparedScreenNavigation {
+            val target = prepared.copy(screenId = screenId, artboardName = screenId.uppercase(),
+                pageHistory = prepared.pageHistory + screenId, opensLayer = false, isPushPage = false, transition = null,
+                screenLifecycle = ExperienceScreenLifecycle(), retainedViewModel = AtomicReference())
+            val id = "$registryId-$screenId"
+            movedIds += id
+            PresentationRegistry.register(id, target, {}, { throw AssertionError(it) }, {}, {})
+            return activityCall { checkNotNull((current as PresentationScreenHandle).prepareNavigation(id, target)) }
+        }
+        suspend fun land(move: PreparedScreenNavigation) = activityCall { move.awaitExit { true } }
+        /** The move takes over: the Activity hands this page to the move's Screen, which [close] then closes. */
+        fun activate(move: PreparedScreenNavigation) {
+            move.activate(); idle()
+            current = field(layer, "screen") as ExperienceSurfaceHost.Listener
+        }
+        private val movedIds = mutableListOf<String>()
         fun hold(held: Boolean) { mounted.setCheckpointHold(held); idle() }
         suspend fun steps(): List<String> = lane.call { native.trace.filter { it.startsWith("step:") } }
         suspend fun clearTrace() = lane.call { native.trace.clear() }
@@ -678,6 +718,7 @@ class ExperiencePagePresentationHeightTest {
             (field(layer, "sheet") as? ExperienceNativeLayerWindow)?.retire()
             if (lower == null && !destroyed) controller.destroy()
             PresentationRegistry.dismiss(registryId, CloseReason.HostDismissed)
+            movedIds.forEach { PresentationRegistry.dismiss(it, CloseReason.HostDismissed) }
         }
 
         companion object {
