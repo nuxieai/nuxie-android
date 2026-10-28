@@ -5,6 +5,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -197,6 +198,22 @@ class ExperienceMoveQueueTest {
         assertTrue("past its limit the close proceeds", close.isCompleted)
         close.await()
         assertTrue("the wedged move still holds its slot", queue.isBusy)
+        wedged.cancel()
+        wedged.join()
+    }
+
+    @Test
+    fun `a close's limit counts native time only`() = runTest {
+        val queue = ExperienceMoveQueue()
+        // A healthy authored animation longer than the limit, then a native step that never lands.
+        val wedged = launch { queue.run { queue.markStarted(); queue.authoredTime.during { delay(6_000) }; awaitCancellation() } }
+        runCurrent()
+        val close = async { queue.closeAfterLanding() }
+        advanceTimeBy(10_900); runCurrent()
+        assertFalse("six authored seconds don't count against the close", close.isCompleted)
+        advanceTimeBy(200); runCurrent()
+        assertTrue("five native seconds after them, the close proceeds", close.isCompleted)
+        close.await()
         wedged.cancel()
         wedged.join()
     }

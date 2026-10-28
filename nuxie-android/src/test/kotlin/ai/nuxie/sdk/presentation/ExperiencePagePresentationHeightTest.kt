@@ -358,6 +358,25 @@ class ExperiencePagePresentationHeightTest {
         }
     }
 
+    @Test fun `a sheet the person holds is authored time until the finger lifts`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame()
+            val nested = ActivityPage(content.copy(isPushPage = false, layerContentHeight = AtomicReference(),
+                screenLifecycle = ExperienceScreenLifecycle()), lower = p)
+            try {
+                nested.start(); nested.frame(); nested.enableSheetInput()
+                nested.sheetState("STATE_DRAGGING")
+                val native = async { content.moves.authoredTime.delayNative(100) }
+                delay(400); nested.idle()
+                assertFalse("While held, the close's native clock pauses", native.isCompleted)
+                nested.sheetState("STATE_SETTLING")
+                withTimeout(2_000) { native.await() }
+                nested.sheetState("STATE_EXPANDED")
+                nested.settle { !content.moves.isBusy }
+            } finally { nested.close() }
+        }
+    }
+
     @Test fun `a held checkpoint stops authored time and keeps the page drawn`() = runBlocking {
         withPushPages { a, p, _ ->
             a.start(); a.frame(); p.start(); p.frame(); p.frame()

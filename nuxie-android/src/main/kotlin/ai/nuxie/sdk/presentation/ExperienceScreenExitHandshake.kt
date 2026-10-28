@@ -9,7 +9,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
 /** Completion events are observed before EXITING is written to the native lane. */
-internal class ExperienceScreenExitHandshake {
+internal class ExperienceScreenExitHandshake(private val authoredTime: ExperienceAuthoredTime? = null) {
     private val lock = Any()
     private val waiters = mutableMapOf<CompletableDeferred<Unit>, String>()
     private var closed = false
@@ -29,7 +29,7 @@ internal class ExperienceScreenExitHandshake {
         }
         try {
             requestExit()
-            withTimeoutOrNull(duration.coerceIn(0, Long.MAX_VALUE - 250) + 250) { completion.await() }
+            authoredTime.during { withTimeoutOrNull(duration.coerceIn(0, Long.MAX_VALUE - 250) + 250) { completion.await() } }
         } finally {
             synchronized(lock) { waiters.remove(completion) }
         }
@@ -53,7 +53,7 @@ internal class ExperienceScreenExitHandshake {
                 incoming.waiters[incomingCompletion] = plan.incomingCompletionEvent
             }
             requestTransition()
-            withTimeoutOrNull(plan.watchdogMs) { awaitAll(outgoingCompletion, incomingCompletion) }
+            authoredTime.during { withTimeoutOrNull(plan.watchdogMs) { awaitAll(outgoingCompletion, incomingCompletion) } }
         } finally {
             synchronized(lock) { waiters.remove(outgoingCompletion) }
             synchronized(incoming.lock) { incoming.waiters.remove(incomingCompletion) }

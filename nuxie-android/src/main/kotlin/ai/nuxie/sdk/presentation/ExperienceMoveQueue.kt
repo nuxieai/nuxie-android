@@ -61,6 +61,9 @@ internal class ExperienceMoveQueue {
     private var busyListener: ((Boolean) -> Unit)? = null
     private val stopped = MutableStateFlow(false)
 
+    /** The Experience's authored waits, which a close's time limit doesn't count (section 4). */
+    val authoredTime = ExperienceAuthoredTime()
+
     val running: Move? get() = synchronized(lock) { current }
     val isBusy: Boolean get() = synchronized(lock) { current != null || waiting.isNotEmpty() }
     val isRevoked: Boolean get() = synchronized(lock) { revoked }
@@ -165,7 +168,7 @@ internal class ExperienceMoveQueue {
         val running = revoke()?.takeIf { it.started } ?: return
         if (joined() === running) return
         try {
-            if (!awaitPresentationRetirement { awaitLanding(running) }) endAsClosed()
+            if (!awaitPresentationRetirement(authoredTime) { awaitLanding(running) }) endAsClosed()
         } catch (stalled: ExperiencePresentationException) {
             // A wedged native step must not hold the close: the close proceeds, and the step's
             // own retirement still owns its native work.

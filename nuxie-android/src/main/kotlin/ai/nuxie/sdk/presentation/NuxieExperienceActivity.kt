@@ -846,7 +846,7 @@ internal class NuxieExperienceActivity : Activity() {
         layers.getOrNull(layers.indexOf(layer) - 1)?.screen?.mounted?.cover()
         layer.sheet = ExperienceNativeLayerWindow(this, layer.root, layer.shell) { requestLayerClose(layer) }.also {
             it.setInputEnabled(false)
-            it.setDragHandler(dragHandler({ layer.drag }, { layer.drag = it }, closes = layer))
+            it.setDragHandler(dragHandler({ layer.drag }, { layer.drag = it }, closes = layer), moves?.authoredTime)
             it.setMoveBusy(moves?.isBusy == true)
             watchMoves()
             onPresented?.let(it::whenPresented)
@@ -1279,7 +1279,7 @@ internal class NuxieExperienceActivity : Activity() {
             finishTerminal(CloseReason.UserDismissed)
         }
         baseWindow = window
-        window.setDragHandler(dragHandler({ baseDrag }, { baseDrag = it }, closes = null))
+        window.setDragHandler(dragHandler({ baseDrag }, { baseDrag = it }, closes = null), moves?.authoredTime)
         window.setInputEnabled(true, allowDismissalDuringLoading = true)
         window.setMoveBusy(moves?.isBusy == true)
         watchMoves()

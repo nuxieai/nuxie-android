@@ -132,7 +132,18 @@ internal class ExperienceNativeLayerWindow(
         fun dragHid()
     }
 
-    fun setDragHandler(handler: DragHandler?) { dragHandler = handler }
+    fun setDragHandler(handler: DragHandler?, authoredTime: ExperienceAuthoredTime? = null) {
+        dragHandler = handler
+        this.authoredTime = authoredTime
+    }
+
+    /** A sheet the person holds is an authored wait, from STATE_DRAGGING until the finger lifts or the drag ends (section 4). */
+    private var authoredTime: ExperienceAuthoredTime? = null
+    private var held: ExperienceAuthoredTime? = null
+    private fun hold(value: Boolean) {
+        if (value && held == null) held = authoredTime?.also { it.begin() }
+        else if (!value) { held?.end(); held = null }
+    }
 
     /** Whether another move holds the slot. A drag in progress keeps its own sheet draggable. */
     fun setMoveBusy(busy: Boolean) {
@@ -149,18 +160,24 @@ internal class ExperienceNativeLayerWindow(
     private fun dragStateChanged(state: Int) {
         if (retired) return
         when (state) {
-            BottomSheetBehavior.STATE_DRAGGING -> if (!dragging) {
-                // The slot is taken before the busy listener runs, so mark the drag first.
-                dragging = true
-                if (dragHandler?.dragStarted() != true) dragging = false
+            BottomSheetBehavior.STATE_DRAGGING -> {
+                if (!dragging) {
+                    // The slot is taken before the busy listener runs, so mark the drag first.
+                    dragging = true
+                    if (dragHandler?.dragStarted() != true) dragging = false
+                }
+                if (dragging) hold(true)
             }
+            BottomSheetBehavior.STATE_SETTLING -> hold(false)
             BottomSheetBehavior.STATE_HIDDEN -> if (dragging) {
                 dragging = false
+                hold(false)
                 dragHandler?.dragHid()
             }
             // Material can reach either straight from STATE_DRAGGING, with no settling between.
             BottomSheetBehavior.STATE_EXPANDED, BottomSheetBehavior.STATE_COLLAPSED -> if (dragging) {
                 dragging = false
+                hold(false)
                 dragHandler?.dragCancelled()
                 applyGates()
             }
@@ -367,6 +384,7 @@ internal class ExperienceNativeLayerWindow(
         presentationCompletion = null
         (dialog as? BottomSheetDialog)?.behavior?.removeBottomSheetCallback(dragCallback)
         // Retirement promises no further state callback, so a drag in progress ends here.
+        hold(false)
         if (dragging) { dragging = false; dragHandler?.dragCancelled() }
         dragHandler = null
         if (android.os.Build.VERSION.SDK_INT >= 33) backCallback?.let { dialog.onBackInvokedDispatcher.unregisterOnBackInvokedCallback(it) }
