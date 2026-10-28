@@ -147,15 +147,25 @@ internal class ExperienceMoveQueue {
     }
 
     /**
+     * A close of the Experience while the Activity is stopped, or its destruction: revokes the
+     * queue and ends the running move as closed. Nothing is on screen to protect, so the slot is
+     * free at once. The move's leftover work no longer joins, and its own release changes nothing.
+     */
+    fun endAsClosed() {
+        revoke()?.let(::release)
+    }
+
+    /**
      * A close of the Experience (S1c): revokes the queue, then lets a started move land within the
-     * close's time limit, unless the caller is that move's own work or the Activity is stopped. A
-     * move still preparing has changed nothing on screen, so the caller cancels it as before.
+     * close's time limit, unless the caller is that move's own work. While the Activity is stopped
+     * the move ends as closed instead. A move still preparing has changed nothing on screen, so the
+     * caller cancels it as before.
      */
     suspend fun closeAfterLanding() {
         val running = revoke()?.takeIf { it.started } ?: return
         if (joined() === running) return
         try {
-            awaitPresentationRetirement { awaitLanding(running) }
+            if (!awaitPresentationRetirement { awaitLanding(running) }) endAsClosed()
         } catch (stalled: ExperiencePresentationException) {
             // A wedged native step must not hold the close: the close proceeds, and the step's
             // own retirement still owns its native work.

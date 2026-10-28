@@ -875,7 +875,14 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
-    fun `a close during a started move lets it land, then closes the Screen it landed on`() = runTest {
+    fun `a close during a started move lets it land, then closes the Screen it landed on`() =
+        closeDuringStartedMove(stopped = false)
+
+    @Test
+    fun `a close while the Activity is stopped closes at once, and the started move ends without landing`() =
+        closeDuringStartedMove(stopped = true)
+
+    private fun closeDuringStartedMove(stopped: Boolean) = runTest {
         val release = renderedJourneyRelease("text-input-navigation.json")
         val launched = mutableListOf<String>()
         val service = service(this, launch = launched::add)
@@ -922,7 +929,12 @@ class ExperiencePresentationServiceTest {
                         navigating = false
                         if (detachAfterActivation) PresentationRegistry.detach(sourceId, source)
                     }
-                    override suspend fun abort() { trace += "aborted"; navigating = false }
+                    override suspend fun abort() {
+                        trace += "aborted"
+                        navigating = false
+                        // As the Activity's abort, which finishes a source that has a close reason.
+                        if (detachAfterActivation) PresentationRegistry.detach(sourceId, source)
+                    }
                 }
             }
         }
@@ -936,8 +948,20 @@ class ExperiencePresentationServiceTest {
         try {
             runCurrent()
             assertEquals(listOf("started"), trace)
+            moves.setStopped(stopped)
             service.dismiss(CloseReason.UserDismissed)
             runCurrent()
+            if (stopped) {
+                assertTrue("Stopped, the close acts at once on the Screen the move started from: $trace",
+                    "closed the source" in trace)
+                assertFalse("The move ends as closed and holds no slot", moves.isBusy)
+                lands.complete(Unit)
+                runCurrent()
+                assertTrue("The move's work ends: $trace", "aborted" in trace)
+                assertFalse("Its Screen never takes over: $trace", "activated" in trace)
+                assertTrue(next.isCompleted)
+                return@runTest
+            }
             assertEquals("The close waits for the started move", listOf("started"), trace)
             assertFalse(next.isCompleted)
             lands.complete(Unit)

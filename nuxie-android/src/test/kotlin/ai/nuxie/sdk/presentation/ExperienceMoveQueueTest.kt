@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.presentation
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
@@ -8,6 +9,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -197,6 +199,68 @@ class ExperienceMoveQueueTest {
         assertTrue("the wedged move still holds its slot", queue.isBusy)
         wedged.cancel()
         wedged.join()
+    }
+
+    @Test
+    fun `a close while the Activity is stopped ends the started move as closed`() = runTest {
+        val queue = ExperienceMoveQueue()
+        val heard = mutableListOf<Boolean>()
+        queue.onBusyChanged { heard += it }
+        val lands = CompletableDeferred<Unit>()
+        var nested: Throwable? = null
+        val move = launch {
+            queue.run {
+                assertTrue(queue.markStarted())
+                withContext(NonCancellable) { lands.await() }
+                nested = runCatching { queue.run { } }.exceptionOrNull()
+            }
+        }
+        runCurrent()
+        // The move can't be cancelled, so a failed check must still let it land, or the test never ends.
+        try {
+            val behind = async { runCatching { queue.run { } } }
+            runCurrent()
+            queue.setStopped(true)
+            queue.closeAfterLanding()
+            assertFalse("the close frees the slot without waiting for the move", queue.isBusy)
+            assertNull(queue.running)
+            assertTrue(behind.await().exceptionOrNull() is ExperienceMoveQueue.Closed)
+        } finally { lands.complete(Unit) }
+        move.join()
+        assertTrue("the ended move's own work no longer joins", nested is ExperienceMoveQueue.Closed)
+        assertEquals("idle is heard once", listOf(false, true, false), heard)
+    }
+
+    @Test
+    fun `a close waiting for a started move ends it when the Activity stops`() = runTest {
+        val queue = ExperienceMoveQueue()
+        val lands = CompletableDeferred<Unit>()
+        val move = launch { queue.run { queue.markStarted(); withContext(NonCancellable) { lands.await() } } }
+        runCurrent()
+        try {
+            val close = async { queue.closeAfterLanding() }
+            runCurrent()
+            assertFalse("while started, the close waits", close.isCompleted)
+            queue.setStopped(true)
+            runCurrent()
+            assertTrue("at stop the close goes ahead", close.isCompleted)
+            assertFalse(queue.isBusy)
+        } finally { lands.complete(Unit) }
+        move.join()
+    }
+
+    @Test
+    fun `ending the queue as closed frees any running move's slot`() = runTest {
+        val queue = ExperienceMoveQueue()
+        val drag = checkNotNull(queue.tryTake())
+        val behind = async { runCatching { queue.run { } } }
+        runCurrent()
+        queue.endAsClosed()
+        assertFalse(queue.isBusy)
+        assertTrue(behind.await().exceptionOrNull() is ExperienceMoveQueue.Closed)
+        drag.release()
+        assertFalse("a late release changes nothing", queue.isBusy)
+        assertNull("nothing is admitted afterwards", queue.tryTake())
     }
 
     @Test

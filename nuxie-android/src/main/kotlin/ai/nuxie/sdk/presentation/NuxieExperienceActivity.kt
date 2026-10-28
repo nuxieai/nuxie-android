@@ -955,6 +955,7 @@ internal class NuxieExperienceActivity : Activity() {
         if (watchedMoves === moves) return
         watchedMoves?.onBusyChanged(null)
         watchedMoves = moves
+        moves.setStopped(!visible)
         moves.onBusyChanged { busy ->
             runOnUiThread {
                 if (watchedMoves !== moves || isDestroyed) return@runOnUiThread
@@ -1087,6 +1088,7 @@ internal class NuxieExperienceActivity : Activity() {
     override fun onStart() {
         super.onStart()
         visible = true
+        moves?.setStopped(false)
         loadingView?.setActive(recoveryView == null)
         navigation?.setVisible(true)
         pagePopAnimation?.setVisible(true)
@@ -1100,6 +1102,8 @@ internal class NuxieExperienceActivity : Activity() {
 
     override fun onStop() {
         visible = false
+        // A close while stopped doesn't wait for the running move: nothing is on screen to land.
+        moves?.setStopped(true)
         loadingView?.setActive(false)
         navigation?.setVisible(false, preservePendingInput = true)
         pagePopAnimation?.setVisible(false)
@@ -1120,7 +1124,8 @@ internal class NuxieExperienceActivity : Activity() {
     }
 
     override fun onDestroy() {
-        if (!isChangingConfigurations) moves?.revoke()
+        // A started move can't land without its Activity, so it ends as closed and frees the slot.
+        if (!isChangingConfigurations) moves?.endAsClosed()
         watchedMoves?.onBusyChanged(null)
         watchedMoves = null
         // A retired window promises no further state callback, so a held drag ends here.
