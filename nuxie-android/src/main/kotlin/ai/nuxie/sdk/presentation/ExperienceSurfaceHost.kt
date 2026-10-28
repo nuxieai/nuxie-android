@@ -701,6 +701,10 @@ internal class ExperienceSurfaceHost(
     private val framePending = AtomicBoolean(false)
     private var surfaceAvailable = false
     private var presentationVisible = true
+    // The checkpoint hold (section 3): authored time stands still and no new frame is stepped,
+    // while captions, semantics, native fields and the drawn frame stay exactly as they are.
+    @Volatile private var timelineHeld = false
+    private var timelineResumed = false
     private var lastFrameNanos = 0L
     private var lastSteppedGeneration = -1L
     private val pointerInput = ExperienceRuntimePointerInput(artboardSize)
@@ -1315,6 +1319,13 @@ internal class ExperienceSurfaceHost(
         updateFrameScheduling()
     }
 
+    /** UI-thread timeline input. Releasing it resumes authored time from where it stood. */
+    fun setTimelineHeld(held: Boolean) {
+        if (timelineHeld == held) return
+        timelineHeld = held
+        if (!held) lane.enqueue { timelineResumed = true }
+    }
+
     private fun updateFrameScheduling() {
         val shouldRun = surfaceAvailable && presentationVisible && !released.get()
         if (running == shouldRun) return
@@ -1588,6 +1599,9 @@ internal class ExperienceSurfaceHost(
                 // writes (including the next screen's preparation) are not held back.
                 if (renderer.isPresentingAnotherWindow(window)) return@enqueue
                 if (!applyLayoutSize(player)) return@enqueue
+                // Held: no new step and no new frame. A frame already submitted still completes, so the
+                // writes queued behind it are not stalled for the length of the hold.
+                if (timelineHeld && !pendingPresentation) return@enqueue
                 if (!pendingPresentation) {
                     drainTextWrites()
                     applyNextTransitionWrite()
@@ -1601,12 +1615,13 @@ internal class ExperienceSurfaceHost(
                     // Keep the clock on the lane: a resize queued ahead of this
                     // tick may have retired its pending submission. Polling does
                     // not consume time, and visibility generations reset it.
-                    val elapsedSeconds = if (layoutStepPending || presentedTransitionWrite != null || lastSteppedGeneration != generation) {
+                    val resumed = timelineResumed.also { timelineResumed = false }
+                    val elapsedSeconds = if (layoutStepPending || presentedTransitionWrite != null || lastSteppedGeneration != generation || resumed) {
                         0.0
                     } else {
                         (frameTimeNanos - lastFrameNanos) / 1_000_000_000.0
                     }
-                    if (!layoutStepPending || lastSteppedGeneration != generation) {
+                    if (!layoutStepPending || lastSteppedGeneration != generation || resumed) {
                         lastFrameNanos = frameTimeNanos
                     }
                     lastSteppedGeneration = generation

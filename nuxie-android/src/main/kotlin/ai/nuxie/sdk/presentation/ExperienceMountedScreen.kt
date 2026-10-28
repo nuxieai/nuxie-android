@@ -182,12 +182,48 @@ internal class ExperienceMountedScreen(
         }
     }
 
-    fun setVisible(visible: Boolean, preservePendingInput: Boolean = false) {
-        if (visible) {
+    // The page clock (section 3) is worked out from these facts and written nowhere else.
+    // Callers write a fact; [applyClock] decides whether the page runs.
+    /** False from a provisional first frame, or a native recovery, until the page is revealed. */
+    private var presented = true
+    /** Under a push, or leaving: stopped until it is revealed. */
+    private var hiddenBelow = false
+    /** The Activity is started. `onStart` and `onStop` write it to every mounted Screen. */
+    private var started = true
+    /** The checkpoint hold: authored time stands still, and the drawn frame stays as it is. */
+    private var checkpointHold = false
+
+    fun setPresented(value: Boolean) { presented = value; applyClock() }
+
+    fun setStarted(value: Boolean) { started = value; applyClock(preservePendingInput = !value) }
+
+    /** A Journey checkpoint before a page step: held until it returns or the page starts its exit. */
+    fun setCheckpointHold(held: Boolean) { checkpointHold = held; surface.setTimelineHeld(held) }
+
+    /** Shown again: presented, and no longer hidden below. */
+    fun reveal() { presented = true; hiddenBelow = false; applyClock() }
+
+    val isHiddenBelow: Boolean get() = hiddenBelow
+
+    /**
+     * A sheet or modal opens over this page. Input goes and editing ends; its clock and drawing go on,
+     * and it plays no exit. Its content leaves TalkBack until the first semantic publication after the
+     * reveal returns input, as at mount.
+     */
+    fun cover() {
+        setInputEnabled(false)
+        textOverlay?.endEditing()
+        awaitingSemanticPublication = true
+        content?.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+    }
+
+    private fun applyClock(preservePendingInput: Boolean = false) {
+        val runs = presented && !hiddenBelow && started
+        if (runs) {
             refreshFontScale(activity.resources.configuration.fontScale)
             reducedMotion?.refresh()
         }
-        surface.setPresentationVisible(visible, preservePendingInput)
+        surface.setPresentationVisible(runs, preservePendingInput)
     }
 
     /** Queued on the same lane as safe-area updates and frame-qualified native input capture. */
@@ -275,13 +311,10 @@ internal class ExperienceMountedScreen(
 
     fun hide() {
         setInputEnabled(false)
-        if (isLayer) {
-            surface.queueLayerPhases(listOf(checkNotNull(prepared.screenId) to ExperienceScreenLifecycle.Phase.HIDDEN))
-            setVisible(false)
-            return
-        }
-        surface.updateRuntimeValues(lifecycle.move(ExperienceScreenLifecycle.Phase.HIDDEN, exitReason = ExperienceScreenLifecycle.ExitReason.NONE))
-        setVisible(false)
+        if (isLayer) surface.queueLayerPhases(listOf(checkNotNull(prepared.screenId) to ExperienceScreenLifecycle.Phase.HIDDEN))
+        else surface.updateRuntimeValues(lifecycle.move(ExperienceScreenLifecycle.Phase.HIDDEN, exitReason = ExperienceScreenLifecycle.ExitReason.NONE))
+        hiddenBelow = true
+        applyClock()
     }
 
     fun exit(reason: ExperienceScreenLifecycle.ExitReason) {
@@ -306,6 +339,9 @@ internal class ExperienceMountedScreen(
     }
 
     suspend fun cutCoveredPage(target: PreparedPresentation, listener: ExperienceSurfaceHost.Listener): PreparedPresentation {
+        // A page under a sheet keeps playing, so it is hidden below before its Screen changes unseen.
+        // Its new Screen enters at the reveal. A trim that keeps its Screen leaves it playing.
+        if (target.screenId != prepared.screenId && !hiddenBelow) hide()
         prepareRow(target, listener)
         navigateLayer(target, isBack = true, covered = true)
         return target

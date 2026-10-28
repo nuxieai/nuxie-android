@@ -277,7 +277,7 @@ internal class NuxieExperienceActivity : Activity() {
             runOnUiThread {
                 if (isDestroyed || isFinishing) return@runOnUiThread
                 if (provisional) {
-                    mounted?.setVisible(false)
+                    mounted?.setPresented(false)
                     ready.complete(Unit)
                 } else {
                     requestReveal()
@@ -363,7 +363,7 @@ internal class NuxieExperienceActivity : Activity() {
                 mounted?.transitionEvents?.close()
             } else if (!closing && !revealed && currentScreen === this &&
                 PresentationRegistry.recoverNative(id, this, nativeAttemptGeneration, error)) {
-                mounted?.setVisible(false)
+                mounted?.setPresented(false)
             } else if (!closing && currentScreen === this && rendererEffects.isRetired.not()) {
                 finishTerminal(CloseReason.Error(error))
             }
@@ -408,15 +408,20 @@ internal class NuxieExperienceActivity : Activity() {
             blocksInput = false
         }
 
-        fun setVisible(visible: Boolean, preservePendingInput: Boolean = false) {
-            animation?.setVisible(visible)
-            if (blocksInput) target.mounted?.setVisible(visible, preservePendingInput)
-        }
+        /** The navigation's own view animation pauses while the Activity is stopped. Page clocks follow "started". */
+        fun setAnimationVisible(visible: Boolean) { animation?.setVisible(visible) }
 
         fun cancel() { animation?.cancel() }
 
         override suspend fun awaitExit(beforePageStep: suspend () -> Boolean) {
-            if (reusesLayer && !beforePageStep()) return
+            if (reusesLayer) {
+                // The source keeps its last frame while the Journey settles its checkpoint (section 3).
+                withContext(Dispatchers.Main.immediate) { source.mounted?.setCheckpointHold(true) }
+                val proceed = try { beforePageStep() } finally {
+                    withContext(NonCancellable + Dispatchers.Main.immediate) { source.mounted?.setCheckpointHold(false) }
+                }
+                if (!proceed) return
+            }
             awaitExit()
         }
 
@@ -465,7 +470,7 @@ internal class NuxieExperienceActivity : Activity() {
                     outgoingScreen.transitionEvents.performWith(incomingScreen.transitionEvents, custom) {
                         incoming.alpha = 1f
                         if (custom.incomingOnTop) incoming.bringToFront() else outgoing.bringToFront()
-                        incomingScreen.setVisible(visible)
+                        incomingScreen.reveal()
                         coroutineScope {
                             val outgoingPhase = async { outgoingScreen.beginCustomTransition(custom.id, outgoing = true) }
                             val incomingPhase = async { incomingScreen.beginCustomTransition(custom.id, outgoing = false) }
@@ -475,7 +480,7 @@ internal class NuxieExperienceActivity : Activity() {
                     }
                 } else {
                     animation = ExperienceScreenViewTransition(outgoing, incoming, plan.kind)
-                    target.mounted?.setVisible(visible)
+                    target.mounted?.reveal()
                     animation!!.play(visible)
                 }
             }
@@ -513,10 +518,8 @@ internal class NuxieExperienceActivity : Activity() {
                         installPushedPage(layer, lower)
                         source.view?.translationX = 0f
                     } else if (target.mounted?.isLayer == true) {
-                        source.mounted?.exit(ExperienceScreenLifecycle.ExitReason.NAVIGATION)
                         installLayerWindow(layer) {
                             if (currentScreen === target && !target.closed.isCompleted) {
-                                source.mounted?.hide()
                                 target.mounted?.activate()
                                 target.publishPreparedFrame()
                             }
@@ -543,7 +546,7 @@ internal class NuxieExperienceActivity : Activity() {
                 if (!target.prepared.opensLayer || target.prepared.isPushPage || target.mounted?.isLayer != true)
                     target.publishPreparedFrame()
                 target.mounted?.setInputEnabled(true)
-                target.mounted?.setVisible(visible)
+                target.mounted?.reveal()
             }
         }
 
@@ -606,7 +609,7 @@ internal class NuxieExperienceActivity : Activity() {
                 // it is laid out for that layer's space, and observes real insets once installed.
                 if (prepared.opensLayer) target.mounted?.assumeLayerInsets(prepared.shell)
                 else target.mounted?.observeWindow()
-                target.mounted?.setVisible(visible)
+                target.mounted?.setStarted(visible)
                 target.ready.await()
                 candidate
             }
@@ -692,7 +695,7 @@ internal class NuxieExperienceActivity : Activity() {
                             mountReadyScreen(id, content.content)
                             acquiringScreen?.let { PresentationRegistry.detach(id, it) }
                             acquiringScreen = null
-                            currentScreen?.takeUnless { it.rendererEffects.isRetired }?.mounted?.setVisible(visible)
+                            currentScreen?.takeUnless { it.rendererEffects.isRetired }?.mounted?.setStarted(visible)
                         }
                         if (progress != null && currentScreen?.hasRevealed() == false) {
                             updateNativeRecovery(id, content.content, progress)
@@ -845,6 +848,8 @@ internal class NuxieExperienceActivity : Activity() {
     }
 
     private fun installLayerWindow(layer: Layer, onPresented: (() -> Unit)? = null) {
+        // A sheet or modal covers the page below it, which stays live with input off (section 3).
+        layers.getOrNull(layers.indexOf(layer) - 1)?.screen?.mounted?.cover()
         layer.sheet = ExperienceNativeLayerWindow(this, layer.root, layer.shell) { requestLayerClose(layer) }.also {
             it.setInputEnabled(false)
             it.setDragHandler(dragHandler({ layer.drag }, { layer.drag = it }, closes = layer))
@@ -959,8 +964,9 @@ internal class NuxieExperienceActivity : Activity() {
             val returning = layers[layers.lastIndex - pageCount]
             returningPage = returning.screen
             returning.root.visibility = View.VISIBLE
-            returning.screen.mounted?.takeIf { it.isLayer }?.enterPage()
-            returning.screen.mounted?.setVisible(visible)
+            // A page that stayed live under a sheet comes back with no entrance; one hidden below enters.
+            returning.screen.mounted?.takeIf { it.isLayer && it.isHiddenBelow }?.enterPage()
+            returning.screen.mounted?.reveal()
             if (layer.pushed) {
                 val lower = returning
                 if (authored && source.mounted?.reduceMotion != true) {
@@ -1005,7 +1011,7 @@ internal class NuxieExperienceActivity : Activity() {
                         currentPageWindow()?.setInputEnabled(dismissible)
                         lower.screen.mounted?.activate()
                         lower.screen.mounted?.setInputEnabled(true)
-                        lower.screen.mounted?.setVisible(visible)
+                        lower.screen.mounted?.reveal()
                     }
                 }
             }) == true
@@ -1036,14 +1042,10 @@ internal class NuxieExperienceActivity : Activity() {
         visible = true
         moves?.setStopped(false)
         loadingView?.setActive(recoveryView == null)
-        navigation?.setVisible(true)
+        navigation?.setAnimationVisible(true)
         pagePopAnimation?.setVisible(true)
-        screens.forEach {
-            val exposed = it === currentScreen || it === returningPage || it === navigation?.source ||
-                it === navigation?.target ||
-                (it.mounted?.isLayer != true && layers.any { layer -> layer.screen === it })
-            if (!it.rendererEffects.isRetired && exposed) it.mounted?.setVisible(true)
-        }
+        // Every Screen's clock follows its own facts: a page under a sheet resumes, one hidden below stays stopped.
+        screens.forEach { if (!it.rendererEffects.isRetired) it.mounted?.setStarted(true) }
     }
 
     override fun onStop() {
@@ -1051,9 +1053,9 @@ internal class NuxieExperienceActivity : Activity() {
         // A close while stopped doesn't wait for the running move: nothing is on screen to land.
         moves?.setStopped(true)
         loadingView?.setActive(false)
-        navigation?.setVisible(false, preservePendingInput = true)
+        navigation?.setAnimationVisible(false)
         pagePopAnimation?.setVisible(false)
-        screens.forEach { it.mounted?.setVisible(false, preservePendingInput = true) }
+        screens.forEach { it.mounted?.setStarted(false) }
         super.onStop()
     }
 
