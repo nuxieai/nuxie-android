@@ -402,6 +402,10 @@ class ExperiencePagePresentationHeightTest {
         /** A close's caller is cancelled after the close started (S1c): the close still lands. */
         suspend fun popWhileItsCallerGivesUp() {
             set(mounted, "reduceMotionEnabled", true)
+            // The fake lane runs on its own thread, so the exit may finish before the close waits on it.
+            // Holding the close at its reveal keeps it running, whichever thread wins.
+            val reveal = CompletableDeferred<Unit>()
+            set(current, "prepared", prepared.copy(closeLayer = { reveal.await(); it.prepare(); it.activate(); true }))
             coroutineScope {
                 val close = launch(start = CoroutineStart.UNDISPATCHED) {
                     (current as PresentationScreenHandle).dismissPagesFromJourney(1)
@@ -409,6 +413,7 @@ class ExperiencePagePresentationHeightTest {
                 assertFalse("The close is still running", close.isCompleted)
                 assertNotNull("The close has started", field(activity, "closingLayer"))
                 close.cancel()
+                reveal.complete(Unit)
                 withTimeout(5_000) {
                     while (!close.isCompleted) { shadowOf(Looper.getMainLooper()).idle(); delay(1) }
                 }
