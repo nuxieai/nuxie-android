@@ -426,6 +426,7 @@ internal class ExperienceMountedScreen(
                         if (phasePresented) super<ExperiencePageStep.Operations>.wait(completions, milliseconds)
                     }
                     override suspend fun hidden() = Unit
+                    override fun veil() { textOverlay?.veil() }
                     override suspend fun drain() { surface.layerOperation { surface.stepZeroDeltaOnLane() } }
                     override suspend fun active() {
                         prepared = target

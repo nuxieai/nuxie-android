@@ -27,6 +27,8 @@ internal object ExperiencePageStep {
         }
         suspend fun hidden()
         suspend fun active()
+        /** Fields hide before the step's first batch, until the first field publication after input returns (decision 169). */
+        fun veil() = Unit
         /** One ordinary step before the incoming row takes over, so step_end commands reach the row they leave (S8). */
         suspend fun drain() = Unit
     }
@@ -38,6 +40,7 @@ internal object ExperiencePageStep {
         operations.input(false)
         try {
             operations.prepare()
+            operations.veil()
             val transition = plan?.id
             val phasesTransition = transition.orEmpty()
             var loggedPresentationTimeout = false
