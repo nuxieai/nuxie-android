@@ -218,6 +218,79 @@ class ExperienceNativeTextInputOverlayTest {
         }
     }
 
+    @Test fun `a veiled field keeps its focus, its keyboard and its taps`() = withOverlay { overlay, _, _ ->
+        overlay.updateNativeFields(listOf(field(10, "kept", ownerId = 123)))
+        val original = editor(overlay, 10)
+        assertTrue(original.requestFocus())
+        overlay.setInputEnabled(false, preserveFocus = true)
+        overlay.veil()
+        assertEquals("Hidden while the step runs", 0f, original.alpha, 0f)
+        assertTrue("Focus stays", original.hasFocus())
+        assertEquals(View.VISIBLE, original.visibility)
+    }
+
+    @Test fun `a field bound during a step starts veiled`() = withOverlay { overlay, _, _ ->
+        overlay.updateNativeFields(listOf(field(10, "kept", ownerId = 123)))
+        // A covered page's look-only publication, with input off (C4), can bind a field mid-step.
+        overlay.setInputEnabled(false)
+        overlay.veil()
+        overlay.updateNativeFields(listOf(field(10, "kept", ownerId = 123, captureId = 2),
+            field(11, "new", ownerId = 124, captureId = 2)))
+        assertEquals(0f, editor(overlay, 11).alpha, 0f)
+        assertEquals("A publication with input off leaves the veil on", 0f, editor(overlay, 10).alpha, 0f)
+    }
+
+    @Test fun `the veil outlives input returning until the first field publication`() = withOverlay { overlay, _, _ ->
+        overlay.updateNativeFields(listOf(field(10, "kept", ownerId = 123)))
+        val original = editor(overlay, 10)
+        overlay.setInputEnabled(false, preserveFocus = true)
+        overlay.veil()
+        overlay.setInputEnabled(true, preserveFocus = true)
+        assertEquals("Input is back but the field is unplaced", 0f, original.alpha, 0f)
+        overlay.updateNativeFields(listOf(field(10, "kept", ownerId = 123, captureId = 2)))
+        assertEquals("The first publication after input lifts it", 1f, original.alpha, 0f)
+    }
+
+    @Test fun `a tap on a veiled field lands on it`() = withOverlay { overlay, _, _ ->
+        overlay.updateNativeFields(listOf(field(10, "kept", ownerId = 123)))
+        val original = editor(overlay, 10)
+        overlay.setInputEnabled(false)
+        overlay.veil()
+        overlay.setInputEnabled(true)
+        assertFalse(original.hasFocus())
+        tap(overlay, original)
+        assertTrue("Alpha leaves touch dispatch as it is", original.hasFocus())
+    }
+
+    @Test fun `closing ends the veil`() = withOverlay { overlay, _, _ ->
+        overlay.updateNativeFields(listOf(field(10, "kept", ownerId = 123)))
+        overlay.veil()
+        overlay.close()
+        assertFalse(privateField<Boolean>(overlay, "veiled"))
+    }
+
+    private fun tap(overlay: ExperienceTextInputOverlay, view: View) {
+        overlay.measure(View.MeasureSpec.makeMeasureSpec(400, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(200, View.MeasureSpec.EXACTLY))
+        overlay.layout(0, 0, 400, 200)
+        // The view's center, through its own placement transform, in the overlay's coordinates.
+        val point = floatArrayOf(view.width / 2f, view.height / 2f)
+        view.matrix.mapPoints(point)
+        var parent: View = view
+        while (parent !== overlay) { point[0] += parent.left; point[1] += parent.top; parent = parent.parent as View }
+        val time = android.os.SystemClock.uptimeMillis()
+        for (action in listOf(android.view.MotionEvent.ACTION_DOWN, android.view.MotionEvent.ACTION_UP)) {
+            val event = android.view.MotionEvent.obtain(time, time, action, point[0], point[1], 0)
+            overlay.dispatchTouchEvent(event)
+            event.recycle()
+        }
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun <T> privateField(target: Any, name: String): T =
+        target.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(target) as T
+
     private fun withOverlay(block: (ExperienceTextInputOverlay, MutableList<Pending>, MutableList<Pair<Long, String>>) -> Unit) {
         val controller = Robolectric.buildActivity(Activity::class.java).setup()
         val writes = mutableListOf<Pending>()

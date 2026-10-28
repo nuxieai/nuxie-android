@@ -163,6 +163,22 @@ internal class ExperienceTextInputOverlay(
             flushNativeWrite(binding)
         }
         layoutEditors()
+        // The first publication after input returns draws the fields where they now are (decision 169).
+        // A covered page's look-only publication comes with input off, so it leaves the veil on.
+        if (veiled && inputEnabled) {
+            veiled = false
+            bindings.forEach { it.editor.alpha = 1f }
+        }
+    }
+
+    /**
+     * A step is starting: each field's placeholder, caret and highlight stay at its last spot until the
+     * next publication, so they're hidden till then. Alpha leaves taps, focus and the keyboard as they are.
+     */
+    fun veil() {
+        if (closed) return
+        veiled = true
+        bindings.forEach { it.editor.alpha = 0f }
     }
 
     private fun flushNativeWrite(binding: Binding) {
@@ -182,6 +198,8 @@ internal class ExperienceTextInputOverlay(
     }
 
     /** IME callbacks can outlive touch dispatch; fence them during native preparation too. */
+    private var veiled = false
+
     fun setInputEnabled(enabled: Boolean, preserveFocus: Boolean = false) {
         if (closed || inputEnabled == enabled) return
         preserveFocusWhileBlocked = !enabled && preserveFocus
@@ -226,6 +244,7 @@ internal class ExperienceTextInputOverlay(
 
     fun close() {
         closed = true
+        veiled = false
         if (viewTreeObserver.isAlive) viewTreeObserver.removeOnGlobalLayoutListener(keyboardLayoutListener)
         applyKeyboardShift(0f)
         bindings.forEach { it.editor.onChange = {}; it.editor.onSelection = null; it.editor.onReturn = null; it.draft?.withdraw() }
@@ -367,6 +386,8 @@ internal class ExperienceTextInputOverlay(
                 if (editor.hasFocus()) clearEditorFocus()
                 editor.visibility = View.INVISIBLE
             }
+            // A binding made during a step starts veiled.
+            if (veiled) editor.alpha = 0f
         }
         avoidKeyboard()
     }
