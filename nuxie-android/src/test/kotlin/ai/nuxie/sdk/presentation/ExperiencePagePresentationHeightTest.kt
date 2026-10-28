@@ -10,11 +10,13 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import java.util.concurrent.atomic.AtomicReference
@@ -189,6 +191,73 @@ class ExperiencePagePresentationHeightTest {
         }
     }
 
+    @Test fun `a close while the Activity is stopped does not wait for the running move`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame()
+            val lands = CompletableDeferred<Unit>()
+            val move = launch(start = CoroutineStart.UNDISPATCHED) {
+                content.moves.run { check(it.start()); withContext(NonCancellable) { lands.await() } }
+            }
+            try {
+                a.stopActivity()
+                withTimeout(1_000) { content.moves.closeAfterLanding() }
+                assertFalse("No slot is held after the close", content.moves.isBusy)
+            } finally { lands.complete(Unit); move.join() }
+        }
+    }
+
+    @Test fun `a close waits for the running move again once the Activity is back`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame()
+            val lands = CompletableDeferred<Unit>()
+            val move = launch(start = CoroutineStart.UNDISPATCHED) {
+                content.moves.run { check(it.start()); withContext(NonCancellable) { lands.await() } }
+            }
+            try {
+                a.stopActivity(); a.startActivity()
+                val close = async { content.moves.closeAfterLanding() }
+                delay(200)
+                assertFalse("Started again, a close lets the move land first", close.isCompleted)
+                lands.complete(Unit)
+                withTimeout(1_000) { close.await() }
+            } finally { lands.complete(Unit); move.join() }
+        }
+    }
+
+    @Test fun `a queue first seen while the Activity is stopped starts stopped`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame()
+            val lands = CompletableDeferred<Unit>()
+            val move = launch(start = CoroutineStart.UNDISPATCHED) {
+                content.moves.run { check(it.start()); withContext(NonCancellable) { lands.await() } }
+            }
+            try {
+                a.stopActivity()
+                // As a root mounted in the background: its queue arrives after onStop and never heard it.
+                content.moves.setStopped(false)
+                a.watchMovesAfresh()
+                withTimeout(1_000) { content.moves.closeAfterLanding() }
+                assertFalse("No slot is held after the close", content.moves.isBusy)
+            } finally { lands.complete(Unit); move.join() }
+        }
+    }
+
+    @Test fun `destroying the Activity ends the running move as closed`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame()
+            val lands = CompletableDeferred<Unit>()
+            val move = launch(start = CoroutineStart.UNDISPATCHED) {
+                content.moves.run { check(it.start()); withContext(NonCancellable) { lands.await() } }
+            }
+            val behind = async(start = CoroutineStart.UNDISPATCHED) { runCatching { content.moves.run { } } }
+            try {
+                a.destroyActivity()
+                assertFalse("No slot is held once the Activity is gone", content.moves.isBusy)
+                assertTrue(behind.await().exceptionOrNull() is ExperienceMoveQueue.Closed)
+            } finally { lands.complete(Unit); move.join() }
+        }
+    }
+
     @Test fun `a nested sheet refuses a drag and outside taps while a move runs`() = runBlocking {
         withPushPages { a, p, content ->
             a.start(); a.frame(); p.start(); p.frame()
@@ -314,6 +383,18 @@ class ExperiencePagePresentationHeightTest {
             .newInstance(activity, root, current, initial.shell, initial.isPushPage)
         private var clock = 1_000_000_000L
         private var closed = false
+        private var destroyed = false
+
+        /** The Activity's own lifecycle, through Robolectric's controller. */
+        fun stopActivity() { controller.stop() }
+        fun startActivity() { controller.start() }
+        fun destroyActivity() { destroyed = true; controller.destroy() }
+
+        /** As a queue the Activity sees for the first time: it forgets the one it watches and watches again. */
+        fun watchMovesAfresh() {
+            set(activity, "watchedMoves", null)
+            NuxieExperienceActivity::class.java.getDeclaredMethod("watchMoves").apply { isAccessible = true }.invoke(activity)
+        }
 
         suspend fun start(install: Boolean = true, covered: Boolean = false) {
             val runtime = object : NuxieTypedRuntimeNative by native {
@@ -532,7 +613,7 @@ class ExperiencePagePresentationHeightTest {
             assertTrue(lane.awaitQuiescence(5_000))
             texture.release()
             (field(layer, "sheet") as? ExperienceNativeLayerWindow)?.retire()
-            if (lower == null) controller.destroy()
+            if (lower == null && !destroyed) controller.destroy()
             PresentationRegistry.dismiss(registryId, CloseReason.HostDismissed)
         }
 
