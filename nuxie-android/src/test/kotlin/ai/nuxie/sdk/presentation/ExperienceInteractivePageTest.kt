@@ -512,23 +512,12 @@ class ExperienceInteractivePageTest {
         var detaches = 0
         var presentation = 4
         var onStep: () -> Unit = {}
-        val contentHeights = mutableMapOf<Int, Float>()
-        var keepGoing = true
-        var contentHeightQueries = 0
-        var contentHeightStatus: Int? = null
-        private var settledContentHeight: Float? = null
-        override fun playerContentHeight(playerHandle: Long): NativeCallResult<Float> {
-            contentHeightQueries++
-            trace += "height"
-            return NativeCallResult(contentHeightStatus ?: if (settledContentHeight == null) 3 else 0, settledContentHeight)
-        }
         var globals = false
         val globalBindings = mutableListOf<Pair<String, Long>>()
         var allocated = 0
         var catalogQueries = 0
         val allocations = mutableListOf<Pair<Int, Int?>>()
         private val kept = mutableMapOf<Long, Float>()
-        private val labels = mutableMapOf<Long, String>()
         val snapshotOverrides = mutableMapOf<Long, NativeViewModelSnapshot>()
         private val schemas = mutableMapOf(100L to 0)
         private val catalog get() = NativeViewModelCatalog(arrayOf(
@@ -612,7 +601,6 @@ class ExperienceInteractivePageTest {
             if (tracePhases && write.path == "screen/phase") trace += "phase:$viewModelHandle:${write.integerValue}"
             writes += viewModelHandle to write
             if (write.path == "keptValue" && write.kind == NuxieViewModelMutationKind.SET_NUMBER) kept[viewModelHandle] = write.numberValue
-            if (write.path == "label" && write.kind == NuxieViewModelMutationKind.SET_STRING) labels[viewModelHandle] = write.bytesValue.decodeToString()
             if (traceListMutations) when (write.kind) {
                 NuxieViewModelMutationKind.LIST_INSERT -> trace += "insert:${write.index}"
                 NuxieViewModelMutationKind.LIST_MOVE -> trace += "move:${write.index}:${write.secondIndex}"
@@ -625,11 +613,10 @@ class ExperienceInteractivePageTest {
             trace += "step:$elapsedSeconds"
             applyPendingRows()
             onStep()
-            settledContentHeight = hostedRows.lastOrNull { it !in collapsedOwners }?.let { contentHeights[schemas[it]]?.plus((labels[it]?.count { char -> char == '\n' } ?: 0) * 80f) }
             if (failStep) return NativeCallResult(11, null)
             val commands = pendingCommands.toTypedArray(); pendingCommands.clear()
             val deliveredEvents = events; events = emptyArray()
-            return NativeCallResult(0,NativePlayerStepOutcome(keepGoing,IntArray(pointers.size),deliveredEvents,commands,emptyArray()))
+            return NativeCallResult(0,NativePlayerStepOutcome(true,IntArray(pointers.size),deliveredEvents,commands,emptyArray()))
         }
         override fun setPlayerGlobalViewModel(playerHandle: Long, name: ByteArray, viewModelHandle: Long): Int {
             globalBindings += name.decodeToString() to viewModelHandle

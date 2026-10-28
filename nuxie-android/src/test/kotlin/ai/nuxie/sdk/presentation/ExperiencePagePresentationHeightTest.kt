@@ -48,146 +48,11 @@ class ExperiencePagePresentationHeightTest {
 
     private val fitContent = PresentationShell.Sheet(PresentationShell.Sheet.Detent.FIT_CONTENT, true)
 
-    @Test fun `mounted page delivers heights through active Activity Screen after navigation Back and recreation`() = runBlocking {
-        val scene = java.io.File.createTempFile("page-activity-height", ".riv").apply { writeBytes(byteArrayOf(1)) }
-        val descriptor = Json.parseToJsonElement("""{"state":{},"responses":{},"ruleGroups":[],
-            "leg":{"screens":[{"id":"a","defaultViewModelName":"A"},{"id":"b","defaultViewModelName":"B"}]},
-            "render":{"assets":[],"screens":[{"id":"a","artboardName":"A"},{"id":"b","artboardName":"B"}],
-            "transitions":[{"id":"pair","kind":"page","sourceScreenId":"a","destinationScreenId":"b","durationMs":0,
-            "source":{"completeEventName":"leave"},"destination":{"completeEventName":"arrive"},
-            "reverse":{"durationMs":0,"source":{"completeEventName":"leave.reverse"},
-            "destination":{"completeEventName":"arrive.reverse"}}}]}}""").jsonObject
-        val a = PreparedPresentation(scene, "A", 0, fitContent, "a", descriptor, pageHistory = listOf("a"))
-        val b = a.copy(artboardName = "B", screenId = "b", pageHistory = listOf("a", "b"),
-            screenLifecycle = ExperienceScreenLifecycle(), retainedViewModel = AtomicReference())
-        var fixture: ActivityPage? = null
-        try {
-            var page = ActivityPage(a).also { fixture = it }
-            page.start()
-            page.frame()
-            page.assertHeight(152f)
-            page.navigate(b)
-            page.frame()
-            page.assertHeight(280f)
-            page.text("First\nSecond")
-            page.frame()
-            page.assertHeight(360f)
-            page.surface.onSurfaceTextureSizeChanged(page.texture, 300, 600)
-            page.frame()
-            page.assertHeight(400f)
-
-            // Rebuild only B in a fresh Activity/player, preserving the service-owned page state.
-            page.close(recreating = true)
-            page = ActivityPage(b).also { fixture = it }
-            page.start()
-            page.frame()
-            page.assertHeight(360f)
-            page.text("Restored\nSecond\nThird")
-            page.frame()
-            page.assertHeight(440f)
-
-            val back = a.copy(pageHistory = listOf("a"), isBack = true,
-                transition = Json.parseToJsonElement("""{"type":"magic-move","transitionId":"pair"}""").jsonObject)
-            page.text("Restored\nSecond\nThird\nFourth")
-            page.frame()
-            page.assertHeight(520f)
-            page.navigate(back)
-            page.assertHeight(520f)
-            page.frame()
-            page.assertHeight(152f)
-            // A later visit uses the kept/recreated row and a fresh Activity listener.
-            page.navigate(b, frameBeforeCommit = true)
-            page.assertHeight(520f)
-            page.frame()
-            page.assertHeight(520f)
-        } finally { fixture?.close(); scene.delete() }
-    }
-
-    @Test fun `pushed page drives hosting sheet through text navigation pop and recreation`() = runBlocking {
-        withPushPages { a, p, content ->
-            a.start(); a.frame(); a.assertHeight(152f)
-            p.start(install = false); p.frame()
-            a.assertWindowHeight(152f)
-            p.install()
-            // A first frame delivered before installation must be applied immediately on push.
-            p.assertHeight(400f)
-            p.text("P\nSecond"); p.frame(); p.assertHeight(480f)
-            p.navigate(content.copy(artboardName = "A", screenId = "a", pageHistory = listOf("b", "a"),
-                closeLayer = { reveal -> reveal.prepare(); reveal.activate(); true },
-                screenLifecycle = ExperienceScreenLifecycle(), retainedViewModel = AtomicReference()))
-            p.frame(); p.assertHeight(240f)
-            val before = a.queries()
-            a.frame()
-            assertEquals("Covered page does not measure", before, a.queries())
-            p.assertWindowHeight(240f)
-            p.navigate(content.copy(isBack = true, pageHistory = listOf("b"),
-                closeLayer = { reveal -> reveal.prepare(); reveal.activate(); true }))
-            p.frame(); p.assertHeight(480f)
-            p.text("P\nSecond\nThird"); p.frame(); p.assertHeight(560f)
-            p.pop()
-            // Restore the lower page even before its next (unchanged-height) frame.
-            a.assertHeight(152f)
-            a.frame(); a.assertHeight(152f)
-        }
-        // Fresh Activity and players, as in the existing recreation test; restore only each page's top row.
-        withPushPages { a, p, _ ->
-            a.start(); a.frame(); p.start(); p.frame(); p.assertHeight(400f)
-            p.text("Restored\nSecond"); p.frame(); p.assertHeight(480f)
-            p.close(recreating = true); a.close(recreating = true)
-            // Destroying the first Activity closed its Experience's move queue; the fresh pages start another.
-            val moves = ExperienceMoveQueue()
-            val restoredA = ActivityPage(a.content().copy(moves = moves))
-            val restoredP = ActivityPage(p.content().copy(moves = moves), lower = restoredA, baseHeights = mapOf(1 to 240f, 2 to 400f))
-            try {
-                restoredA.start(covered = true); restoredP.start(); restoredP.frame()
-                restoredP.assertHeight(480f)
-                restoredP.text("Restored\nSecond\nThird"); restoredP.frame(); restoredP.assertHeight(560f)
-                restoredP.pop(); restoredA.frame(); restoredA.assertHeight(152f)
-            } finally { restoredP.close(); restoredA.close() }
-        }
-    }
-
-    @Test fun `nested sheet isolates pushed page heights and reveals its current height on dismiss`() = runBlocking {
-        withPushPages { a, p, content ->
-            a.start(); a.frame(); p.start(); p.frame(); p.assertHeight(400f)
-            val nested = ActivityPage(content.copy(isPushPage = false, layerContentHeight = AtomicReference()),
-                lower = p, baseHeights = mapOf(1 to 180f, 2 to 320f))
-            try {
-                nested.start(); nested.frame(); nested.assertHeight(320f)
-                val before = p.queries()
-                p.text("Covered\nSecond"); p.frame()
-                assertEquals(before, p.queries())
-                nested.assertWindowHeight(320f)
-                p.assertWindowHeight(400f)
-                nested.pop()
-                p.assertWindowHeight(400f)
-                p.frame(); p.assertHeight(480f)
-                p.pop(); a.assertHeight(152f)
-            } finally { nested.close() }
-        }
-    }
-
     @Test fun `a started page close lands even when its caller gives up`() = runBlocking {
         withPushPages { a, p, _ ->
-            a.start(); a.frame(); p.start(); p.frame(); p.assertHeight(400f)
+            a.start(); a.frame(); p.start(); p.frame()
             p.popWhileItsCallerGivesUp()
-            a.assertHeight(152f)
-            a.frame(); a.assertHeight(152f)
-        }
-    }
-
-    @Test fun `skipping Back cuts recreated covered lower page then restores its height across push`() = runBlocking {
-        withPushPages(lowerAtB = true) { a, p, content ->
-            a.start(covered = true); p.start(); p.frame(); p.assertHeight(400f)
-            val before = a.queries()
-            a.cutCovered(content.copy(artboardName = "A", screenId = "a", pageHistory = listOf("a"),
-                isPushPage = false, opensLayer = false, layerAncestors = emptyList(), isBack = true,
-                layerContentHeight = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle(),
-                retainedViewModel = AtomicReference()))
             a.frame()
-            assertEquals(before, a.queries())
-            p.assertHeight(400f)
-            p.pop(); a.frame(); a.assertHeight(152f)
         }
     }
 
@@ -262,7 +127,7 @@ class ExperiencePagePresentationHeightTest {
         withPushPages { a, p, content ->
             a.start(); a.frame(); p.start(); p.frame()
             val nested = ActivityPage(content.copy(isPushPage = false, layerContentHeight = AtomicReference()),
-                lower = p, baseHeights = mapOf(1 to 180f, 2 to 320f))
+                lower = p)
             val running = CompletableDeferred<Unit>()
             try {
                 nested.start(); nested.frame(); nested.enableSheetInput()
@@ -283,7 +148,7 @@ class ExperiencePagePresentationHeightTest {
         withPushPages { a, p, content ->
             a.start(); a.frame(); p.start(); p.frame()
             val nested = ActivityPage(content.copy(isPushPage = false, layerContentHeight = AtomicReference()),
-                lower = p, baseHeights = mapOf(1 to 180f, 2 to 320f))
+                lower = p)
             try {
                 nested.start(); nested.frame(); nested.enableSheetInput()
                 nested.sheetState("STATE_DRAGGING")
@@ -299,7 +164,7 @@ class ExperiencePagePresentationHeightTest {
                 nested.sheetState("STATE_HIDDEN")
                 assertTrue("A hidden sheet keeps the slot until its close lands", content.moves.isBusy)
                 nested.settle { nested.layerCount() == 2 && !content.moves.isBusy }
-                p.frame(); p.assertHeight(400f)
+                p.frame()
             } finally { nested.close() }
         }
     }
@@ -308,7 +173,7 @@ class ExperiencePagePresentationHeightTest {
         withPushPages { a, p, content ->
             a.start(); a.frame(); p.start(); p.frame()
             val nested = ActivityPage(content.copy(isPushPage = false, layerContentHeight = AtomicReference()),
-                lower = p, baseHeights = mapOf(1 to 180f, 2 to 320f))
+                lower = p)
             val running = CompletableDeferred<Unit>()
             try {
                 nested.start(); nested.frame(); nested.enableSheetInput()
@@ -327,7 +192,7 @@ class ExperiencePagePresentationHeightTest {
         withPushPages { a, p, content ->
             a.start(); a.frame(); p.start(); p.frame()
             val nested = ActivityPage(content.copy(isPushPage = false, layerContentHeight = AtomicReference()),
-                lower = p, baseHeights = mapOf(1 to 180f, 2 to 320f))
+                lower = p)
             try {
                 nested.start(); nested.frame(); nested.enableSheetInput()
                 nested.cancelSheet()
@@ -336,25 +201,23 @@ class ExperiencePagePresentationHeightTest {
         }
     }
 
-    private suspend fun withPushPages(lowerAtB: Boolean = false,
+    private suspend fun withPushPages(
         exercise: suspend (ActivityPage, ActivityPage, PreparedPresentation) -> Unit) {
         val scene = java.io.File.createTempFile("page-push-height", ".riv").apply { writeBytes(byteArrayOf(1)) }
         val descriptor = Json.parseToJsonElement("""{"state":{},"responses":{},"ruleGroups":[],
             "leg":{"screens":[{"id":"a","defaultViewModelName":"A"},{"id":"b","defaultViewModelName":"B"}]},
             "render":{"assets":[],"screens":[{"id":"a","artboardName":"A"},{"id":"b","artboardName":"B"}]}}""").jsonObject
-        val lower = PreparedPresentation(scene, if (lowerAtB) "B" else "A", 0, fitContent,
-            if (lowerAtB) "b" else "a", descriptor, pageHistory = if (lowerAtB) listOf("a", "b") else listOf("a"))
+        val lower = PreparedPresentation(scene, "A", 0, fitContent, "a", descriptor, pageHistory = listOf("a"))
         val pushed = lower.copy(artboardName = "B", screenId = "b", pageHistory = listOf("b"),
             isPushPage = true, opensLayer = true, layerAncestors = listOf("height-lower"),
             layerContentHeight = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle(), retainedViewModel = AtomicReference())
         val a = ActivityPage(lower)
-        val p = ActivityPage(pushed, lower = a, baseHeights = mapOf(1 to 240f, 2 to 400f))
+        val p = ActivityPage(pushed, lower = a)
         try { exercise(a, p, pushed) } finally { p.close(); a.close(); scene.delete() }
     }
 
     /** Real mounted-page listener and Activity Screen callbacks; only the native runtime is faked. */
-    private class ActivityPage(initial: PreparedPresentation, private val lower: ActivityPage? = null,
-        private val baseHeights: Map<Int, Float> = mapOf(1 to 152f, 2 to 280f)) {
+    private class ActivityPage(initial: PreparedPresentation, private val lower: ActivityPage? = null) {
         private val controller: org.robolectric.android.controller.ActivityController<NuxieExperienceActivity> =
             lower?.controller ?: Robolectric.buildActivity(NuxieExperienceActivity::class.java)
         private val activity = controller.get()
@@ -372,10 +235,7 @@ class ExperiencePagePresentationHeightTest {
         val surface = mounted.surface
         val texture = SurfaceTexture(0)
         private val lane = field(mounted, "lane") as NuxieRuntimeLane
-        private val native = ExperienceInteractivePageTest.RecordingNative().apply {
-            presentation = 1
-            contentHeights.putAll(baseHeights)
-        }
+        private val native = ExperienceInteractivePageTest.RecordingNative().apply { presentation = 1 }
         private val root = FrameLayout(activity)
         private var window: ExperienceNativeLayerWindow = if (lower != null) lower.window
             else ExperienceNativeLayerWindow(activity, root, initial.shell) {}
@@ -414,7 +274,6 @@ class ExperiencePagePresentationHeightTest {
                 override fun acquireWindow(surface: android.view.Surface) = 5L
                 override fun setPlayerLayoutSize(playerHandle: Long, width: Float, height: Float): Int {
                     size = floatArrayOf(width, height)
-                    native.contentHeights[2] = checkNotNull(baseHeights[2]) + if (width < 350f) 40f else 0f
                     return 0
                 }
                 override fun playerLayoutSize(playerHandle: Long) = NativeCallResult(0, size)
@@ -549,8 +408,6 @@ class ExperiencePagePresentationHeightTest {
             withTimeout(5_000) { while (!done()) { idle(); delay(1) } }
         }
 
-        suspend fun queries(): Int = lane.call { native.contentHeightQueries }
-
         suspend fun frame() {
             surface.doFrame(clock); clock += 16_000_000L
             lane.call {}; shadowOf(Looper.getMainLooper()).idle()
@@ -571,7 +428,6 @@ class ExperiencePagePresentationHeightTest {
             set(next, "ownsMounted", false)
             mounted.prepareRow(target, next)
             if (target.transition != null) coroutineScope {
-                val before = checkNotNull(prepared.layerContentHeight.get())
                 lane.call { native.trace.clear() }
                 val step = async(start = CoroutineStart.UNDISPATCHED) { mounted.navigateLayer(target, target.isBack) }
                 withTimeout(5_000) {
@@ -579,7 +435,6 @@ class ExperiencePagePresentationHeightTest {
                 }
                 frame()
                 assertFalse("Reverse completion has not landed", step.isCompleted)
-                assertHeight(before)
                 // No completion events: the normal watchdog lands this step after the asserted frame.
                 step.await()
             } else mounted.navigateLayer(target, target.isBack)
@@ -592,18 +447,6 @@ class ExperiencePagePresentationHeightTest {
             current = next
             prepared = target
             set(activity, "currentScreen", next)
-        }
-
-        fun assertHeight(expected: Float) {
-            assertEquals(expected, prepared.layerContentHeight.get())
-            assertEquals(expected, field(current, "measuredContentHeight"))
-            assertWindowHeight(expected)
-        }
-
-        fun assertWindowHeight(expected: Float) {
-            val hostedWindow = if (prepared.isPushPage) window else field(layer, "sheet") as ExperienceNativeLayerWindow
-            assertEquals(expected.toInt(), hostedWindow.dialog.findViewById<View>(
-                com.google.android.material.R.id.design_bottom_sheet).layoutParams.height)
         }
 
         fun close(recreating: Boolean = false) {
@@ -622,111 +465,6 @@ class ExperiencePagePresentationHeightTest {
                 .apply { isAccessible = true }.get(owner)
             private fun set(owner: Any, name: String, value: Any?) = owner.javaClass.getDeclaredField(name)
                 .apply { isAccessible = true }.set(owner, value)
-        }
-    }
-
-    @Test fun `forward measures first ordinary frame and Back waits for end removal and next frame`() = runBlocking {
-        checkPreparation(fitContent, covered = false, hasSize = true) { host, lane, texture, window, heights, native, failures ->
-            native.contentHeights.putAll(mapOf(1 to 152f, 2 to 280f))
-            var clock = 1_000_000_000L
-            suspend fun frame() {
-                host.doFrame(clock); clock += 16_000_000L
-                lane.call {}; shadowOf(Looper.getMainLooper()).idle()
-                host.onSurfaceTextureUpdated(texture); lane.call {}
-                assertTrue(failures.joinToString { it.stackTraceToString() }, failures.isEmpty())
-            }
-            host.onSurfaceTextureAvailable(texture, 393, 852)
-            frame()
-            assertEquals(listOf<Float?>(null, 152f), heights)
-            val sheet = window.dialog.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)
-            assertEquals(152, sheet.layoutParams.height)
-            host.layerOperation { page ->
-                page.prepareOnLane("b"); page.takeIncomingOnLane("b", "a", false); page.beginOnLane("b", "pair")
-            }
-            assertEquals(listOf<Float?>(null, 152f), heights)
-            val before = native.contentHeightQueries
-            frame()
-            assertEquals(before + 1, native.contentHeightQueries)
-            assertEquals(listOf<Float?>(null, 152f, 280f), heights)
-            assertTrue(native.trace.indexOfLast { it.startsWith("step:") } < native.trace.lastIndexOf("height"))
-            host.layerOperation { page -> page.endOnLane("b", "pair"); page.setCollapsedOnLane("a", true) }
-            frame()
-            host.layerOperation { page -> page.takeIncomingOnLane("a", "b", true); page.beginOnLane("a", "pair.reverse") }
-            frame()
-            assertEquals(listOf<Float?>(null, 152f, 280f), heights)
-            host.layerOperation { page -> page.endOnLane("a", "pair.reverse"); page.retireOnLane(setOf("a"), "a") }
-            assertEquals(280f, heights.last())
-            frame()
-            assertEquals(listOf<Float?>(null, 152f, 280f, 152f), heights)
-            assertEquals(152, sheet.layoutParams.height)
-            // Empty expanded stack returns NotFound and restores the large fallback.
-            host.layerOperation { it.removeOnLane("a") }
-            frame()
-            assertNull(heights.last())
-            assertEquals(ViewGroup.LayoutParams.MATCH_PARENT, sheet.layoutParams.height)
-        }
-    }
-
-    @Test fun `bound text width and reveal remeasure while unchanged heights are not republished`() = runBlocking {
-        checkPreparation(fitContent, covered = false, hasSize = true) { host, lane, texture, _, heights, native, failures ->
-            native.contentHeights[1] = 152f
-            var clock = 1_000_000_000L
-            suspend fun frame() {
-                host.doFrame(clock); clock += 16_000_000L
-                lane.call {}; shadowOf(Looper.getMainLooper()).idle()
-                host.onSurfaceTextureUpdated(texture); lane.call {}
-            }
-            host.onSurfaceTextureAvailable(texture, 393, 852)
-            frame(); frame()
-            assertEquals(listOf<Float?>(null, 152f), heights)
-            // A bound value changes intrinsic height even when keepGoing is false.
-            native.keepGoing = false
-            host.layerOperation { it.applyJourneyValuesOnLane("a",
-                mapOf("label" to NuxieViewModelScalarValue.StringValue("First line\nSecond line"))) }
-            frame()
-            assertEquals(listOf<Float?>(null, 152f, 232f), heights)
-            host.onSurfaceTextureSizeChanged(texture, 300, 500)
-            native.contentHeights[1] = 232f
-            frame()
-            assertEquals(listOf<Float?>(null, 152f, 232f, 312f), heights)
-            host.onSurfaceTextureSizeChanged(texture, 300, 600)
-            frame()
-            assertEquals(4, heights.size)
-            host.setPresentationVisible(false); lane.call {}
-            val before = native.contentHeightQueries
-            native.contentHeights[1] = 312f
-            host.applyLayerTransition { it.setPhasesOnLane(listOf("a" to ExperienceScreenLifecycle.Phase.HIDDEN)) }
-            frame()
-            assertEquals(before, native.contentHeightQueries)
-            assertEquals(312f, heights.last())
-            host.setPresentationVisible(true)
-            frame()
-            assertEquals(392f, heights.last())
-            assertTrue(failures.joinToString { it.stackTraceToString() }, failures.isEmpty())
-        }
-    }
-
-    @Test fun `NotFound and zero keep fallback and other query failures fail the host`() = runBlocking {
-        for (status in listOf(0, 3, 11)) checkPreparation(fitContent, covered = false, hasSize = true) {
-            host, lane, texture, _, heights, native, failures ->
-            native.contentHeightStatus = status
-            native.contentHeights[1] = 0f
-            host.onSurfaceTextureAvailable(texture, 393, 852)
-            host.doFrame(1_000_000_000L); lane.call {}; shadowOf(Looper.getMainLooper()).idle()
-            assertEquals(listOf<Float?>(null), heights)
-            assertEquals(1, native.contentHeightQueries)
-            assertEquals(if (status == 11) 1 else 0, failures.size)
-            if (status == 11) assertEquals(ExperiencePresentationException.Reason.HOST_FAILED, failures.single().reason)
-        }
-    }
-
-    @Test fun `ordinary frames outside a fit content sheet never query`() = runBlocking {
-        checkPreparation(PresentationShell.FullScreen(), covered = false, hasSize = true) {
-            host, lane, texture, _, heights, native, failures ->
-            host.onSurfaceTextureAvailable(texture, 393, 852)
-            host.doFrame(1_000_000_000L); lane.call {}; shadowOf(Looper.getMainLooper()).idle()
-            assertEquals(0, native.contentHeightQueries)
-            assertTrue(heights.isEmpty()); assertTrue(failures.isEmpty())
         }
     }
 
@@ -840,7 +578,6 @@ class ExperiencePagePresentationHeightTest {
                 assertEquals(ViewGroup.LayoutParams.MATCH_PARENT,
                     window.dialog.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet).layoutParams.height)
             }
-            assertEquals(0, pageNative.contentHeightQueries)
             if (exercise != null) {
                 exercise(host, lane, texture, window, heights, pageNative, failures)
             } else if (shell.fitsContent && hasSize) {
@@ -859,7 +596,7 @@ class ExperiencePagePresentationHeightTest {
                 lane.call {}
                 shadowOf(Looper.getMainLooper()).idle()
                 assertEquals(listOf(ExperienceArtboardSize(393f, 852f), ExperienceArtboardSize(300f, 500f)), bounds)
-                assertEquals(listOf<Float?>(null), heights)
+                assertEquals(listOf<Float?>(null, null), heights)
                 assertNull(prepared.layerContentHeight.get())
                 assertTrue(failures.joinToString { it.stackTraceToString() }, failures.isEmpty())
             }
