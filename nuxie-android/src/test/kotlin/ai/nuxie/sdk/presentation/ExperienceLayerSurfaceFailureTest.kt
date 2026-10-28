@@ -44,6 +44,30 @@ class ExperienceLayerSurfaceFailureTest {
         }
     }
 
+    @Test fun `a page step's authored wait ends at its watchdog, before its stalled submission retires`() = runTest {
+        withSurface { surface, _, _, lane ->
+            val time = ExperienceAuthoredTime()
+            val entered = java.util.concurrent.CountDownLatch(1)
+            val unblock = java.util.concurrent.CountDownLatch(1)
+            lane.enqueue { entered.countDown(); check(unblock.await(30, java.util.concurrent.TimeUnit.SECONDS)) }
+            assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            val step = async { runCatching { surface.applyLayerTransition(250, time) { error("A stalled phase must not mutate the page") } } }
+            val native = async { time.delayNative(1_000) }
+            try {
+                runCurrent()
+                advanceTimeBy(251); runCurrent()
+                assertFalse("The native clock pauses during the presentation watchdog", native.isCompleted)
+                advanceTimeBy(1_100); runCurrent()
+                assertTrue("The stalled submission's retirement counts as native time", native.isCompleted)
+                assertFalse("That retirement is still waiting", step.isCompleted)
+            } finally {
+                unblock.countDown()
+                step.cancelAndJoin()
+                native.cancelAndJoin()
+            }
+        }
+    }
+
     // A real native handoff must drain before runTest can auto-advance a retirement deadline.
     private fun <T> NuxieRuntimeLane.blockingCall(work: () -> T): T = runBlocking { call(work) }
 

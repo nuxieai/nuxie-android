@@ -48,7 +48,7 @@ internal class ExperienceMountedScreen(
     private var captionInsets: ExperienceWindowInsets? = null
     private var windowInsets: ExperienceWindowInsets? = null
     private val lifecycle get() = prepared.screenLifecycle
-    val transitionEvents = ExperienceScreenExitHandshake()
+    val transitionEvents = ExperienceScreenExitHandshake(prepared.moves.authoredTime)
     private var reduceMotionEnabled = false
     private var content: View? = null
     private var awaitingSemanticPublication =
@@ -288,9 +288,11 @@ internal class ExperienceMountedScreen(
                 }
                 val budget = exit.watchdogMs ?: 250
                 val presented = if (reduceMotionEnabled) { surface.layerOperation(write); true }
-                    else surface.applyLayerTransition(budget, write)
+                    else surface.applyLayerTransition(budget, prepared.moves.authoredTime, write)
                 if (!presented) logPresentationTimeout(budget)
-                if (presented && waiter != null && exit.watchdogMs != null) kotlinx.coroutines.withTimeoutOrNull(exit.watchdogMs) { waiter.await() }
+                if (presented && waiter != null && exit.watchdogMs != null) prepared.moves.authoredTime.during {
+                    kotlinx.coroutines.withTimeoutOrNull(exit.watchdogMs) { waiter.await() }
+                }
             } catch (error: Throwable) {
                 failure = error
                 throw error
@@ -397,7 +399,7 @@ internal class ExperienceMountedScreen(
                         val batch = mutations.toList()
                         mutations.clear()
                         val work: (ExperienceInteractivePage) -> Unit = { page -> batch.forEach { it(page) } }
-                        phasePresented = if (present) surface.applyLayerTransition(watchdogMs, work)
+                        phasePresented = if (present) surface.applyLayerTransition(watchdogMs, prepared.moves.authoredTime, work)
                             else { surface.layerOperation(work); true }
                         if (!phasePresented && !loggedPresentationTimeout) {
                             loggedPresentationTimeout = true
@@ -423,7 +425,9 @@ internal class ExperienceMountedScreen(
                     override suspend fun present() = Unit
                     override suspend fun wait(completions: List<kotlinx.coroutines.Deferred<Unit>>, milliseconds: Long) {
                         checkPageClock()
-                        if (phasePresented) super<ExperiencePageStep.Operations>.wait(completions, milliseconds)
+                        if (phasePresented) prepared.moves.authoredTime.during {
+                            super<ExperiencePageStep.Operations>.wait(completions, milliseconds)
+                        }
                     }
                     override suspend fun hidden() = Unit
                     override fun veil() { textOverlay?.veil() }

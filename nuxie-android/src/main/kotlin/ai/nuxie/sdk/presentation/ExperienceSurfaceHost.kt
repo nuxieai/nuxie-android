@@ -173,7 +173,7 @@ internal class ExperienceSurfaceHost(
         textInputs = layer.textInputsOnLane(screenId).associateBy(ExperienceTextInput::id)
     }
 
-    internal suspend fun applyLayerTransition(presentationTimeoutMs: Long = 250,
+    internal suspend fun applyLayerTransition(presentationTimeoutMs: Long = 250, authoredTime: ExperienceAuthoredTime? = null,
         work: (ExperienceInteractivePage) -> Unit): Boolean {
         val completion = CompletableDeferred<Unit>()
         val accepted = lane.enqueue {
@@ -185,7 +185,8 @@ internal class ExperienceSurfaceHost(
         }
         if (!accepted) completion.cancel()
         try {
-            if (kotlinx.coroutines.withTimeoutOrNull(presentationTimeoutMs) { completion.await(); true } == true) return true
+            // The authored wait ends at its own watchdog, before the native retirement below (section 4).
+            if (authoredTime.during { kotlinx.coroutines.withTimeoutOrNull(presentationTimeoutMs) { completion.await(); true } } == true) return true
             // A healthy renderer may never present. Retire its submission before settling the
             // phase on the lane, so later row mutations cannot race that submitted revision.
             retireStalledLayerSubmission(completion)
