@@ -155,6 +155,8 @@ internal interface PreparedScreenNavigation {
     /** A page draws its destination during the step, so its checkpoint must settle first. */
     suspend fun awaitExit(beforePageStep: suspend () -> Boolean) = awaitExit()
     fun activate()
+    /** After [activate]: the Screen this navigation replaced has finished its native and media shutdown. */
+    suspend fun awaitRetired() = Unit
     suspend fun abort()
 }
 
@@ -1445,6 +1447,12 @@ internal class ExperiencePresentationService(
                     }
                 }
                 if (!launched) throw supersededByIdentityTransition()
+                // The move holds its slot until the Screen it replaced has shut down (section 2). The navigation
+                // has already landed, so a shutdown that stalls fails the presentation instead of undoing it.
+                navigation?.let { landed ->
+                    runCatching { withContext(NonCancellable) { awaitPresentationRetirement { landed.awaitRetired() } } }
+                        .exceptionOrNull()?.let { PresentationRegistry.reportFailure(id, it) }
+                }
                 pending
             } catch (error: Throwable) {
                 withContext(NonCancellable) {

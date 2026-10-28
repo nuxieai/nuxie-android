@@ -531,6 +531,62 @@ class ExperiencePresentationServiceTest {
     }
 
     @Test
+    fun `a Journey move holds its slot until the Screen it replaced has shut down`() = runTest {
+        val release = renderedJourneyRelease("text-input-navigation.json")
+        val launched = mutableListOf<String>()
+        val service = service(this, launch = launched::add)
+        val first = async {
+            service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
+                service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) }, onOutcome = {})
+        }
+        runCurrent()
+        val sourceId = launched.single()
+        PresentationRegistry.reportFirstFrame(sourceId)
+        first.await()
+        val moves = checkNotNull(PresentationRegistry.resolve(sourceId)).moves
+        val retired = CompletableDeferred<Unit>()
+        var activated = false
+        val host = object : PresentationScreenHandle {
+            var reason: CloseReason? = null
+            override fun requestCloseFromService(reason: CloseReason): Boolean { this.reason = reason; return true }
+            override fun screenCloseReason() = reason
+            override fun finishAfterServiceClose() {
+                if (reason != CloseReason.JourneyNavigation) PresentationRegistry.detach(sourceId, this)
+            }
+            override suspend fun prepareNavigation(id: String, content: PreparedPresentation): PreparedScreenNavigation {
+                val source = this
+                return object : PreparedScreenNavigation {
+                    override fun activate() {
+                        activated = true
+                        PresentationRegistry.detach(sourceId, source)
+                        PresentationRegistry.reportFirstFrame(id)
+                    }
+                    override suspend fun awaitRetired() { retired.await() }
+                    override suspend fun abort() = Unit
+                }
+            }
+        }
+        PresentationRegistry.attach(sourceId, host)
+        val next = async {
+            service.presentJourney(testPresentationFences(), release, "screen_details", "journey-1", "customer-1", null,
+                acquire = { acquired(release.identity, Lease()) }, onOutcome = {})
+        }
+        try {
+            runCurrent()
+            assertTrue(activated)
+            assertFalse("The move waits for the replaced Screen's shutdown", next.isCompleted)
+            assertTrue("The move still holds its slot", moves.isBusy)
+            retired.complete(Unit)
+            next.await()
+            assertFalse("The slot is free once the replaced Screen has shut down", moves.isBusy)
+        } finally {
+            retired.complete(Unit)
+            next.cancelAndJoin()
+            service.dismissFromHost("customer-1")
+        }
+    }
+
+    @Test
     fun `primitive fade becomes a cut during native page preparation`() = runTest {
         val contract = Json.parseToJsonElement(
             FixtureRunner.fixturesRoot().resolve("journeys/planes/text-input-navigation.json").readText(),
