@@ -250,6 +250,62 @@ class ExperiencePagePresentationHeightTest {
         }
     }
 
+    @Test fun `a page under a sheet keeps running, plays no exit, and comes back with no entrance`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame()
+            val phase = p.lifecycle.phase
+            val appearances = p.lifecycle.appearances
+            val nested = ActivityPage(content.copy(isPushPage = false, layerContentHeight = AtomicReference(),
+                screenLifecycle = ExperienceScreenLifecycle()), lower = p)
+            try {
+                nested.start(); nested.frame()
+                assertEquals("The page under the sheet plays no exit and isn't hidden", phase, p.lifecycle.phase)
+                assertTrue("The page under the sheet keeps drawing", p.running)
+                p.clearTrace(); p.frame()
+                assertEquals("Its authored time goes on", 1, p.steps().size)
+                assertEquals("It leaves TalkBack while covered",
+                    View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS, p.accessibility)
+                nested.pop()
+                nested.settle { nested.layerCount() == 2 }
+                assertEquals("The reveal activates it", ExperienceScreenLifecycle.Phase.ACTIVE, p.lifecycle.phase)
+                assertEquals("No entrance replays", appearances, p.lifecycle.appearances)
+                assertTrue(p.running)
+            } finally { nested.close() }
+        }
+    }
+
+    @Test fun `a page under a sheet resumes after onStart, and a page under a push stays stopped`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame()
+            val nested = ActivityPage(content.copy(isPushPage = false, layerContentHeight = AtomicReference(),
+                screenLifecycle = ExperienceScreenLifecycle()), lower = p)
+            try {
+                nested.start(); nested.frame()
+                assertFalse("The page under the push is stopped", a.running)
+                p.stopActivity()
+                assertFalse(p.running); assertFalse(nested.running)
+                p.startActivity()
+                assertTrue("The page under the sheet resumes", p.running)
+                assertTrue(nested.running)
+                assertFalse("The page under the push stays stopped", a.running)
+            } finally { nested.close() }
+        }
+    }
+
+    @Test fun `a held checkpoint stops authored time and keeps the page drawn`() = runBlocking {
+        withPushPages { a, p, _ ->
+            a.start(); a.frame(); p.start(); p.frame(); p.frame()
+            p.clearTrace()
+            p.hold(true)
+            repeat(3) { p.frame() }
+            assertEquals("No step while held", emptyList<String>(), p.steps())
+            assertTrue("The page stays presented", p.running)
+            p.hold(false)
+            p.frame(); p.frame()
+            assertEquals("Authored time resumes from where it stood", listOf("step:0.0", "step:0.016"), p.steps())
+        }
+    }
+
     @Test fun `an outside tap while nothing moves closes the nested sheet through the queue`() = runBlocking {
         withPushPages { a, p, content ->
             a.start(); a.frame(); p.start(); p.frame()
@@ -392,7 +448,8 @@ class ExperiencePagePresentationHeightTest {
                 set(layer, "sheet", window)
                 window.show()
             } else {
-                lower.mounted.hide()
+                // As the Activity does: a push hides the page below. A sheet's install covers it.
+                if (prepared.isPushPage) lower.mounted.hide()
                 val method = if (prepared.isPushPage) "installPushedPage" else "installLayerWindow"
                 if (prepared.isPushPage) NuxieExperienceActivity::class.java.getDeclaredMethod(method, layerClass, layerClass)
                     .apply { isAccessible = true }.invoke(activity, layer, lower.layer)
@@ -484,6 +541,13 @@ class ExperiencePagePresentationHeightTest {
         val sheetDraggable: Boolean get() = behavior.isDraggable
         val sheetCancelsOnTouchOutside: Boolean get() = shadowOf(sheet.dialog).isCancelableOnTouchOutside
         fun layerCount() = (field(activity, "layers") as List<*>).size
+        /** The page's clock: whether its surface draws and steps. */
+        val running: Boolean get() = field(surface, "running") as Boolean
+        val lifecycle: ExperienceScreenLifecycle get() = prepared.screenLifecycle
+        val accessibility: Int get() = (field(current, "view") as View).importantForAccessibility
+        fun hold(held: Boolean) { mounted.setCheckpointHold(held); idle() }
+        suspend fun steps(): List<String> = lane.call { native.trace.filter { it.startsWith("step:") } }
+        suspend fun clearTrace() = lane.call { native.trace.clear() }
         fun idle() = shadowOf(Looper.getMainLooper()).idle()
 
         /** Material's own state path, with its callbacks: what a drag or TalkBack's dismiss action selects. */

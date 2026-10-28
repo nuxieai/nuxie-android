@@ -208,6 +208,18 @@ internal class ExperienceTextInputOverlay(
         inputEnabled = enabled
     }
 
+    /**
+     * A sheet or modal covers the page: the focused field loses focus and the keyboard goes, and a page
+     * whose input is off keeps no focus while blocked. The bindings stay; nothing asks for focus again.
+     */
+    fun endEditing() {
+        if (closed) return
+        clearEditorFocus()
+        if (!preserveFocusWhileBlocked) return
+        preserveFocusWhileBlocked = false
+        if (!inputEnabled) bindings.forEach { it.editor.isEnabled = false }
+    }
+
     fun semanticViews(): Map<Long, View> = bindings.mapNotNull { binding ->
         binding.editor.semanticNode?.let { it.id to binding.editor }
     }.toMap()

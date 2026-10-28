@@ -110,6 +110,25 @@ class ExperienceNativeTextInputOverlayTest {
         assertEquals("after landing", writes.single().write.text)
     }
 
+    @Test fun `covering a page ends editing, and its reveal asks for no focus`() = withOverlay { overlay, _, _ ->
+        overlay.updateNativeFields(listOf(field(10, "kept", ownerId = 123)))
+        val original = editor(overlay, 10)
+        assertTrue(original.requestFocus())
+        // A Journey sheet's move turns input off with focus kept, then the sheet covers its source.
+        overlay.setInputEnabled(false, preserveFocus = true)
+        overlay.endEditing()
+        assertFalse("The covered page's field loses focus", original.hasFocus())
+        assertFalse("A covered page's editors are disabled", original.isEnabled)
+        assertSame("The binding stays", original, editor(overlay, 10))
+        overlay.updateNativeFields(listOf(field(10, "kept", ownerId = 123, captureId = 2)))
+        assertFalse("Still disabled while input is off", original.isEnabled)
+        overlay.setInputEnabled(true)
+        overlay.updateNativeFields(listOf(field(10, "kept", ownerId = 123, captureId = 3)))
+        assertFalse("Nothing asks for focus again at the reveal", original.hasFocus())
+        assertTrue(original.isEnabled)
+        assertTrue("A tap focuses it", original.requestFocus())
+    }
+
     @Test @org.robolectric.annotation.Config(sdk = [34])
     fun `modern IME methods cannot bypass a page step fence`() = withOverlay { overlay, writes, _ ->
         overlay.updateNativeFields(listOf(field(10, "kept", ownerId = 123)))
