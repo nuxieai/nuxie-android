@@ -273,8 +273,6 @@ internal object NuxieRuntimeBridge {
 
     external fun nativePlayerLayoutSize(player: Long, statusOut: IntArray): FloatArray?
 
-    external fun nativePlayerContentHeight(player: Long, statusOut: IntArray): Float
-
     external fun nativePlayerFree(player: Long)
 
     /** nux_player_step: advance by elapsed seconds; returns a status code. */

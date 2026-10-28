@@ -1191,7 +1191,7 @@ internal class ExperiencePresentationService(
                         opensLayer,
                         synchronized(stateLock) { coveredLayers.map { it.id } + if (opensLayer) listOf(checkNotNull(existing).id) else emptyList() },
                         closeLayer = { reveal -> closeLayer(id, reveal) },
-                        fitsContentHeight = shell.fitsContent,
+                        fitsContentHeight = (existing == null || opensLayer) && shell.fitsContent,
                         layerContentHeight = if (opensLayer) AtomicReference(null) else
                             existing?.let { PresentationRegistry.resolve(it.id)?.layerContentHeight } ?: AtomicReference(null),
                         moves = moves,

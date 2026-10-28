@@ -2959,11 +2959,11 @@ class ExperiencePresentationServiceTest {
             assertTrue(hugging.fitsContentHeight)
             hugging.layerContentHeight.set(152f)
             navigate("screen_welcome")
-            val destination = checkNotNull(PresentationRegistry.resolve(nativeLayers.last()))
-            assertTrue(destination.fitsContentHeight)
-            assertTrue(destination.shell.fitsContent)
-            assertTrue(hugging.layerContentHeight === destination.layerContentHeight)
-            assertEquals(152f, destination.layerContentHeight.get())
+            val fixed = checkNotNull(PresentationRegistry.resolve(nativeLayers.last()))
+            assertFalse(fixed.fitsContentHeight)
+            assertTrue(fixed.shell.fitsContent)
+            assertTrue(hugging.layerContentHeight === fixed.layerContentHeight)
+            assertEquals(152f, fixed.layerContentHeight.get())
             // A completed system close waits its turn behind the move in flight, as the Activity
             // queues it, then closes the page that move landed on: nothing is withdrawn.
             val sourceId = nativeLayers.last()

@@ -121,10 +121,6 @@ internal class ExperienceSurfaceHost(
     private var window: NuxieRuntimeWindow? = null
     private var player: NuxieRuntimePlayer? = null
     private var interactiveLayer: ExperienceInteractivePage? = null
-    private var pageFitsContentHeight = false
-    private var pageContentHeight: Float? = null
-    private var deliveredPresentationHeight: Float? = null
-    private var hasDeliveredPresentationHeight = false
     private var activeRowId: String? = null
     private val layerRetainedValues = mutableMapOf<String, java.util.concurrent.atomic.AtomicReference<NuxieViewModelSnapshot?>>()
 
@@ -857,7 +853,6 @@ internal class ExperienceSurfaceHost(
                     val layer = ExperienceInteractivePage.openOnLane(lane, runtime, loadedFile,
                         checkNotNull(descriptor), shared?.values, layerScreen.pageHost, layerScreen.initializePageFixture)
                     interactiveLayer = layer
-                    pageFitsContentHeight = layerScreen.fitsContentHeight
                     artboard = layer.artboard
                     player = layer.player
                     environment = layer.environment
@@ -879,8 +874,8 @@ internal class ExperienceSurfaceHost(
                     }
                     initialPresentationSize?.let { size -> layer.setLayoutSizeOnLane(size.width, size.height) }
                     if (layerScreen.fitsContentHeight) {
-                        // Release the native sheet's show gate with the large fallback before
-                        // a surface/frame exists, including covered restores.
+                        // Pages have no content measurement yet. Release the native sheet's
+                        // show gate with the large fallback before a surface/frame exists.
                         val bounds = initialPresentationSize
                         if (bounds != null) {
                             layoutBounds = bounds
@@ -888,7 +883,7 @@ internal class ExperienceSurfaceHost(
                             postLayoutBounds(bounds, contentHeight = null, notifyHeight = true)
                         } else {
                             mainHandler.post {
-                                if (!released.get()) deliverPresentationHeight(null)
+                                if (!released.get()) listener?.onPresentationHeight(null)
                             }
                         }
                     }
@@ -1033,35 +1028,16 @@ internal class ExperienceSurfaceHost(
             if (released.get() || (generation != null && generation != frameGeneration.get()) ||
                 (epoch != null && epoch != semanticEpoch.get()) || deliveredLayout == delivery) return@post
             listener?.onLayoutBounds(bounds)
-            if (notifyHeight) deliverPresentationHeight(contentHeight)
+            if (notifyHeight) listener?.onPresentationHeight(contentHeight)
             deliveredLayout = delivery
         }
-    }
-
-    /** UI-thread delivery is independent of root bounds and only publishes changed heights. */
-    private fun deliverPresentationHeight(height: Float?) {
-        if (hasDeliveredPresentationHeight && deliveredPresentationHeight == height) return
-        listener?.onPresentationHeight(height)
-        deliveredPresentationHeight = height
-        hasDeliveredPresentationHeight = true
     }
 
     private fun stepAndRefreshFocus(step: () -> NuxiePlayerStepOutcome): NuxiePlayerStepOutcome {
         // A submitted frame keeps its model revision. Deferred appearance changes apply
         // before the next advance, including hidden transitions and native input steps.
         applyColorScheme()
-        return step().also {
-            riveFocusState = it.focusState ?: NuxieFocusState(false, false)
-            // The ABI has no layout revision/state-change signal. Read after every ordinary
-            // visible fit-content step so text, animation and width changes cannot be missed.
-            // The runtime caches repeated reads until its next layout solve. Never advance here.
-            if (pageFitsContentHeight && presentationVisible) {
-                pageContentHeight = checkNotNull(player).contentHeight()?.takeIf { height -> height.isFinite() && height > 0f }
-                layoutBounds?.let { bounds ->
-                    postLayoutBounds(bounds, pageContentHeight, frameGeneration.get(), semanticEpoch.get(), notifyHeight = true)
-                }
-            }
-        }
+        return step().also { riveFocusState = it.focusState ?: NuxieFocusState(false, false) }
     }
 
     /** UI-thread input, also used for detached screens waiting behind another screen. */
@@ -1668,10 +1644,8 @@ internal class ExperienceSurfaceHost(
                             // A post invalidated by input activation or a new frame generation must
                             // retry even when the runtime's measured bounds have not changed.
                             layoutBounds?.let { bounds ->
-                                val contentHeight = if (pageFitsContentHeight) pageContentHeight
-                                    else if (presentationHeight.measuresContent) bounds.height else null
-                                postLayoutBounds(bounds, contentHeight, generation, epoch,
-                                    notifyHeight = pageFitsContentHeight || fitsContentHeight)
+                                val contentHeight = if (presentationHeight.measuresContent) bounds.height else null
+                                postLayoutBounds(bounds, contentHeight, generation, epoch)
                             }
                             if (it.focusState?.hasFocus != true) {
                                 val direction = focusBatch.withIndex().firstNotNullOfOrNull { (index, input) ->
@@ -1988,8 +1962,12 @@ internal class ExperienceSurfaceHost(
 
     internal companion object {
         internal fun requireLayerPresentation(fitContent: Boolean) {
-            if (fitContent) Log.w(LOG_TAG, "Page content height is unavailable; fit-content uses the large sheet height")
+            if (fitContent) Log.w(LOG_TAG, PAGE_FIT_CONTENT_DIAGNOSTIC)
         }
+
+        /** The same text as iOS's `ExperienceInteractivePage.fitContentDiagnostic`. */
+        const val PAGE_FIT_CONTENT_DIAGNOSTIC =
+            "ExperienceInteractivePage: page content height is unavailable; fit-content defaults to large"
 
         const val LOG_TAG = "Nuxie"
         const val CLEAR_COLOR_OPAQUE_BLACK = 0xFF000000.toInt()
