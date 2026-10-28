@@ -151,6 +151,17 @@ class ExperiencePagePresentationHeightTest {
         }
     }
 
+    @Test fun `a page close holds its move until the removed page has shut down`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame()
+            p.popHeldAtShutdown { close ->
+                assertFalse("The close waits for the removed page's shutdown", close.isCompleted)
+                assertTrue("The close still holds its move", content.moves.isBusy)
+            }
+            assertFalse("The slot is free once the page has shut down", content.moves.isBusy)
+        }
+    }
+
     @Test fun `a rebuilt Activity finishes without touching its presentation`() {
         val id = java.util.UUID.randomUUID().toString()
         val scene = java.io.File.createTempFile("page-rebuilt", ".riv").apply { writeBytes(byteArrayOf(1)) }
@@ -421,6 +432,29 @@ class ExperiencePagePresentationHeightTest {
             }
             assertEquals("The started close lands: one page is left", 1, (field(activity, "layers") as List<*>).size)
             assertFalse(activity.isFinishing)
+        }
+
+        /** A close whose removed page can't finish shutting down until [whileHeld] returns: its lane is held. */
+        suspend fun popHeldAtShutdown(whileHeld: (kotlinx.coroutines.Job) -> Unit) {
+            set(mounted, "reduceMotionEnabled", true)
+            val shutdown = java.util.concurrent.CountDownLatch(1)
+            set(current, "prepared", prepared.copy(closeLayer = { reveal ->
+                check(lane.enqueue { shutdown.await(10, java.util.concurrent.TimeUnit.SECONDS) })
+                reveal.prepare(); reveal.activate(); true
+            }))
+            try {
+                coroutineScope {
+                    val close = launch(start = CoroutineStart.UNDISPATCHED) {
+                        (current as PresentationScreenHandle).dismissPagesFromJourney(1)
+                    }
+                    // The reveal's preparation has removed the page; give the close every chance to finish early.
+                    withTimeout(5_000) { while (layerCount() != 1) { idle(); delay(1) } }
+                    repeat(50) { idle(); delay(1) }
+                    whileHeld(close)
+                    shutdown.countDown()
+                    withTimeout(5_000) { while (!close.isCompleted) { idle(); delay(1) } }
+                }
+            } finally { shutdown.countDown() }
         }
 
         suspend fun cutCovered(target: PreparedPresentation) {

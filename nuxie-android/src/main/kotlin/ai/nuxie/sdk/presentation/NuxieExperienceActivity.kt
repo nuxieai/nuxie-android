@@ -384,6 +384,8 @@ internal class NuxieExperienceActivity : Activity() {
         /** Admitted to make its first change (S1c): from here it lands, and nothing of it is undone. */
         private var started = false
         private var landingFailure: Throwable? = null
+        /** The Screen [activate] closed; the move waits for its shutdown. */
+        private var retiredSource: Screen? = null
         private var animation: ExperienceScreenViewTransition? = null
         private var sourceAccessibility: Int? = null
         private var targetAccessibility: Int? = null
@@ -534,6 +536,7 @@ internal class NuxieExperienceActivity : Activity() {
                     else source.view?.let(contentRoot::removeView)
                     source.close(false)
                     screens.remove(source)
+                    retiredSource = source
                 }
                 navigation = null
                 observePresentation(target.id, checkNotNull(PresentationRegistry.observe(target.id)))
@@ -542,6 +545,11 @@ internal class NuxieExperienceActivity : Activity() {
                 target.mounted?.setInputEnabled(true)
                 target.mounted?.setVisible(visible)
             }
+        }
+
+        override suspend fun awaitRetired() {
+            // activate() posts its work to the UI thread; this Main dispatch runs after it.
+            withContext(Dispatchers.Main.immediate) { retiredSource }?.closed?.await()
         }
 
         override suspend fun abort() = withContext(NonCancellable) {
@@ -967,7 +975,7 @@ internal class NuxieExperienceActivity : Activity() {
                 override val method = method
                 override val pagesToClose = pageCount
                 override suspend fun prepare() = awaitPresentationRetirement {
-                    withContext(Dispatchers.Main.immediate) {
+                    val retiring = withContext(Dispatchers.Main.immediate) {
                         check(layers.lastOrNull() === layer && !isFinishing && !isDestroyed)
                         val retired = layers.takeLast(pageCount)
                         layers.subList(layers.size - pageCount, layers.size).clear()
@@ -984,8 +992,10 @@ internal class NuxieExperienceActivity : Activity() {
                         contentRoot = lower.root
                         intent.putExtra(EXTRA_PRESENTATION_ID, lower.screen.id)
                         observePresentation(lower.screen.id, checkNotNull(PresentationRegistry.observe(lower.screen.id)))
-                        Unit
+                        retired.map { it.screen }
                     }
+                    // The close holds its move until the removed pages have shut down (section 2).
+                    retiring.forEach { it.closed.await() }
                 }
                 override fun activate() {
                     runOnUiThread {
