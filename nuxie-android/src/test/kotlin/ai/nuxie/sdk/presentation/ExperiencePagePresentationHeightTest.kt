@@ -292,6 +292,29 @@ class ExperiencePagePresentationHeightTest {
         }
     }
 
+    @Test fun `Back across two sheets plays each sheet's exit, top down, with the page beneath live`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame()
+            fun sheet(lower: ActivityPage) = ActivityPage(content.copy(isPushPage = false, layerContentHeight = AtomicReference(),
+                screenLifecycle = ExperienceScreenLifecycle()), lower = lower)
+            val first = sheet(p)
+            try {
+                first.start(); first.frame()
+                val second = sheet(first)
+                try {
+                    second.start(); second.frame()
+                    first.reduceMotion(); first.tracePhases(); second.tracePhases(); p.tracePhases()
+                    second.pop(pages = 2)
+                    second.settle { second.layerCount() == 2 }
+                    assertEquals("The top sheet's page exits, then hides", listOf("exiting", "hidden"), second.phaseTrace())
+                    assertEquals("The sheet below it exits too, then hides", listOf("exiting", "hidden"), first.phaseTrace())
+                    assertTrue("The page beneath both stays live", p.running)
+                    assertFalse("It replays no entrance", "entering" in p.phaseTrace())
+                } finally { second.close() }
+            } finally { first.close() }
+        }
+    }
+
     @Test fun `a held checkpoint stops authored time and keeps the page drawn`() = runBlocking {
         withPushPages { a, p, _ ->
             a.start(); a.frame(); p.start(); p.frame(); p.frame()
@@ -461,10 +484,10 @@ class ExperiencePagePresentationHeightTest {
             }
         }
 
-        suspend fun pop() {
+        suspend fun pop(pages: Int = 1) {
             // Exercise the real close/reveal path without scheduling a native slide animator.
             set(mounted, "reduceMotionEnabled", true)
-            assertTrue(activityCall { (current as PresentationScreenHandle).dismissPagesFromJourney(1) })
+            assertTrue(activityCall { (current as PresentationScreenHandle).dismissPagesFromJourney(pages) })
             assertFalse(activity.isFinishing)
         }
 
@@ -548,6 +571,14 @@ class ExperiencePagePresentationHeightTest {
         fun hold(held: Boolean) { mounted.setCheckpointHold(held); idle() }
         suspend fun steps(): List<String> = lane.call { native.trace.filter { it.startsWith("step:") } }
         suspend fun clearTrace() = lane.call { native.trace.clear() }
+        fun reduceMotion() = set(mounted, "reduceMotionEnabled", true)
+        suspend fun tracePhases() = lane.call { native.tracePhases = true; native.trace.clear() }
+        /** The phases this page's rows were written, as the fake's labels: hidden, entering, active, exiting. */
+        suspend fun phaseTrace(): List<String> {
+            // A page a close removed has shut its lane down, so its trace is final.
+            val trace = if (lane.awaitQuiescence(0)) native.trace.toList() else lane.call { native.trace.toList() }
+            return trace.filter { it.startsWith("phase:") }.map { listOf("hidden", "entering", "active", "exiting")[it.substringAfterLast(':').toInt()] }
+        }
         fun idle() = shadowOf(Looper.getMainLooper()).idle()
 
         /** Material's own state path, with its callbacks: what a drag or TalkBack's dismiss action selects. */

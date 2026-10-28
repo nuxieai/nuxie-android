@@ -962,21 +962,33 @@ internal class NuxieExperienceActivity : Activity() {
             if (authored) source.mounted?.awaitExit(ExperienceScreenLifecycle.ExitReason.DISMISSED)
             else source.mounted?.exit(ExperienceScreenLifecycle.ExitReason.DISMISSED)
             val returning = layers[layers.lastIndex - pageCount]
+            // Back across several sheets: the sheet above goes, and the page it covered, live until then,
+            // plays its own exit (section 3). A page hidden below a push has nothing on screen to play.
+            var leaving = layer
+            if (authored) for (index in layers.lastIndex - 1 downTo layers.lastIndex - pageCount + 1) {
+                val below = layers[index].screen.mounted ?: break
+                if (leaving.pushed || below.isHiddenBelow) break
+                leaving.screen.mounted?.hide()
+                leaving.sheet?.retire()
+                below.setInputEnabled(false)
+                below.awaitExit(ExperienceScreenLifecycle.ExitReason.DISMISSED)
+                leaving = layers[index]
+            }
             returningPage = returning.screen
             returning.root.visibility = View.VISIBLE
             // A page that stayed live under a sheet comes back with no entrance; one hidden below enters.
             returning.screen.mounted?.takeIf { it.isLayer && it.isHiddenBelow }?.enterPage()
             returning.screen.mounted?.reveal()
-            if (layer.pushed) {
+            if (leaving.pushed) {
                 val lower = returning
-                if (authored && source.mounted?.reduceMotion != true) {
-                    val slide = ExperienceScreenViewTransition(layer.root, lower.root, ExperienceScreenTransitionPlan.Kind.POP)
+                if (authored && leaving.screen.mounted?.reduceMotion != true) {
+                    val slide = ExperienceScreenViewTransition(leaving.root, lower.root, ExperienceScreenTransitionPlan.Kind.POP)
                     pagePopAnimation = slide
                     try { slide.play(visible) } finally { if (pagePopAnimation === slide) pagePopAnimation = null }
                 }
             }
-            source.mounted?.hide()
-            if (authored) layer.sheet?.retire()
+            leaving.screen.mounted?.hide()
+            if (authored) leaving.sheet?.retire()
             val accepted = source.prepared.closeLayer?.invoke(object : PreparedLayerReveal {
                 override val method = method
                 override val pagesToClose = pageCount
