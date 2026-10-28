@@ -387,22 +387,17 @@ internal class NuxieExperienceActivity : Activity() {
         /** The Screen [activate] closed; the move waits for its shutdown. */
         private var retiredSource: Screen? = null
         private var animation: ExperienceScreenViewTransition? = null
-        private var sourceAccessibility: Int? = null
-        private var targetAccessibility: Int? = null
 
         fun freezeInput() {
             blocksInput = true
             source.mounted?.setInputEnabled(false)
             currentPageWindow()?.setInputEnabled(false)
-            sourceAccessibility = source.view?.importantForAccessibility
-            source.view?.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+            source.mounted?.setNavigating(true)
         }
 
         private fun restoreInput() {
-            sourceAccessibility?.let { source.view?.importantForAccessibility = it }
-            targetAccessibility?.let { target.view?.importantForAccessibility = it }
-            sourceAccessibility = null
-            targetAccessibility = null
+            source.mounted?.setNavigating(false)
+            target.mounted?.setNavigating(false)
             source.mounted?.setInputEnabled(true)
             layers.lastOrNull()?.let { currentPageWindow()?.setInputEnabled(it.shell.dismissible) }
             blocksInput = false
@@ -460,9 +455,8 @@ internal class NuxieExperienceActivity : Activity() {
                 val incoming = checkNotNull(target.view)
                 blocksInput = true
                 outgoing.clearFocus()
-                targetAccessibility = incoming.importantForAccessibility
-                outgoing.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
-                incoming.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+                source.mounted?.setNavigating(true)
+                target.mounted?.setNavigating(true)
                 val custom = plan.custom
                 if (custom != null) {
                     val outgoingScreen = checkNotNull(source.mounted)
