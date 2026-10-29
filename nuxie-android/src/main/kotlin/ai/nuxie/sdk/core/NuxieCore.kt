@@ -374,6 +374,7 @@ internal class NuxieCore(
                 onEmissionBatch = request.onEmissionBatch,
                 onPresentationRevealed = request.onPresentationRevealed,
                 onOutcome = request.onOutcome,
+                onSystemBack = request.onSystemBack,
             )
             JourneyPresentationResult.Shown
         } catch (cancelled: CancellationException) {
@@ -423,6 +424,10 @@ internal class NuxieCore(
 
         override fun cancelBackNavigation(owner: JourneyPresentationOwner) {
             presentations.cancelBackNavigation(owner)
+        }
+
+        override suspend fun systemBack(owner: JourneyPresentationOwner, present: suspend (String) -> Unit) {
+            presentations.systemBackFromJourney(owner, present)
         }
 
         override suspend fun shutdownOwnedBy(ownerDistinctId: String) {

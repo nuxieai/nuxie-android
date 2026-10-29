@@ -99,6 +99,8 @@ internal data class PreparedPresentation(
     val opensLayer: Boolean = false,
     val layerAncestors: List<String> = emptyList(),
     val closeLayer: (suspend (PreparedLayerReveal) -> Boolean)? = null,
+    /** System Back for the Experience on [moves] (decision 170); without it the Activity decides alone. */
+    val systemBack: (suspend () -> Unit)? = null,
     val fitsContentHeight: Boolean = shell.fitsContent,
     val layerContentHeight: AtomicReference<Float?> = AtomicReference(null),
     /** The Experience's one move queue, shared by every Screen and layer in it. */
@@ -165,6 +167,11 @@ internal interface PresentationScreenHandle {
     suspend fun dismissPagesFromJourney(count: Int): Boolean = count == 1 && dismissLayerFromJourney()
     suspend fun cutCoveredPage(target: PreparedPresentation): PreparedPresentation? = null
     suspend fun updatePageHistory(history: List<String>) = Unit
+    /**
+     * System Back's press table, inside the press's turn. True is a Back within the top page, which the caller
+     * plans and moves; every other row finishes here, its close joining the turn.
+     */
+    suspend fun decideSystemBack(): Boolean = false
     val rendererEffects: RendererEffectLifetime? get() = null
     val nativeAttemptGeneration: Long? get() = null
 
@@ -715,6 +722,8 @@ internal class ExperiencePresentationService(
         var commerce: JourneyCommerceSession? = null,
         var commerceFeedback: JourneyCommerceFeedback = JourneyCommerceFeedback(),
         var commerceValuesByScreen: MutableMap<String, AtomicReference<Map<String, ai.nuxie.sdk.runtime.NuxieViewModelScalarValue>>> = mutableMapOf(),
+        /** The press goes to the Journey run that presented this Screen; null leaves it to the Activity. */
+        val onSystemBack: (() -> Unit)? = null,
     )
 
     private data class NavigationDismissal(
@@ -856,6 +865,7 @@ internal class ExperiencePresentationService(
         onOutcome: suspend (JourneySurfaceOutcome) -> Unit,
         transition: JsonObject? = null,
         runValues: ExperienceRunValues? = null,
+        onSystemBack: (() -> Unit)? = null,
     ): ExperienceRef {
         suspend fun present() = presentJourneyNow(
             fences, release, screenId, journeyId, ownerDistinctId, reservation, canPresent, acquire,
@@ -863,7 +873,7 @@ internal class ExperiencePresentationService(
             onEmissionBatch, onPresentationRevealed, onOutcome,
             if (ExperiencePageHostContract.isEnabled(release.descriptor))
                 ExperiencePageHostContract.resolveIntent(transition, synchronized(stateLock) { current?.journey?.screenId }) else transition,
-            runValues,
+            runValues, onSystemBack,
         )
         // Only a move within an admitted Experience queues. A root presentation, or a competing
         // one, has no queue to wait in: presentPrepared admits it or declines it.
@@ -923,6 +933,7 @@ internal class ExperiencePresentationService(
         onOutcome: suspend (JourneySurfaceOutcome) -> Unit,
         transition: JsonObject? = null,
         runValues: ExperienceRunValues? = null,
+        onSystemBack: (() -> Unit)? = null,
     ): ExperienceRef {
         try { PresentationShell.fromTransition(transition) } catch (error: ExperiencePresentationException) {
             reservation?.close()
@@ -940,6 +951,7 @@ internal class ExperiencePresentationService(
         journey = JourneyOutcome(
             fences = fences,
             runValues = runValues,
+            onSystemBack = onSystemBack,
             layerEmissions = ExperienceLayerEmissionCursor(nextBatchSequence, nextEmissionSequence),
             screenId = screenId,
             onOutcome = onOutcome,
@@ -1193,6 +1205,7 @@ internal class ExperiencePresentationService(
                         opensLayer,
                         synchronized(stateLock) { coveredLayers.map { it.id } + if (opensLayer) listOf(checkNotNull(existing).id) else emptyList() },
                         closeLayer = { reveal -> closeLayer(id, reveal) },
+                        systemBack = { systemBack(moves) },
                         fitsContentHeight = (existing == null || opensLayer) && shell.fitsContent,
                         layerContentHeight = if (opensLayer) AtomicReference(null) else
                             existing?.let { PresentationRegistry.resolve(it.id)?.layerContentHeight } ?: AtomicReference(null),
@@ -1775,6 +1788,48 @@ internal class ExperiencePresentationService(
 
     fun cancelBackNavigation(owner: JourneyPresentationOwner) = synchronized(stateLock) {
         if (pendingBackNavigation?.owner == owner) pendingBackNavigation = null
+    }
+
+    /**
+     * The Activity's system Back for the Experience on [moves]. It goes to the Journey that owns the Experience now,
+     * whose run binds it; a press for an Experience that has gone does nothing. Without a Journey the press table
+     * runs alone, in its turn.
+     */
+    private suspend fun systemBack(moves: ExperienceMoveQueue) {
+        val active = synchronized(stateLock) { current?.takeIf { it.moves === moves } } ?: return
+        active.journey.onSystemBack?.let { return it() }
+        try {
+            moves.run {
+                val now = synchronized(stateLock) { current?.takeIf { it.moves === moves } } ?: return@run
+                PresentationRegistry.currentScreen(now.id)?.decideSystemBack()
+            }
+        } catch (_: ExperienceMoveQueue.Closed) {}
+    }
+
+    /**
+     * One turn holds the press: the press table, Back 1 by position for an in-page Back, then [present]'s move,
+     * which joins this turn (section 3). Nothing runs between the plan and the move, so the plan stays current.
+     */
+    suspend fun systemBackFromJourney(owner: JourneyPresentationOwner, present: suspend (String) -> Unit) {
+        val moves = synchronized(stateLock) { current?.takeIf { it.isOwnedBy(owner.journeyId, owner.distinctId) }?.moves }
+            ?: return
+        try {
+            moves.run {
+                val active = synchronized(stateLock) { current?.takeIf { it.isOwnedBy(owner.journeyId, owner.distinctId) } }
+                    ?: return@run
+                if (PresentationRegistry.currentScreen(active.id)?.decideSystemBack() != true) return@run
+                val back = prepareBackNavigation(owner, active, JsonObject(mapOf("steps" to JsonPrimitive(1))))
+                if (back !is JourneyPresentationActionResult.Navigate) return@run
+                // Checked before any change (section 5): a move would decline without a renderer.
+                if (!runtimeAvailable()) {
+                    cancelBackNavigation(owner)
+                    return@run
+                }
+                present(back.screenId)
+            }
+        } catch (_: ExperienceMoveQueue.Closed) {
+            cancelBackNavigation(owner)
+        }
     }
 
     private suspend fun prepareBackNavigation(
