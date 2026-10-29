@@ -388,6 +388,7 @@ internal class ExperienceMountedScreen(
         val mutations = mutableListOf<(ExperienceInteractivePage) -> Unit>()
         var collecting = false
         var failure: Throwable? = null
+        val timing = surface.stepLog?.let { ExperienceStepLog.Step(sourceId, targetId, isBack) }
         stepping = true
         applyFieldLook()
         try {
@@ -442,6 +443,14 @@ internal class ExperienceMountedScreen(
                     override suspend fun hidden() = Unit
                     override fun veil() { textOverlay?.veil() }
                     override suspend fun drain() { surface.layerOperation { surface.stepZeroDeltaOnLane() } }
+                    override suspend fun timeStart(completions: List<kotlinx.coroutines.Deferred<Unit>>) {
+                        val step = timing ?: return
+                        mutations += { surface.stepLog?.begin(step, completions) }
+                    }
+                    override suspend fun timeLand() {
+                        val step = timing ?: return
+                        mutations += { surface.stepLog?.land(step) }
+                    }
                     override suspend fun active() {
                         prepared = target
                         activeListener = checkNotNull(rows[targetId]).listener
@@ -455,6 +464,8 @@ internal class ExperienceMountedScreen(
         } finally {
             stepping = false
             applyFieldLook()
+            // A step that landed has logged its landing; one that didn't logs nothing more.
+            timing?.let(surface::closeStepLog)
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
                 runPresentationCleanup(failure) {
                     awaitPresentationRetirement {

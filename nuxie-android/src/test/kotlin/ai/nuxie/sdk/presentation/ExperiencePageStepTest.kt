@@ -49,6 +49,29 @@ class ExperiencePageStepTest {
                 "end:pair", "retire", "a:hidden,b:active:", "commit:false", "drain", "hidden", "active", "input:true"), trace.events)
         }
     }
+    @Test fun `only a Magic Move played in the scene is timed, from its begin batch to its landing batch`() = runBlocking {
+        for (back in listOf(false, true)) {
+            val trace = Trace()
+            ExperiencePageStep.perform(if (back) "b" else "a", if (back) "a" else "b", Style.MAGIC_MOVE, back, plan,
+                ExperiencePageStep.Exit(null, null), false, timed(trace))
+            val (source, target) = if (back) "b" to "a" else "a" to "b"
+            assertEquals("back=$back", listOf("input:false", "prepare", "batch", "take", "settle", "register:$source:leave",
+                "register:$target:arrive", "$source:exiting,$target:entering:pair", "begin:pair", "time:start:2", "commit:true",
+                "present", "wait:2:650", "batch", "end:pair", "retire", "$source:hidden,$target:active:", "time:land",
+                "commit:false", "drain", "hidden", "active", "input:true"), trace.events)
+        }
+        // A fade plays in the scene too but isn't timed; reduced motion, a covered cut and a plain cut play no move.
+        for ((style, reduced, covered) in listOf(Triple(Style.FADE, false, false), Triple(Style.MAGIC_MOVE, true, false),
+            Triple(Style.MAGIC_MOVE, false, true), Triple(Style.NONE, false, false))) {
+            val trace = Trace()
+            ExperiencePageStep.perform("a", "b", style, false, plan, ExperiencePageStep.Exit(null, null), reduced, timed(trace), covered)
+            assertFalse("$style reduced=$reduced covered=$covered", trace.events.any { it.startsWith("time:") })
+        }
+    }
+    private fun timed(trace: Trace) = object : ExperiencePageStep.Operations by trace {
+        override suspend fun timeStart(completions: List<Deferred<Unit>>) { trace.events += "time:start:${completions.size}" }
+        override suspend fun timeLand() { trace.events += "time:land" }
+    }
     @Test fun `cut with transition waits for each published half and swaps after begin`() = runBlocking {
         val trace = Trace(); perform(trace, Style.NONE)
         assertEquals(listOf("input:false", "prepare", "register:a:leave", "batch", "a:exiting:pair", "commit:true",
