@@ -13,7 +13,7 @@ abstract class RuntimeLaneContract {
     internal abstract fun createLane(): NuxieRuntimeLane
 
     @Test
-    fun `calls share one daemon owner and an exception does not kill the queue`() = kotlinx.coroutines.runBlocking {
+    fun callsShareOneDaemonOwnerAndAnExceptionDoesNotKillTheQueue() = kotlinx.coroutines.runBlocking {
         val lane = createLane()
         try {
             val caller = Thread.currentThread().id
@@ -30,7 +30,7 @@ abstract class RuntimeLaneContract {
     }
 
     @Test
-    fun `a callback can enqueue and close its own owner without waiting on itself`() {
+    fun aCallbackCanEnqueueAndCloseItsOwnOwnerWithoutWaitingOnItself() {
         val lane = createLane()
         val ran = CountDownLatch(1)
         val closed = CountDownLatch(1)
@@ -48,7 +48,7 @@ abstract class RuntimeLaneContract {
     }
 
     @Test
-    fun `independent cleanup owners all run after native work including late registration`() {
+    fun independentCleanupOwnersAllRunAfterNativeWorkIncludingLateRegistration() {
         val lane = createLane()
         val release = CountDownLatch(1)
         val started = CountDownLatch(1)
@@ -72,7 +72,7 @@ abstract class RuntimeLaneContract {
     }
 
     @Test
-    fun `enqueue accepts before shutdown and rejects after`() {
+    fun enqueueAcceptsBeforeShutdownAndRejectsAfter() {
         val lane = createLane()
         val ran = CountDownLatch(1)
         assertTrue("live lane must accept work", lane.enqueue { ran.countDown() })
@@ -83,7 +83,7 @@ abstract class RuntimeLaneContract {
     }
 
     @Test
-    fun `awaitQuiescence drains work accepted before shutdown`() {
+    fun awaitQuiescenceDrainsWorkAcceptedBeforeShutdown() {
         val lane = createLane()
         val release = CountDownLatch(1)
         var drainedWorkFinished = false
@@ -103,7 +103,7 @@ abstract class RuntimeLaneContract {
     }
 
     @Test
-    fun `awaitQuiescence times out while accepted work is still running`() {
+    fun awaitQuiescenceTimesOutWhileAcceptedWorkIsStillRunning() {
         val lane = createLane()
         val started = CountDownLatch(1)
         val release = CountDownLatch(1)
@@ -127,7 +127,7 @@ abstract class RuntimeLaneContract {
     }
 
     @Test
-    fun `nested termination observers follow already registered cleanup`() {
+    fun nestedTerminationObserversFollowAlreadyRegisteredCleanup() {
         val lane = createLane()
         val workStarted = CountDownLatch(1)
         val releaseWork = CountDownLatch(1)
@@ -152,7 +152,7 @@ abstract class RuntimeLaneContract {
     }
 
     @Test
-    fun `registration during teardown returns without running cleanup on the caller and wait includes it`() {
+    fun registrationDuringTeardownReturnsWithoutRunningCleanupOnTheCallerAndWaitIncludesIt() {
         val lane = createLane()
         val firstStarted = CountDownLatch(1)
         val releaseFirst = CountDownLatch(1)
@@ -201,7 +201,7 @@ abstract class RuntimeLaneContract {
     }
 
     @Test
-    fun `concurrent registration shutdown and waits deliver every observer exactly once`() {
+    fun concurrentRegistrationShutdownAndWaitsDeliverEveryObserverExactlyOnce() {
         val callers = java.util.concurrent.Executors.newFixedThreadPool(4)
         try {
             repeat(20) {
@@ -233,7 +233,7 @@ abstract class RuntimeLaneContract {
     }
 
     @Test
-    fun `throwing termination cleanup does not strand later cleanup or its native owner`() {
+    fun throwingTerminationCleanupDoesNotStrandLaterCleanupOrItsNativeOwner() {
         val lane = createLane()
         val completed = java.util.concurrent.atomic.AtomicInteger()
         lane.afterTermination { throw IllegalStateException("Expected termination callback failure") }
@@ -248,7 +248,7 @@ abstract class RuntimeLaneContract {
     }
 
     @Test
-    fun `shutdown without prior work delivers cleanup on its worker without blocking the caller`() {
+    fun shutdownWithoutPriorWorkDeliversCleanupOnItsWorkerWithoutBlockingTheCaller() {
         val lane = createLane()
         val started = CountDownLatch(1)
         val release = CountDownLatch(1)
