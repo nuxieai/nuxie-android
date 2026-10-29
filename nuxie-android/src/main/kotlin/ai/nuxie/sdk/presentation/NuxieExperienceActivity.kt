@@ -251,6 +251,10 @@ internal class NuxieExperienceActivity : Activity() {
             checkNotNull(mounted).updatePageHistory(history)
             prepared = prepared.copy(pageHistory = history)
         }
+        // withContext keeps the press's turn, so a close this decides joins it.
+        override suspend fun decideSystemBack(): Boolean = withContext(Dispatchers.Main.immediate) {
+            this@NuxieExperienceActivity.decideSystemBack()
+        }
         override suspend fun prepareNavigation(id: String, content: PreparedPresentation): PreparedScreenNavigation =
             prepareScreenNavigation(this, id, content)
 
@@ -856,15 +860,32 @@ internal class NuxieExperienceActivity : Activity() {
         }
     }
 
-    /** System Back is a move request: a press during a move waits its turn and runs on the Screen the move lands on (S1). */
+    /**
+     * System Back is a move request: a press during a move waits its turn and runs on the Screen the move lands on (S1).
+     * The Experience hands it to its Journey, which goes back one Screen by position (decision 170).
+     */
     private fun closeTopLayerOrExperience() {
         val moves = moves ?: run {
             if (dismissible) finishTerminal(CloseReason.UserDismissed)
             return
         }
+        val systemBack = currentScreen?.prepared?.systemBack
         registryScope.launch {
+            if (systemBack != null) return@launch systemBack()
             try { moves.run { closeTopLayerOrExperienceNow() } } catch (_: ExperienceMoveQueue.Closed) {}
         }
+    }
+
+    /**
+     * The press table, read inside the press's turn. A top page with more than one Screen goes back within it,
+     * dismissible or not: true leaves that move to the Journey. Every other row is the close it was before.
+     */
+    private suspend fun decideSystemBack(): Boolean {
+        if (isFinishing || isDestroyed) return false
+        val screen = currentScreen
+        if (screen?.mounted?.isLayer == true && screen.prepared.pageHistory.size > 1) return true
+        closeTopLayerOrExperienceNow()
+        return false
     }
 
     private suspend fun closeTopLayerOrExperienceNow() {

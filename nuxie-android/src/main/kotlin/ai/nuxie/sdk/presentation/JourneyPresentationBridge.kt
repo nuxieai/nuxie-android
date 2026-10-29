@@ -85,6 +85,8 @@ internal data class JourneyPresentationRequest(
     val onOutcome: suspend (JourneySurfaceOutcome) -> Unit,
     val transition: JsonObject? = null,
     val runValues: ExperienceRunValues? = null,
+    /** System Back on this Screen (decision 170): the press goes to the run that presented it. */
+    val onSystemBack: (() -> Unit)? = null,
 )
 
 /** Whether the renderer's batch advanced the durable publication sequence. */
@@ -166,6 +168,12 @@ internal interface JourneyPresenting {
         outlet: String, errorCode: String, effectId: String) = Unit
 
     fun cancelBackNavigation(owner: JourneyPresentationOwner) = Unit
+
+    /**
+     * System Back (decision 170) in one turn of the Experience's move queue: the press table, then for a Back
+     * within the top page its plan and [present]'s move, with nothing between them.
+     */
+    suspend fun systemBack(owner: JourneyPresentationOwner, present: suspend (screenId: String) -> Unit) = Unit
 
     suspend fun shutdownPresentation(ownerDistinctId: String, journeyId: String) {
         shutdownOwnedBy(ownerDistinctId)

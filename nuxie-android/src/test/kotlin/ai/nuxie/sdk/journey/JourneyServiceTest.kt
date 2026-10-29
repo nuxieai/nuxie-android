@@ -76,6 +76,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -3547,6 +3548,430 @@ class JourneyServiceTest {
             scope.cancel()
             scope.coroutineContext[kotlinx.coroutines.Job]?.join()
             PresentationRegistry.clearForTesting()
+        }
+    }
+
+    @Test fun `system Back admitted while a move waits plans from where that move lands`() = runBlocking {
+        withSystemBack { j ->
+            j.emit("next"); j.awaitLanded("screen_b")
+            val pressOnB = j.pressOf(checkNotNull(j.currentId))
+            val running = checkNotNull(j.moves.tryTake())
+            val forward = scope.async { j.emit("next") }
+            j.awaitWaiting(1)
+            j.press(pressOnB)
+            running.release()
+            j.awaitLanded("screen_b", "screen_c", "screen_b")
+            assertEquals(JourneyEmissionBatchResult.ACCEPTED, forward.await())
+            assertEquals("The press is decided on the Screen the move landed on", listOf("decide:screen_c"), j.decisions())
+            assertEquals(listOf("screen_a", "screen_b"), j.history())
+        }
+    }
+
+    @Test fun `system Back holds one turn from its plan to its move`() = runBlocking {
+        withSystemBack { j ->
+            j.emit("next"); j.awaitLanded("screen_b")
+            val dragStarted = CompletableDeferred<Boolean>()
+            j.beforePresent = { request ->
+                if (request.screenId == "screen_a") dragStarted.complete(j.moves.tryTake()?.also { it.release() } != null)
+                null
+            }
+            j.press()
+            j.awaitLanded("screen_b", "screen_a")
+            assertFalse("A sheet drag between the plan and the move gets no turn", dragStarted.await())
+            assertEquals(listOf("screen_a"), j.history())
+        }
+    }
+
+    @Test fun `system Back waiting behind a native close lets that close's checkpoint through`() = runBlocking {
+        withSystemBack { j ->
+            j.emit("next"); j.awaitLanded("screen_b")
+            val request = checkNotNull(j.live)
+            val close = checkNotNull(j.moves.tryTake())
+            j.press()
+            j.awaitWaiting(1)
+            val checkpoint = scope.async { request.onScreenDismissed("screen_sheet", "screen_b", "native_back") }
+            assertEquals("The close's checkpoint runs while the press waits for the close's turn",
+                JourneyScreenDismissalResult.HANDLED, withTimeout(2_000) { checkpoint.await() })
+            close.release()
+            j.awaitLanded("screen_b", "screen_a")
+        }
+    }
+
+    @Test fun `system Back takes a report queued before it started, and the report is handled once`() = runBlocking {
+        withSystemBack { j ->
+            j.emit("next"); j.awaitLanded("screen_b")
+            val request = checkNotNull(j.live)
+            val link = scope.async { j.emit("link") }
+            withTimeout(5_000) { j.linkOpened.await() }
+            val drag = checkNotNull(j.moves.tryTake())
+            j.press()
+            // The drag hid its sheet: its report queues behind the press, and the drag ends once the report returns.
+            val report = scope.async(start = CoroutineStart.UNDISPATCHED) {
+                request.onScreenDismissed("screen_sheet", "screen_b", "native_sheet")
+            }
+            scope.launch { report.await(); drag.release() }
+            j.linkGate.complete(Unit)
+            j.awaitLanded("screen_b", "screen_a")
+            assertEquals(JourneyScreenDismissalResult.HANDLED, report.await())
+            assertEquals(JourneyEmissionBatchResult.ACCEPTED, link.await())
+            j.settle()
+            assertEquals("The report is handled once", 1,
+                j.timeline.count { it == "heard:${SystemEventNames.SCREEN_DISMISSED}:native_sheet" })
+        }
+    }
+
+    @Test fun `an authored Back step behind a queued report finishes once its window takes the report`() = runBlocking {
+        withSystemBack { j ->
+            j.emit("next"); j.awaitLanded("screen_b")
+            val request = checkNotNull(j.live)
+            val link = scope.async { j.emit("link_then_back") }
+            withTimeout(5_000) { j.linkOpened.await() }
+            val drag = checkNotNull(j.moves.tryTake())
+            val report = scope.async(start = CoroutineStart.UNDISPATCHED) {
+                request.onScreenDismissed("screen_sheet", "screen_b", "native_sheet")
+            }
+            scope.launch { report.await(); drag.release() }
+            j.linkGate.complete(Unit)
+            j.awaitLanded("screen_b", "screen_a")
+            assertEquals(JourneyScreenDismissalResult.HANDLED, report.await())
+            assertEquals(JourneyEmissionBatchResult.ACCEPTED, link.await())
+        }
+    }
+
+    @Test fun `system Back's own checkpoint runs a dismissal route before the move`() = runBlocking {
+        withSystemBack(routes = listOf("""{"host":{"kind":"screen","screenId":"screen_b"},"eventName":"${SystemEventNames.SCREEN_DISMISSED}","entryStepId":"routed"}""")) { j ->
+            j.emit("next"); j.awaitLanded("screen_b")
+            j.press()
+            j.awaitLanded("screen_b", "screen_a")
+            val heard = j.timeline.indexOf("heard:${SystemEventNames.SCREEN_DISMISSED}:navigate")
+            assertTrue("The checkpoint is heard with method navigate", heard >= 0)
+            assertTrue("before the move lands", heard < j.timeline.lastIndexOf("landed:screen_a"))
+            withTimeout(5_000) { while (j.run().stepId != "routed") kotlinx.coroutines.delay(10) }
+            assertEquals("The target's presentation carries its own callbacks", JourneyEmissionBatchResult.ACCEPTED, j.emit("tap"))
+        }
+    }
+
+    @Test fun `system Back without a dismissal route leaves the run's step where it was`() = runBlocking {
+        withSystemBack { j ->
+            j.emit("next"); j.awaitLanded("screen_b")
+            j.press()
+            j.awaitLanded("screen_b", "screen_a")
+            j.settle()
+            assertEquals("to_b", j.run().stepId)
+            assertEquals(JourneyEmissionBatchResult.ACCEPTED, j.emit("tap"))
+        }
+    }
+
+    @Test fun `system Back during a batch's step runs after that step`() = runBlocking {
+        withSystemBack { j ->
+            j.emit("next"); j.awaitLanded("screen_b")
+            val link = scope.async { j.emit("link") }
+            withTimeout(5_000) { j.linkOpened.await() }
+            j.press()
+            kotlinx.coroutines.delay(200)
+            assertTrue("The press waits for the step", j.decisions().isEmpty())
+            j.linkGate.complete(Unit)
+            j.awaitLanded("screen_b", "screen_a")
+            assertTrue(j.timeline.indexOf("link:returned") < j.timeline.indexOf("decide:screen_b"))
+            assertEquals(JourneyEmissionBatchResult.ACCEPTED, link.await())
+        }
+    }
+
+    @Test fun `system Back whose move finds its products unavailable runs that route`() = runBlocking {
+        withSystemBack(routes = listOf("""{"host":{"kind":"screen","screenId":"screen_a"},"eventName":"${SystemEventNames.PRODUCTS_UNAVAILABLE}","entryStepId":"routed"}""")) { j ->
+            j.emit("next"); j.awaitLanded("screen_b")
+            j.beforePresent = { if (it.screenId == "screen_a") JourneyPresentationResult.ProductsUnavailable else null }
+            j.press()
+            withTimeout(5_000) { while (j.run().stepId != "routed") kotlinx.coroutines.delay(10) }
+            assertNull(j.run().completion)
+        }
+    }
+
+    @Test fun `system Back whose checkpoint completed the Journey leaves the run unmarked`() = runBlocking {
+        withSystemBack { j ->
+            j.emit("next"); j.awaitLanded("screen_b")
+            j.beforePresent = { if (it.screenId == "screen_a") JourneyPresentationResult.Completed else null }
+            j.press(); j.settle()
+            assertEquals(listOf("decide:screen_b"), j.decisions())
+            j.press(); j.settle()
+            assertEquals("A run no longer presented takes no press", listOf("decide:screen_b"), j.decisions())
+        }
+    }
+
+    @Test fun `system Back whose move fails finishes the run as abandoned`() = runBlocking {
+        withSystemBack { j ->
+            j.emit("next"); j.awaitLanded("screen_b")
+            j.beforePresent = { if (it.screenId == "screen_a") JourneyPresentationResult.Failed else null }
+            j.press(); j.settle()
+            assertEquals("abandoned", j.awaitOutcome())
+        }
+    }
+
+    @Test fun `system Back after the app left the foreground is refused before anything changes`() = runBlocking {
+        withSystemBack { j ->
+            j.emit("next"); j.awaitLanded("screen_b")
+            val before = j.run()
+            j.journeys.onAppVisibilityChanged(false)
+            j.press(); j.settle()
+            assertEquals("The press table ran", listOf("decide:screen_b"), j.decisions())
+            assertEquals("The run and its journal are unchanged", before, j.run())
+            assertNull("No Back is pending", j.presentations.javaClass.getDeclaredField("pendingBackNavigation")
+                .apply { isAccessible = true }.get(j.presentations))
+            j.journeys.onAppWillEnterForeground()
+            assertEquals(JourneyEmissionBatchResult.ACCEPTED, j.emit("next"))
+            j.awaitLanded("screen_b", "screen_c")
+        }
+    }
+
+    @Test fun `system Back that loses the foreground during its checkpoint ends the run as an authored Back would`() = runBlocking {
+        withSystemBack { j ->
+            j.emit("next"); j.awaitLanded("screen_b")
+            j.backgroundDuringCheckpoint = true
+            j.press(); j.settle()
+            assertTrue(j.timeline.contains("heard:${SystemEventNames.SCREEN_DISMISSED}:navigate"))
+            assertEquals("abandoned", j.awaitOutcome())
+        }
+    }
+
+    @Test fun `two system Backs on a, b, c land on a`() = runBlocking {
+        withSystemBack { j ->
+            j.emit("next"); j.awaitLanded("screen_b")
+            j.emit("next"); j.awaitLanded("screen_b", "screen_c")
+            val held = checkNotNull(j.moves.tryTake())
+            j.press(); j.press()
+            held.release()
+            j.awaitLanded("screen_b", "screen_c", "screen_b", "screen_a")
+            assertEquals(listOf("screen_a"), j.history())
+        }
+    }
+
+    private suspend fun withSystemBack(routes: List<String> = emptyList(), exercise: suspend (SystemBackJourney) -> Unit) {
+        val journey = SystemBackJourney(routes)
+        try { withTimeout(30_000) { exercise(journey.start()) } } finally {
+            journey.linkGate.complete(Unit)
+            scope.cancel()
+            kotlinx.coroutines.withTimeoutOrNull(5_000) { scope.coroutineContext[kotlinx.coroutines.Job]?.join() }
+            PresentationRegistry.clearForTesting()
+        }
+    }
+
+    /**
+     * System Back by position (decision 170) against a real Journey and presentation service. A page of
+     * screen_a, screen_b and screen_c; each Screen handle answers the press table as the Activity does for a top
+     * page: a Back within it when its history has more than one Screen.
+     */
+    private inner class SystemBackJourney(private val routes: List<String>) {
+        private val identity = identity("customer")
+        private val releaseEntry = fixture.getValue("renderedEntry").jsonObject
+        private val catalog = catalog(releaseEntry)
+        private val releaseAuthority = authority(releaseEntry)
+        private lateinit var release: AuthenticatedJourneyRelease
+        private val launched = CopyOnWriteArrayList<String>()
+        val presentations = ExperiencePresentationService(emit = { _, _, _ -> }, scope = scope,
+            runtimeAvailable = { true }, currentDistinctId = identity::distinctId, launch = launched::add)
+        /** In order: "decide:<screen>", "heard:<event>:<method>", "landed:<screen>" and "link:returned". */
+        val timeline = CopyOnWriteArrayList<String>()
+        @Volatile var currentId: String? = null
+        /** The request of the Screen on screen now. */
+        @Volatile var live: JourneyPresentationRequest? = null
+        private val liveBatches = AtomicInteger()
+        /** Runs as a Journey move presents; a result returns that result without presenting. */
+        @Volatile var beforePresent: suspend (JourneyPresentationRequest) -> JourneyPresentationResult? = { null }
+        /** Holds an open-link step, so the worker stays in that command until the gate opens. */
+        val linkGate = CompletableDeferred<Unit>()
+        val linkOpened = CompletableDeferred<Unit>()
+        /** The app leaves the foreground while a "navigate" checkpoint runs. */
+        @Volatile var backgroundDuringCheckpoint = false
+        private val contents = java.util.concurrent.ConcurrentHashMap<String, ai.nuxie.sdk.presentation.PreparedPresentation>()
+        lateinit var journeys: JourneyService
+
+        val moves: ai.nuxie.sdk.presentation.ExperienceMoveQueue
+            get() = checkNotNull(PresentationRegistry.resolve(checkNotNull(currentId))).moves
+        fun pressOf(id: String): suspend () -> Unit = checkNotNull(PresentationRegistry.resolve(id)?.systemBack)
+        /** A press as the Activity makes it: launched, and running in place until its first wait. */
+        fun press(back: suspend () -> Unit = pressOf(checkNotNull(currentId))) {
+            scope.launch(start = CoroutineStart.UNDISPATCHED) { back() }
+        }
+        fun history(): List<String> = presentations.layerScreenIds().single()
+        fun run(): JourneyRun = JourneyRunJournal(directory, "customer", JourneyStorageScope(releaseAuthority)).runs().single()
+        /** Each finished run's outcome, from its completion event: a finished run leaves the journal. */
+        val outcomes = CopyOnWriteArrayList<String>()
+        suspend fun awaitOutcome(): String = withTimeout(5_000) {
+            while (outcomes.isEmpty()) kotlinx.coroutines.delay(10)
+            outcomes.single()
+        }
+        fun decisions() = timeline.filter { it.startsWith("decide:") }
+        /** Until the Journey has moved to [screens] in order, and the last one's request is the live one. */
+        suspend fun awaitLanded(vararg screens: String) = withTimeout(5_000) {
+            while (timeline.filter { it.startsWith("landed:") } != screens.map { "landed:$it" } ||
+                live?.screenId != screens.last()) kotlinx.coroutines.delay(10)
+        }
+        /** Until [count] moves wait behind the one running. */
+        suspend fun awaitWaiting(count: Int) {
+            val queue = moves
+            val waiting = queue.javaClass.getDeclaredField("waiting").apply { isAccessible = true }
+            withTimeout(5_000) { while ((waiting.get(queue) as Collection<*>).size != count) kotlinx.coroutines.delay(10) }
+        }
+        /** Every command sent so far has run. */
+        suspend fun settle() = withTimeout(5_000) { journeys.initialize() }
+
+        /** A batch of one [event] from the Screen on screen now. */
+        suspend fun emit(event: String): JourneyEmissionBatchResult {
+            val request = checkNotNull(live)
+            val n = liveBatches.getAndIncrement()
+            return request.onEmissionBatch(JourneyScreenEmissionBatch(request.journeyId, request.nextBatchSequence + n,
+                "$event-${request.screenId}-$n", JourneyScreenEmissionSource(request.screenId, event),
+                listOf(JourneyScreenEmission("$event-${request.screenId}-$n-event", request.nextEmissionSequence + n,
+                    100_001L + n, event, JsonObject(emptyMap())))), null)
+        }
+
+        private fun host(id: String): ai.nuxie.sdk.presentation.PresentationScreenHandle =
+            object : ai.nuxie.sdk.presentation.PresentationScreenHandle {
+                var reason: CloseReason? = null
+                override fun requestCloseFromService(reason: CloseReason): Boolean { this.reason = reason; return true }
+                override fun screenCloseReason() = reason
+                override fun finishAfterServiceClose() { if (reason != CloseReason.JourneyNavigation) PresentationRegistry.detach(id, this) }
+                override suspend fun decideSystemBack(): Boolean {
+                    val content = contents[id] ?: checkNotNull(PresentationRegistry.resolve(id))
+                    timeline += "decide:${content.screenId}"
+                    return content.pageHistory.size > 1
+                }
+                override suspend fun prepareNavigation(target: String, content: ai.nuxie.sdk.presentation.PreparedPresentation):
+                    ai.nuxie.sdk.presentation.PreparedScreenNavigation {
+                    contents[target] = content
+                    val source = this
+                    return object : ai.nuxie.sdk.presentation.PreparedScreenNavigation {
+                        override fun activate() {
+                            PresentationRegistry.attach(target, host(target)); PresentationRegistry.detach(id, source)
+                            currentId = target
+                            timeline += "landed:${content.screenId}"
+                            PresentationRegistry.reportFirstFrame(target)
+                        }
+                        override suspend fun abort() = Unit
+                    }
+                }
+            }
+
+        private val presenter = object : JourneyPresenting {
+            override fun reserve(ownerDistinctId: String) = presentations.reserveJourney(ownerDistinctId)
+            override fun owns(owner: JourneyPresentationOwner) = presentations.ownsJourney(owner)
+            override fun screenId(owner: JourneyPresentationOwner) = presentations.journeyScreenId(owner)
+            override suspend fun openLink(owner: JourneyPresentationOwner, link: JourneyLinkRequest): ai.nuxie.sdk.presentation.JourneyOpenedLink? {
+                linkOpened.complete(Unit)
+                linkGate.await()
+                timeline += "link:returned"
+                return null
+            }
+            override suspend fun present(request: JourneyPresentationRequest): JourneyPresentationResult {
+                beforePresent(request)?.let { return it }
+                val file = File(directory, "system-back-scene").apply { writeBytes(byteArrayOf(1)) }
+                suspend fun show() = presentations.presentJourney(request.fences, release, request.screenId, request.journeyId,
+                    request.ownerDistinctId, request.reservation, canPresent = request.canPresent,
+                    acquire = { AcquiredJourneyRelease(release.identity, mapOf("renders/main.riv" to file), file, protection = Closeable {}) },
+                    nextBatchSequence = request.nextBatchSequence, nextEmissionSequence = request.nextEmissionSequence,
+                    onScreenChanged = request.onScreenChanged,
+                    onScreenDismissed = { screen, revealing, method ->
+                        request.onScreenDismissed(screen, revealing, method).also {
+                            if (method == "navigate" && backgroundDuringCheckpoint) journeys.onAppVisibilityChanged(false)
+                        }
+                    },
+                    onEmissionBatch = request.onEmissionBatch, onPresentationRevealed = request.onPresentationRevealed,
+                    onOutcome = request.onOutcome, transition = request.transition, runValues = request.runValues,
+                    onSystemBack = request.onSystemBack)
+                return try {
+                    if (currentId == null) {
+                        // The first Screen's Activity attaches once its content is ready.
+                        val showing = scope.async { show() }
+                        withTimeout(5_000) { while (launched.isEmpty()) kotlinx.coroutines.delay(10) }
+                        val id = launched.single()
+                        withTimeout(5_000) {
+                            while (PresentationRegistry.observe(id)?.value !is ai.nuxie.sdk.presentation.PresentationContentState.Ready)
+                                kotlinx.coroutines.delay(10)
+                        }
+                        currentId = id
+                        PresentationRegistry.attach(id, host(id)); PresentationRegistry.reportFirstFrame(id)
+                        showing.await()
+                    } else {
+                        // In place, as NuxieCore calls it, so a move inside a turn joins that turn.
+                        show()
+                    }
+                    liveBatches.set(0)
+                    live = request
+                    JourneyPresentationResult.Shown
+                } catch (cancelled: kotlin.coroutines.cancellation.CancellationException) {
+                    throw cancelled
+                } catch (error: ai.nuxie.sdk.presentation.ExperiencePresentationException) {
+                    when (error.reason) {
+                        ai.nuxie.sdk.presentation.ExperiencePresentationException.Reason.DECLINED -> JourneyPresentationResult.Declined
+                        ai.nuxie.sdk.presentation.ExperiencePresentationException.Reason.JOURNEY_COMPLETED -> JourneyPresentationResult.Completed
+                        ai.nuxie.sdk.presentation.ExperiencePresentationException.Reason.PRODUCTS_UNAVAILABLE -> JourneyPresentationResult.ProductsUnavailable
+                        else -> JourneyPresentationResult.Failed
+                    }
+                } catch (_: Exception) {
+                    JourneyPresentationResult.Failed
+                }
+            }
+            override fun cancelBackNavigation(owner: JourneyPresentationOwner) = presentations.cancelBackNavigation(owner)
+            override suspend fun systemBack(owner: JourneyPresentationOwner, present: suspend (String) -> Unit) =
+                presentations.systemBackFromJourney(owner, present)
+            override suspend fun dispatchAction(owner: JourneyPresentationOwner, action: JsonObject, effectId: String) =
+                presentations.dispatchJourneyAction(owner, action, effectId)
+            override suspend fun shutdownOwnedBy(ownerDistinctId: String) = presentations.shutdownOwnedBy(ownerDistinctId)
+            override suspend fun shutdownPresentation(ownerDistinctId: String, journeyId: String) =
+                presentations.shutdownJourney(ownerDistinctId, journeyId)
+        }
+
+        suspend fun start(): SystemBackJourney {
+            catalog.commit("customer", catalog.prepare(profile(releaseEntry = releaseEntry), releaseAuthority))
+            val baseline = requireNotNull(catalog.snapshot("customer"))
+            val original = baseline.releasesByDigest.values.single()
+            val screens = listOf("screen_a", "screen_b", "screen_c", "screen_sheet")
+            val link = """"action":{"type":"open_link","url":{"type":"String","value":"https://example.com/help"},"target":"_blank"}"""
+            val leg = JsonObject(original.leg + mapOf(
+                "entryStepId" to JsonPrimitive("present"),
+                "offers" to JsonArray(emptyList()),
+                "steps" to JsonArray(listOf(
+                    """{"kind":"action","id":"present","action":{"type":"navigate","screenId":"screen_a"},"outlets":{}}""",
+                    """{"kind":"action","id":"to_b","action":{"type":"navigate","screenId":"screen_b"},"outlets":{}}""",
+                    """{"kind":"action","id":"to_c","action":{"type":"navigate","screenId":"screen_c"},"outlets":{}}""",
+                    """{"kind":"action","id":"back","action":{"type":"back"},"outlets":{}}""",
+                    """{"kind":"action","id":"link",$link,"outlets":{"next":"parked"}}""",
+                    """{"kind":"action","id":"link_then_back",$link,"outlets":{"next":"back"}}""",
+                    """{"kind":"action","id":"parked","action":{"type":"delay","durationMs":60000},"outlets":{}}""",
+                    """{"kind":"action","id":"routed","action":{"type":"delay","durationMs":60000},"outlets":{}}""",
+                ).map(Json::parseToJsonElement)),
+                "routes" to JsonArray((listOf(
+                    """{"host":{"kind":"screen","screenId":"screen_a"},"eventName":"next","entryStepId":"to_b"}""",
+                    """{"host":{"kind":"screen","screenId":"screen_b"},"eventName":"next","entryStepId":"to_c"}""",
+                    """{"host":{"kind":"screen","screenId":"screen_b"},"eventName":"link","entryStepId":"link"}""",
+                    """{"host":{"kind":"screen","screenId":"screen_b"},"eventName":"link_then_back","entryStepId":"link_then_back"}""",
+                ) + routes).map(Json::parseToJsonElement)),
+                "screens" to JsonArray(screens.map { buildJsonObject { put("id", it) } })))
+            val render = original.descriptor.getValue("render").jsonObject
+            val screen = render.getValue("screens").jsonArray.first().jsonObject
+            release = AuthenticatedJourneyRelease(JourneyReleaseEnvelope.authenticate(releaseEntry.getValue("envelope").toString().encodeToByteArray(),
+                mapOf("TEST_ONLY_DEV_KEYPAIR" to Base64.decode(fixture.getValue("publicKeyBase64").jsonPrimitive.content, Base64.NO_WRAP))),
+                original.identity, JsonObject(original.descriptor + mapOf("leg" to leg, "render" to JsonObject(render + mapOf(
+                    "layerHost" to Json.parseToJsonElement("""{"artboardName":"LayerList","list":"screens"}"""),
+                    "screens" to JsonArray(screens.map { JsonObject(screen + ("id" to JsonPrimitive(it))) }))))), null)
+            journeys = JourneyService(identity = identity, events = store, catalog = catalog, journalDirectory = directory, scope = scope,
+                capture = { name, properties, _, _ ->
+                    if (name == JourneyEventNames.LEG_COMPLETED) outcomes += properties["outcome"].toString()
+                    true
+                },
+                captureScreenEvent = { name, properties, id, distinctId, occurredAt, admission, origin ->
+                    val accepted = admission?.commitIfCurrent { true } == true
+                    StableEventCaptureResult(accepted, StoredEvent(id, name, JsonValueConverter.fromMap(properties), occurredAt, distinctId,
+                        journeyOrigin = origin).takeIf { accepted })
+                }, capturePresentationEvent = { name, properties, id, distinctId, occurredAt, admission ->
+                    timeline += "heard:$name:${properties["method"]}"
+                    val accepted = admission?.commitIfCurrent { true } == true
+                    StableEventCaptureResult(accepted, StoredEvent(id, name, JsonValueConverter.fromMap(properties), occurredAt, distinctId).takeIf { accepted })
+                }, presenter = presenter, nowMillis = { 100_000L }, createNativeValues = ::testRunValues)
+            journeys.initialize(); journeys.onAppWillEnterForeground()
+            journeys.profileDidCommit(baseline.copy(releasesByDigest = mapOf(release.descriptorSha256 to release)), releaseAuthority, "customer", 1)
+            withTimeout(5_000) { while (live == null) kotlinx.coroutines.delay(10) }
+            return this
         }
     }
 

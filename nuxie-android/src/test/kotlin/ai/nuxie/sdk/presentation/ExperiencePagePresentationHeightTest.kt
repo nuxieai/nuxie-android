@@ -477,6 +477,31 @@ class ExperiencePagePresentationHeightTest {
         }
     }
 
+    @Test fun `system Back on a sheet whose page has two Screens goes back within that page`() = runBlocking {
+        withPushPages { a, p, content ->
+            a.start(); a.frame(); p.start(); p.frame()
+            val nested = ActivityPage(content.copy(isPushPage = false, layerContentHeight = AtomicReference(),
+                screenLifecycle = ExperienceScreenLifecycle(), pageHistory = listOf("a", "b")), lower = p)
+            try {
+                nested.start(); nested.frame(); nested.reduceMotion()
+                assertTrue("The press is a Back within the sheet's page", nested.decideSystemBack())
+                assertEquals("and closes nothing", 3, nested.layerCount())
+            } finally { nested.close() }
+        }
+    }
+
+    @Test fun `system Back on a root page with two Screens goes back within it when the Experience isn't dismissible`() = runBlocking {
+        withPushPages { a, p, _ ->
+            a.start(); a.frame(); p.start(); p.frame()
+            p.pop()
+            p.settle { a.layerCount() == 1 }
+            a.setPageHistory(listOf("b", "a"))
+            a.notDismissible()
+            assertTrue("A Back within the page closes nothing, so it needs no dismissal", a.decideSystemBack())
+            assertFalse(a.finishing)
+        }
+    }
+
     @Test fun `a held checkpoint stops authored time and keeps the page drawn`() = runBlocking {
         withPushPages { a, p, _ ->
             a.start(); a.frame(); p.start(); p.frame(); p.frame()
@@ -822,6 +847,16 @@ class ExperiencePagePresentationHeightTest {
         /** The system Back button, as the Activity hears it. */
         @Suppress("DEPRECATION")
         fun pressBack() { activity.onBackPressed(); idle() }
+        /** The Activity's press table, asked inside a turn as the service asks it (decision 170). */
+        suspend fun decideSystemBack(): Boolean = activityCall {
+            prepared.moves.run { (current as PresentationScreenHandle).decideSystemBack() }
+        }
+        fun setPageHistory(history: List<String>) {
+            prepared = prepared.copy(pageHistory = history)
+            set(current, "prepared", prepared)
+        }
+        fun notDismissible() = set(activity, "dismissible", false)
+        val finishing: Boolean get() = activity.isFinishing
 
         /** Material's own state path, with its callbacks: what a drag or TalkBack's dismiss action selects. */
         fun sheetState(name: String) {

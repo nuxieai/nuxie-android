@@ -314,6 +314,17 @@ internal class JourneyService(
             val result: CompletableDeferred<PresentationLifecycleResult>,
         ) : Command {
             override val done: CompletableDeferred<Unit>? = null
+            /** Set by whichever handles a recorded report first: the channel or a window (section 3a). */
+            val claimed = AtomicBoolean(false)
+        }
+        /** System Back on a Screen this run presented (decision 170). */
+        data class SystemBack(
+            val runId: String,
+            val release: AuthenticatedJourneyRelease,
+            val executionFenceToken: JourneyExecutionFenceToken,
+            val identityScope: IdentityScope,
+        ) : Command {
+            override val done: CompletableDeferred<Unit>? = null
         }
         data class ContinueExecution(
             val runId: String,
@@ -367,6 +378,9 @@ internal class JourneyService(
             override val done: CompletableDeferred<Unit>,
         ) : Command
     }
+
+    /** A recorded report the channel reached after a window had handled it. */
+    private object ClaimedByWindow
 
     private val commands = Channel<Command>(Channel.UNLIMITED)
     private val profileGeneration = AtomicLong(0)
@@ -439,6 +453,10 @@ internal class JourneyService(
     private val foregroundReceiptResetCustomers = mutableSetOf<String>()
     private val directlyRoutedRunByEventId = ConcurrentHashMap<String, String>()
     private val presentingRunIds = ConcurrentHashMap<String, Int>()
+    /** Reports admitted outside a window, by run, until the channel or a window claims them. Guarded by [presentingRunIds]. */
+    private val recordedReports = mutableMapOf<String, ArrayDeque<Command.PresentationLifecycle>>()
+    /** Runs whose opening window is still handling recorded reports; their new reports join that line. */
+    private val drainingRunIds = mutableSetOf<String>()
     private val activePresentedRunIds = ConcurrentHashMap<String, Unit>()
     private val pendingPresentationPurchasePlacements = mutableMapOf<String, String>()
     private data class CommerceExecutionKey(val runId: String, val owner: String, val generation: Long)
@@ -480,7 +498,8 @@ internal class JourneyService(
                     }
                     is Command.PresentationBatch -> handlePresentationBatchNow(command)
                     is Command.PresentationLifecycle ->
-                        handlePresentationLifecycleNow(command)
+                        if (claimRecordedReport(command)) handlePresentationLifecycleNow(command) else ClaimedByWindow
+                    is Command.SystemBack -> systemBackNow(command)
                     is Command.ContinueExecution -> continueExecutionNow(command)
                     is Command.FinalizePresentationAbandonment ->
                         finalizePresentationAbandonmentNow(command)
@@ -509,7 +528,7 @@ internal class JourneyService(
                         ?: JourneyEmissionBatchResult.REJECTED)
                 }
             }
-            if (command is Command.PresentationLifecycle) {
+            if (command is Command.PresentationLifecycle && result.getOrNull() !== ClaimedByWindow) {
                 command.result.complete(
                     result.getOrNull() as? PresentationLifecycleResult
                         ?: PresentationLifecycleResult.REJECTED,
@@ -657,12 +676,19 @@ internal class JourneyService(
         if (coroutineContext[WorkerContext]?.owner === this) {
             return handlePresentationLifecycleNow(command)
         }
-        if (presentingRunIds.containsKey(runId)) {
+        // Admission shares the window lock (section 3a). Outside a window the report is recorded for its run as
+        // well as queued, so a window the worker opens before reaching it on the channel handles it in place.
+        val nested = synchronized(presentingRunIds) {
+            (presentingRunIds.containsKey(runId) && runId !in drainingRunIds).also { open ->
+                if (!open) recordedReports.getOrPut(runId) { ArrayDeque() }.addLast(command)
+            }
+        }
+        if (nested) {
             return presentationCallbackMutex.withLock {
                 handlePresentationLifecycleNow(command, deferContinuation = true)
             }
         }
-        if (commands.trySend(command).isFailure) {
+        if (commands.trySend(command).isFailure && claimRecordedReport(command)) {
             return PresentationLifecycleResult.REJECTED
         }
         return result.await()
@@ -2502,22 +2528,140 @@ internal class JourneyService(
      * never queued on this worker behind the route that is waiting for them.
      */
     private suspend inline fun <T> withNestedPresentationCallbacks(runId: String, nested: Boolean, block: () -> T): T {
-        if (nested) beginPresentationCallbacks(runId)
         try {
+            if (nested) beginPresentationCallbacks(runId)
             return block()
         } finally {
             if (nested) endPresentationCallbacks(runId)
         }
     }
 
-    private fun beginPresentationCallbacks(runId: String) {
-        synchronized(presentingRunIds) { presentingRunIds[runId] = (presentingRunIds[runId] ?: 0) + 1 }
+    /**
+     * Opens a window on the worker. Reports for the run that were admitted before it opened, and so queued behind
+     * the command opening it, are handled here first, as nested reports are (section 3a): the work this window
+     * waits on may be waiting for one of them.
+     */
+    private suspend fun beginPresentationCallbacks(runId: String) {
+        val draining = synchronized(presentingRunIds) {
+            presentingRunIds[runId] = (presentingRunIds[runId] ?: 0) + 1
+            (recordedReports[runId]?.isNotEmpty() == true).also { if (it) drainingRunIds += runId }
+        }
+        if (!draining) return
+        try {
+            while (true) {
+                val report = synchronized(presentingRunIds) {
+                    recordedReports[runId]?.removeFirstOrNull().also {
+                        if (it == null) { recordedReports.remove(runId); drainingRunIds -= runId }
+                    }
+                } ?: return
+                if (!report.claimed.compareAndSet(false, true)) continue
+                report.result.complete(try {
+                    presentationCallbackMutex.withLock { handlePresentationLifecycleNow(report, deferContinuation = true) }
+                } catch (cancelled: CancellationException) {
+                    report.result.complete(PresentationLifecycleResult.REJECTED)
+                    throw cancelled
+                } catch (_: Exception) {
+                    PresentationLifecycleResult.REJECTED
+                })
+            }
+        } finally {
+            synchronized(presentingRunIds) { drainingRunIds -= runId }
+        }
+    }
+
+    /** The channel or a failed send claims [report], unless a window already did. */
+    private fun claimRecordedReport(report: Command.PresentationLifecycle): Boolean = synchronized(presentingRunIds) {
+        recordedReports[report.runId]?.let { reports ->
+            reports.removeAll { it === report }
+            if (reports.isEmpty()) recordedReports.remove(report.runId)
+        }
+        report.claimed.compareAndSet(false, true)
     }
 
     private fun endPresentationCallbacks(runId: String) {
         synchronized(presentingRunIds) {
             val depth = presentingRunIds[runId] ?: return
             if (depth == 1) presentingRunIds.remove(runId) else presentingRunIds[runId] = depth - 1
+        }
+    }
+
+    /**
+     * System Back by position (decision 170): one turn of the Experience's queue holds the press table, the plan
+     * and the move. Back moves no graph step; the move's own lifecycle reports run nested and may route the run.
+     */
+    private suspend fun systemBackNow(command: Command.SystemBack) {
+        val target = journal ?: return
+        val executionToken = command.executionFenceToken
+        val identityScope = command.identityScope
+        val release = command.release
+        val current: () -> Boolean = {
+            isExecutionCurrent(executionToken, target) && identity.isCurrentScope(identityScope)
+        }
+        if (!current() || identityScope.distinctId != target.distinctId) return
+        val run = target.runs().firstOrNull {
+            it.id == command.runId && it.completion == null && matches(release, it.reference)
+        } ?: return
+        if (!activePresentedRunIds.containsKey(run.id)) return
+        val presentation = presenter ?: return
+        val executionSnapshot = run.executionSnapshot ?: return
+        val owner = JourneyPresentationOwner(run.journeyId, target.distinctId)
+        var moved: JourneyRun? = null
+        var backTo: String? = null
+        var presented: PresentedScreen? = null
+        // The turn may wait behind a native close whose checkpoint calls this Journey, and the move reports to it.
+        withNestedPresentationCallbacks(run.id, true) {
+            presentation.systemBack(owner) { screenId ->
+                val canPresent = { foreground.get() && current() }
+                val latest = target.runs().firstOrNull { it.id == run.id && it.completion == null }
+                // Refused before anything changes: the move would decline, and the run stays as it is.
+                if (latest == null || !canPresent()) {
+                    presentation.cancelBackNavigation(owner)
+                    return@systemBack
+                }
+                moved = latest
+                backTo = screenId
+                presented = presentScreen(
+                    currentRun = latest,
+                    screenId = screenId,
+                    release = release,
+                    executionSnapshot = executionSnapshot,
+                    executionToken = executionToken,
+                    identityScope = identityScope,
+                    target = target,
+                    reservation = presentation.reserve(target.distinctId),
+                    canPresent = canPresent,
+                )
+            }
+        }
+        // From here every result is an authored Back's, handled where an authored Back handles it: after the move's
+        // turn and outside the window.
+        val screenId = backTo ?: return
+        val shown = presented ?: run {
+            presentation.cancelBackNavigation(owner)
+            finish(checkNotNull(moved), "abandoned", release.leg, target, executionToken, identityScope)
+            return
+        }
+        when (shown.result) {
+            JourneyPresentationResult.Shown -> activePresentedRunIds[shown.run.id] = Unit
+            JourneyPresentationResult.Completed -> activePresentedRunIds.remove(shown.run.id)
+            JourneyPresentationResult.ProductsUnavailable -> {
+                presentation.cancelBackNavigation(owner)
+                val handled = handlePresentationProductsUnavailable(
+                    runId = shown.run.id,
+                    screenId = screenId,
+                    release = release,
+                    executionFenceToken = executionToken,
+                )
+                if (handled == PresentationLifecycleResult.REJECTED) {
+                    finish(shown.run, "abandoned", release.leg, target, executionToken, identityScope)
+                }
+            }
+            JourneyPresentationResult.Declined,
+            JourneyPresentationResult.Failed,
+            -> {
+                presentation.cancelBackNavigation(owner)
+                finish(shown.run, "abandoned", release.leg, target, executionToken, identityScope)
+            }
         }
     }
 
@@ -2539,8 +2683,8 @@ internal class JourneyService(
             return null
         }
         val runId = run.id
-        beginPresentationCallbacks(runId)
         val result = try {
+            beginPresentationCallbacks(runId)
             presentation.present(
                 JourneyPresentationRequest(
                     fences = JourneyPresentationFences(identity, identityScope, executionFence, executionToken),
@@ -2612,6 +2756,9 @@ internal class JourneyService(
                                 done = done,
                             )
                         }
+                    },
+                    onSystemBack = {
+                        commands.trySend(Command.SystemBack(runId, release, executionToken, identityScope))
                     },
                 ),
             )
