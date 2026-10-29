@@ -308,7 +308,7 @@ class PublishedVideoDeviceTest {
                 assertTrue("Revoked mounted video resumes red and blue frames with captions",
                     resumedCaption && resumedRed && resumedBlue)
             }
-            instrumentation.runOnMainSync { mounted.setVisible(false) }
+            instrumentation.runOnMainSync { mounted.setPresented(false) }
             Thread.sleep(250)
             instrumentation.runOnMainSync { assertTrue(labels(content).none { it.visibility == View.VISIBLE && it.text.isNotEmpty() }) }
             if (sharedCapacity) {
@@ -326,7 +326,7 @@ class PublishedVideoDeviceTest {
                 } finally {
                     pool.remove(otherOwner)
                 }
-                instrumentation.runOnMainSync { mounted.setVisible(true) }
+                instrumentation.runOnMainSync { mounted.setPresented(true) }
                 val deadline = SystemClock.elapsedRealtime() + 8_000
                 var red = false
                 var blue = false
@@ -340,9 +340,9 @@ class PublishedVideoDeviceTest {
                 setBoolean("paused", true)
                 setNumber("current-time", 1.2)
                 awaitStablePausedFrame(false, "Paused frame before hiding")
-                instrumentation.runOnMainSync { mounted.setVisible(false) }
+                instrumentation.runOnMainSync { mounted.setPresented(false) }
                 Thread.sleep(250)
-                instrumentation.runOnMainSync { mounted.setVisible(true) }
+                instrumentation.runOnMainSync { mounted.setPresented(true) }
                 awaitStablePausedFrame(false, "Paused frame after reopening decoder")
                 Thread.sleep(1_200)
                 assertTrue("Hidden decoder retirement preserves paused intent and position", pixelMatches(false))

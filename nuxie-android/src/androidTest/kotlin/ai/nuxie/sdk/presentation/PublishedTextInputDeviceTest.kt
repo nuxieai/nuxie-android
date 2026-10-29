@@ -2625,7 +2625,7 @@ class PublishedTextInputDeviceTest {
                     override fun onFailure(error: ExperiencePresentationException) { failure.set(error) }
                 }, failure::set).also { mounted = it }
                 // Hold rendering before mount: native controls exist, but no presented capture can exist.
-                owner.setVisible(false)
+                owner.setPresented(false)
                 content = owner.mount() as android.view.ViewGroup
                 // A visible native child is the independent oracle for container-level exclusion.
                 probe = android.widget.EditText(activity).apply { hint = "Publication probe" }
@@ -2639,7 +2639,7 @@ class PublishedTextInputDeviceTest {
                 return
             }
             assertFalse("A native editor must not enter accessibility before its authored scene", nodes().any { it.isEditable })
-            instrumentation.runOnMainSync { content.removeView(probe); checkNotNull(mounted).setVisible(true) }
+            instrumentation.runOnMainSync { content.removeView(probe); checkNotNull(mounted).setPresented(true) }
             val deadline = SystemClock.uptimeMillis() + 10_000
             var published = nodes()
             while (SystemClock.uptimeMillis() < deadline &&
