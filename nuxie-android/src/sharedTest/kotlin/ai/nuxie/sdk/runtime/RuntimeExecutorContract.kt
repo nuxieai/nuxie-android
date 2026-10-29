@@ -23,7 +23,7 @@ abstract class RuntimeExecutorContract : RuntimeLaneContract() {
     }
 
     @Test
-    fun `JNI releases accepted contexts once and clears foreign callback exceptions`() {
+    fun jniReleasesAcceptedContextsOnceAndClearsForeignCallbackExceptions() {
         val executor = NuxieRuntimeBridge.nativeExecutorNew()
         assertTrue(executor != 0L)
         val releases = java.util.concurrent.atomic.AtomicInteger()
