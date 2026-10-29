@@ -248,8 +248,9 @@ class ExperienceLayerHostNavigationDeviceTest {
             val a = hostedLiveMoveFixture(directory).copy(pageHistory = listOf("A"))
             Harness(a).use { active ->
                 val surface = active.mounted().surface
+                // The step runs in the Experience's queue, as the service runs a Journey move, so the press waits its turn.
                 val forward = async(Dispatchers.Default) {
-                    active.navigate(a.copy(screenId = "B", artboardName = "B", transition = pair,
+                    active.move(a.copy(screenId = "B", artboardName = "B", transition = pair,
                     pageHistory = listOf("A", "B"),
                         retainedViewModel = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle()))
                 }
@@ -300,8 +301,9 @@ class ExperienceLayerHostNavigationDeviceTest {
                 val middleId = harness.id
                 val top = push("top", listOf(rootId, middleId))
                 val surface = harness.mounted().surface
+                // In the Experience's queue, as the service runs a Journey move: both presses wait their turn behind it.
                 val forward = async(Dispatchers.Default) {
-                    harness.navigate(top.copy(opensLayer = false, isPushPage = false,
+                    harness.move(top.copy(opensLayer = false, isPushPage = false,
                         screenId = "B", artboardName = "B", transition = pair,
                     pageHistory = listOf("A", "B"),
                         retainedViewModel = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle()))
