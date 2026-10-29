@@ -1,5 +1,7 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.LogLevel
+import ai.nuxie.sdk.logging.NuxieLog
 import ai.nuxie.sdk.runtime.*
 import ai.nuxie.sdk.experiences.*
 import ai.nuxie.sdk.network.HttpTransport
@@ -90,6 +92,8 @@ class ExperienceLayerHostNavigationDeviceTest {
         val revealedPhases = CopyOnWriteArrayList<String>()
         val retirements = java.util.concurrent.ConcurrentHashMap<String, CountDownLatch>()
         val outcomes = java.util.concurrent.ConcurrentHashMap<String, CloseReason>()
+        /** Every dismissal the registry reports, in order: what the Journey hears. */
+        val dismissals = CopyOnWriteArrayList<Pair<String, CloseReason>>()
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         lateinit var activity: Activity
             private set
@@ -147,7 +151,8 @@ class ExperienceLayerHostNavigationDeviceTest {
                         finally { ready.countDown() }
                     }
                 },
-                onFailure = { failures.compareAndSet(null, it); ready.countDown() }, onDismissed = { retired.countDown() },
+                onFailure = { failures.compareAndSet(null, it); ready.countDown() },
+                onDismissed = { reason -> dismissals += id to reason; retired.countDown() },
                 onOutcome = { outcomes[id] = it }, onRuntimeStep = { outcome, _, _, _, _ ->
                     outcome.events.forEach { events += checkNotNull(prepared.screenId) to it.name }
                 })
@@ -157,7 +162,7 @@ class ExperienceLayerHostNavigationDeviceTest {
             val screen = checkNotNull(PresentationRegistry.currentScreen(id))
             return screen.javaClass.getDeclaredField("mounted").apply { isAccessible = true }.get(screen) as ExperienceMountedScreen
         }
-        suspend fun navigate(prepared: PreparedPresentation): ExperienceSurfaceHost {
+        suspend fun navigate(prepared: PreparedPresentation, retire: Boolean = false): ExperienceSurfaceHost {
             val next = UUID.randomUUID().toString()
             val previous = id
             val source = checkNotNull(PresentationRegistry.currentScreen(previous))
@@ -169,8 +174,13 @@ class ExperienceLayerHostNavigationDeviceTest {
             navigation.activate()
             assertTrue("Incoming row activation", ready.await(15, TimeUnit.SECONDS))
             checkFailure()
+            // As the service does: a move holds its slot until the Screen it replaced has shut down (section 2).
+            if (retire) withTimeout(15_000) { navigation.awaitRetired() }
             return mounted().surface
         }
+        /** A Journey move through the Experience's one queue, the way the service runs one (pr1-port section 2). */
+        suspend fun move(prepared: PreparedPresentation): ExperienceSurfaceHost =
+            initial.moves.run { navigate(prepared, retire = true) }
         /** A rebuild Android forces closes the Experience, and the rebuilt Activity finishes (decision 174). */
         fun rebuild() {
             val previous = activity
@@ -519,6 +529,382 @@ class ExperienceLayerHostNavigationDeviceTest {
                 harness.checkFailure()
             }
         } finally { directory.deleteRecursively() }
+    }
+
+    // The page host's four device tests (pr1-port, "Tests": "Device tests for the queue, the live page under a
+    // sheet, Back across sheets, and a rebuild during a move run on the emulator through the pool's device lane").
+
+    /** One system Back press: when the Activity handed it on, when its turn came, and what the turn did. */
+    private class Press(val askedAt: Long) {
+        @Volatile var decidedAt = 0L
+        @Volatile var wentBack = false
+        @Volatile var closed = false
+        val done = CompletableDeferred<Unit>()
+    }
+
+    /**
+     * The move queue (pr1-port section 2, "One move queue"). The System Back table: "In-page step ... Queued. It runs
+     * on the Screen the move lands on". Section 1: "During a step: a close, a dismissal, a Back or a finished sheet
+     * drag waits for the step to land, then acts on the Screen it landed on". S1c: what waits completes as closed.
+     *
+     * A platform Back during A to B is queued: its turn starts after the step's landing frame, decides on B and
+     * plays B to A. Without the queue it would decide on A, the page's first Screen, and close the Experience
+     * mid-step. Then a close asked during A to B lets the step land and closes B, and a press waiting behind the
+     * step completes as closed. The step log's frame times and System.nanoTime read the same monotonic clock.
+     */
+    @Test fun aBackDuringAStepWaitsAndRunsOnTheLandedScreenAndACloseLetsTheStepLand() { withStepLog { runBlocking {
+        val directory = directory()
+        try {
+            val queue = ExperienceMoveQueue()
+            val harnessRef = AtomicReference<Harness>()
+            val presses = CopyOnWriteArrayList<Press>()
+            lateinit var a: PreparedPresentation
+            a = hostedLiveMoveFixture(directory).copy(pageHistory = listOf("A"), moves = queue, systemBack = {
+                // The service's systemBackFromJourney: one turn holds the press table, then Back 1 by position.
+                val press = Press(System.nanoTime()).also { presses += it }
+                val harness = harnessRef.get()
+                withContext<Unit>(Dispatchers.Default) {
+                    try {
+                        queue.run<Unit> {
+                            press.decidedAt = System.nanoTime()
+                            if (checkNotNull(PresentationRegistry.currentScreen(harness.id)).decideSystemBack()) {
+                                press.wentBack = true
+                                harness.navigate(a.copy(transition = pair, isBack = true), retire = true)
+                            }
+                        }
+                    } catch (closed: ExperienceMoveQueue.Closed) {
+                        press.closed = true
+                    } catch (error: Throwable) {
+                        harness.failures.compareAndSet(null, error)
+                    } finally { press.done.complete(Unit) }
+                }
+            })
+            fun toB() = a.copy(screenId = "B", artboardName = "B", transition = pair, pageHistory = listOf("A", "B"),
+                retainedViewModel = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle())
+            Harness(a).use { harness ->
+                harnessRef.set(harness)
+                val surface = harness.mounted().surface
+                val before = lastStepId()
+                val forward = async(Dispatchers.Default) { harness.move(toB()) }
+                val started = awaitStep(before) { it.starts("A", "B", back = false) }
+                pressBack(harness.activity)
+                eventually { presses.size == 1 }
+                assertSame(surface, withTimeout(15_000) { forward.await() })
+                withTimeout(15_000) { presses[0].done.await() }
+                harness.checkFailure()
+                val landed = awaitStep(before) { it.kind == "land" && it.id == started.id }
+                val back = awaitStep(started.id) { it.starts("B", "A", back = true) }
+                awaitStep(started.id) { it.kind == "land" && it.id == back.id }
+                val press = presses[0]
+                assertTrue("The press came during the step: $started, asked at ${press.askedAt}, $landed",
+                    press.askedAt > started.frameNanos && press.askedAt < landed.frameNanos)
+                assertTrue("Its turn came only after the step landed: ${press.decidedAt}, $landed", press.decidedAt > landed.frameNanos)
+                assertTrue("It decided on B, the Screen the step landed on, and went back", press.wentBack)
+                assertTrue("The Back step started after the landing: $back, $landed", back.frameNanos > landed.frameNanos)
+                assertEquals("A", PresentationRegistry.resolve(harness.id)?.screenId)
+                assertEquals(listOf("A"), surface.layerOperation { it.mountedScreenIdsOnLane() })
+                assertFalse(harness.activity.isFinishing)
+
+                val again = lastStepId()
+                val forward2 = async(Dispatchers.Default) { harness.move(toB()) }
+                val second = awaitStep(again) { it.starts("A", "B", back = false) }
+                pressBack(harness.activity)
+                eventually { presses.size == 2 && queue.waitingCount() == 1 }
+                val askedAt = System.nanoTime()
+                // The service's dismiss: the close revokes the queue, lets the started step land, then closes.
+                val close = async(Dispatchers.Default) {
+                    queue.closeAfterLanding()
+                    val closedAt = System.nanoTime()
+                    val landedOn = harness.id
+                    val screen = PresentationRegistry.resolve(landedOn)?.screenId
+                    withContext(Dispatchers.Main) { PresentationRegistry.dismiss(landedOn, CloseReason.UserDismissed) }
+                    Triple(closedAt, landedOn, screen)
+                }
+                val (closedAt, landedOn, screen) = withTimeout(15_000) { close.await() }
+                assertSame(surface, withTimeout(15_000) { forward2.await() })
+                val secondLanded = awaitStep(again) { it.kind == "land" && it.id == second.id }
+                assertTrue("The close came during the step and waited for its landing: asked $askedAt, closed $closedAt, $secondLanded",
+                    askedAt < secondLanded.frameNanos && closedAt > secondLanded.frameNanos)
+                assertEquals("The close acts on the Screen the step landed on", "B", screen)
+                withTimeout(15_000) { presses[1].done.await() }
+                assertTrue("The press waiting behind the step completes as closed", presses[1].closed)
+                assertFalse(presses[1].wentBack)
+                eventually { harness.activity.isFinishing && harness.outcomes[landedOn] != null }
+                assertEquals(CloseReason.UserDismissed, harness.outcomes[landedOn])
+                assertEquals("Nothing moved after the close", emptyList<StepLine>(), stepLines(second.id))
+            }
+        } finally { directory.deleteRecursively() }
+    } } }
+
+    /**
+     * The live page under a sheet (pr1-port section 3): "A page under a sheet or modal stays active with input off.
+     * It keeps playing and drawing, and comes back announced, without replaying its entrance." Before PR 1 the page
+     * played its exit, was hidden and stopped, and replayed its entrance on return: its phase would leave active,
+     * its clock would stand still under the sheet, and its appearances would grow.
+     */
+    @Test fun aPageUnderASheetKeepsPlayingWithInputOffAndReturnsWithoutItsEntrance() { runBlocking {
+        val directory = directory()
+        try {
+            val a = hostedLiveMoveFixture(directory).copy(pageHistory = listOf("A"))
+            Harness(a).use { harness ->
+                val stack = CopyOnWriteArrayList(listOf(harness.id))
+                val base = harness.mounted().surface
+                until { base.row("A").phase() == "active" }
+                assertTrue(onMain { base.isEnabled })
+                val appearances = base.row("A").appearances()
+                val phases = CopyOnWriteArrayList<String>()
+                val sampler = launch(Dispatchers.Default) { while (isActive) { phases += base.row("A").phase(); delay(5) } }
+                val sheet = harness.move(harness.sheet(a, "B", stack)).also { stack += harness.id }
+                assertNotSame(base, sheet)
+                until("Input is off under the sheet") { !onMain { base.isEnabled } }
+                val covered = base.lastSteppedFrame()
+                until("The page under the sheet keeps stepping its player") { base.lastSteppedFrame() - covered >= 300_000_000L }
+                assertTrue(base.isRunning())
+                assertFalse("Input stays off while the sheet is up", onMain { base.isEnabled })
+                assertTrue(checkNotNull(PresentationRegistry.currentScreen(harness.id)).dismissLayerFromJourney())
+                assertEquals(stack.single(), harness.id)
+                until("Input returns") { onMain { base.isEnabled } }
+                val revealed = base.lastSteppedFrame()
+                until("The page keeps playing after the sheet") { base.lastSteppedFrame() > revealed }
+                sampler.cancelAndJoin()
+                assertTrue("Sampled throughout: ${phases.size}", phases.size > 20)
+                assertEquals("The page stayed active throughout", setOf("active"), phases.toSet())
+                assertEquals("No entrance replayed", appearances, base.row("A").appearances(), 0.0)
+                assertSame(base, harness.mounted().surface)
+            }
+        } finally { directory.deleteRecursively() }
+    } }
+
+    private class Sample(val at: Long, val top: Map<String, NuxieViewModelScalarValue>?,
+        val middle: Map<String, NuxieViewModelScalarValue>?, val middleFrame: Long?,
+        val base: Map<String, NuxieViewModelScalarValue>, val baseFrame: Long)
+
+    /**
+     * Back across sheets (pr1-port section 3): "Back across several sheets plays each sheet's exit, with each page
+     * beneath still live." Each Screen gets a 400 ms authored exit whose done event never comes, so each exit runs
+     * to its watchdog and the order can be read. Before PR 1 only the top sheet played its exit: the middle sheet's
+     * phase would never read exiting. The base page under both stays active with its clock running.
+     */
+    @Test fun backAcrossTwoSheetsPlaysEachSheetsExitWithThePagesBeneathLive() { runBlocking {
+        val directory = directory()
+        try {
+            val fixture = hostedLiveMoveFixture(directory)
+            val a = fixture.copy(pageHistory = listOf("A"), descriptor = withScreenExits(checkNotNull(fixture.descriptor), 400))
+            Harness(a).use { harness ->
+                val baseId = harness.id
+                val stack = CopyOnWriteArrayList(listOf(baseId))
+                val base = harness.mounted().surface
+                until { base.row("A").phase() == "active" }
+                val appearances = base.row("A").appearances()
+                val middle = harness.move(harness.sheet(a, "B", stack)).also { stack += harness.id }
+                until { middle.row("B").phase() == "active" }
+                val top = harness.move(harness.sheet(a, "A", stack)).also { stack += harness.id }
+                until { top.row("A").phase() == "active" }
+                val samples = CopyOnWriteArrayList<Sample>()
+                val sampler = launch(Dispatchers.Default) {
+                    while (isActive) {
+                        samples += Sample(System.nanoTime(), top.rowOrNull("A"), middle.rowOrNull("B"),
+                            withTimeoutOrNull(100) { runCatching { middle.lastSteppedFrame() }.getOrNull() },
+                            base.row("A"), base.lastSteppedFrame())
+                        delay(5)
+                    }
+                }
+                assertTrue(checkNotNull(PresentationRegistry.currentScreen(harness.id)).dismissPagesFromJourney(2))
+                sampler.cancelAndJoin()
+                val topExit = samples.indexOfFirst { it.top?.phase() == "exiting" }
+                val middleExit = samples.indexOfFirst { it.middle?.phase() == "exiting" }
+                assertTrue("The top sheet plays its exit", topExit >= 0)
+                assertEquals("dismissed", samples[topExit].top!!.exitReason())
+                assertTrue("Then the middle sheet plays its own exit: top $topExit, middle $middleExit", middleExit > topExit)
+                assertEquals("dismissed", samples[middleExit].middle!!.exitReason())
+                assertTrue("The top's exit ran to its end before the middle's began",
+                    samples[middleExit].at - samples[topExit].at >= 400_000_000L)
+                val drawn = samples.filter { it.middle?.phase() == "exiting" }.mapNotNull { it.middleFrame }
+                assertTrue("The middle page stays live through its exit: $drawn",
+                    (drawn.maxOrNull() ?: 0L) - (drawn.minOrNull() ?: 0L) >= 200_000_000L)
+                assertEquals("The base page stays active", setOf("active"), samples.map { it.base.phase() }.toSet())
+                assertTrue("No entrance replayed", samples.all { it.base.appearances() == appearances })
+                assertTrue("The base page's clock runs through the close",
+                    samples.last().baseFrame > samples[middleExit].baseFrame)
+                assertEquals(listOf(baseId), stack.toList())
+                assertEquals(baseId, harness.id)
+                assertSame(base, harness.mounted().surface)
+                until("Input returns to the base page") { onMain { base.isEnabled } }
+                assertFalse(harness.activity.isFinishing)
+            }
+        } finally { directory.deleteRecursively() }
+    } }
+
+    /**
+     * A rebuild during a move (pr1-port, "A rebuild closes the Experience", decision 174): "a rebuild during an
+     * in-page step after its first batch: the same [the Experience closes, one close fact with reason "host", the
+     * Journey hears one dismissal, and the rebuilt Activity finishes without attaching], and a Journey move queued
+     * behind it gets the closed outcome", and "none of them leaves a slot held or a span open". The onDestroy table:
+     * "In-page step ... The move ends as closed. Nothing lands".
+     */
+    @Test fun aRebuildDuringAStepClosesTheExperienceAndTheQueuedMoveGetsTheClosedOutcome() { withStepLog { runBlocking {
+        val directory = directory()
+        try {
+            val a = hostedLiveMoveFixture(directory).copy(pageHistory = listOf("A"))
+            Harness(a).use { harness ->
+                val id = harness.id
+                val before = lastStepId()
+                val forward = async(Dispatchers.Default) {
+                    runCatching { harness.move(a.copy(screenId = "B", artboardName = "B", transition = pair,
+                        pageHistory = listOf("A", "B"), retainedViewModel = AtomicReference(),
+                        screenLifecycle = ExperienceScreenLifecycle())) }
+                }
+                val started = awaitStep(before) { it.starts("A", "B", back = false) }
+                val queued = async(Dispatchers.Default) { runCatching { harness.move(a.copy(transition = pair, isBack = true)) } }
+                eventually { a.moves.waitingCount() == 1 }
+                harness.rebuild()
+                val queuedResult = withTimeout(15_000) { queued.await() }
+                assertTrue("The queued move gets the closed outcome: $queuedResult",
+                    queuedResult.exceptionOrNull() is ExperienceMoveQueue.Closed)
+                val forwardResult = withTimeout(30_000) { forward.await() }
+                assertTrue("The started step ends without landing: $forwardResult", forwardResult.isFailure)
+                assertFalse("It ended, rather than hanging until the harness gave up: $forwardResult",
+                    forwardResult.exceptionOrNull() is TimeoutCancellationException)
+                assertEquals("No Screen was landed on", id, harness.id)
+                assertEquals("Nothing lands", emptyList<StepLine>(), stepLines(before).filter { it.kind == "land" })
+                assertTrue(stepLines(before).any { it.id == started.id })
+                assertFalse("No slot stays held", a.moves.isBusy)
+                assertTrue(a.moves.isRevoked)
+                assertEquals("No span stays open", 0, a.moves.authoredTime.openSpans())
+                assertEquals(CloseReason.HostDismissed, harness.outcomes[id])
+                assertEquals("The Journey hears one dismissal", listOf(id to CloseReason.HostDismissed), harness.dismissals.toList())
+                assertNull(PresentationRegistry.currentScreen(id))
+                val (finished, attached) = onMain {
+                    (harness.activity.isFinishing || harness.activity.isDestroyed) to harness.activity.privateField("currentScreen")
+                }
+                assertTrue("The rebuilt Activity finishes", finished)
+                assertNull("The rebuilt Activity never attaches", attached)
+            }
+        } finally { directory.deleteRecursively() }
+    } } }
+
+    /**
+     * A Journey sheet over the page on top. It closes the way the service closes layers: each page it closes is
+     * dismissed as a Journey navigation, then the page beneath is revealed and activated.
+     */
+    private fun Harness.sheet(base: PreparedPresentation, screenId: String, stack: MutableList<String>): PreparedPresentation {
+        val harness = this
+        return base.copy(screenId = screenId, artboardName = screenId, opensLayer = true,
+            shell = PresentationShell.Sheet(PresentationShell.Sheet.Detent.MEDIUM, true),
+            transition = Json.parseToJsonElement("""{"type":"modal","height":"medium"}""").jsonObject,
+            layerAncestors = stack.toList(), pageHistory = listOf(screenId),
+            retainedViewModel = AtomicReference(), screenLifecycle = ExperienceScreenLifecycle(),
+            closeLayer = { reveal ->
+                repeat(reveal.pagesToClose) {
+                    PresentationRegistry.dismiss(stack.removeAt(stack.lastIndex), CloseReason.JourneyNavigation)
+                }
+                reveal.prepare()
+                harness.id = stack.last()
+                reveal.activate()
+                true
+            })
+    }
+
+    /** The descriptor with an authored exit on every Screen: [durationMs] long, with a done event that never comes. */
+    private fun withScreenExits(descriptor: JsonObject, durationMs: Long): JsonObject {
+        val render = descriptor.getValue("render").jsonObject
+        val exit = buildJsonObject { put("completeEventName", "never"); put("durationMs", durationMs) }
+        val screens = render.getValue("screens").jsonArray.map { JsonObject(it.jsonObject + ("exit" to exit)) }
+        return JsonObject(descriptor + ("render" to JsonObject(render + ("screens" to JsonArray(screens)))))
+    }
+
+    /** System Back as the platform sends it: the framework's Back dispatch from API 33, the Activity's handler before. */
+    private fun pressBack(activity: Activity) {
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            assertTrue(instrumentation.uiAutomation.performGlobalAction(
+                android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK))
+        } else instrumentation.runOnMainSync {
+            @Suppress("DEPRECATION")
+            activity.onBackPressed()
+        }
+    }
+
+    /** One line of the debug step log (UNIV-5724): `step start|land id=<n> ... frameNanos=<Choreographer time>`. */
+    private class StepLine(val kind: String, val id: Long, val fields: Map<String, String>) {
+        val frameNanos: Long get() = fields.getValue("frameNanos").toLong()
+        fun starts(from: String, to: String, back: Boolean) = kind == "start" && fields["from"] == from &&
+            fields["to"] == to && fields["back"] == (if (back) "1" else "0")
+        override fun toString() = "step $kind id=$id $fields"
+    }
+    private val stepPattern = Regex("""step (start|land) (.+)""")
+
+    /** Debug builds write the step log at DEBUG. NuxieLog's default policy is WARN, with Screen ids redacted. */
+    private fun withStepLog(body: () -> Unit) {
+        NuxieLog.configure(LogLevel.DEBUG, redactSensitiveData = false)
+        try { body() } finally { NuxieLog.configure(LogLevel.WARN) }
+    }
+
+    /** This process's step log lines with an id above [after], as logcat holds them. */
+    private fun stepLines(after: Long): List<StepLine> {
+        val dump = instrumentation.uiAutomation.executeShellCommand(
+            "logcat -d -v raw --pid=${android.os.Process.myPid()} -s ${ExperienceStepLog.TAG}:D")
+        val text = android.os.ParcelFileDescriptor.AutoCloseInputStream(dump).bufferedReader().use { it.readText() }
+        return text.lineSequence().mapNotNull { line ->
+            val match = stepPattern.matchEntire(line.trim()) ?: return@mapNotNull null
+            val fields = match.groupValues[2].split(' ').mapNotNull { part ->
+                part.split('=', limit = 2).takeIf { it.size == 2 }?.let { it[0] to it[1] }
+            }.toMap()
+            StepLine(match.groupValues[1], fields.getValue("id").toLong(), fields)
+        }.filter { it.id > after }.toList()
+    }
+
+    private fun lastStepId(): Long = stepLines(0).maxOfOrNull { it.id } ?: 0L
+
+    /** Waits for the step log line [matches] picks, polling logcat. */
+    private fun awaitStep(after: Long, matches: (StepLine) -> Boolean): StepLine {
+        val deadline = SystemClock.uptimeMillis() + 15_000
+        var lines = stepLines(after)
+        while (lines.none(matches) && SystemClock.uptimeMillis() < deadline) {
+            SystemClock.sleep(25)
+            lines = stepLines(after)
+        }
+        return lines.firstOrNull(matches) ?: throw AssertionError("No such step log line after id $after: $lines")
+    }
+
+    private fun Any.privateField(name: String): Any? = javaClass.getDeclaredField(name).apply { isAccessible = true }.get(this)
+
+    private suspend fun <T> ExperienceSurfaceHost.onLane(work: (ExperienceSurfaceHost) -> T): T =
+        (privateField("lane") as NuxieRuntimeLane).call { work(this) }
+
+    /** A page row's lifecycle values, read on the surface's lane. */
+    private suspend fun ExperienceSurfaceHost.row(screenId: String): Map<String, NuxieViewModelScalarValue> =
+        onLane { (it.privateField("interactiveLayer") as ExperienceInteractivePage).lifecycleOnLane(screenId) }
+
+    /** The same, or null once the surface has gone. */
+    private suspend fun ExperienceSurfaceHost.rowOrNull(screenId: String): Map<String, NuxieViewModelScalarValue>? =
+        withTimeoutOrNull(100) { runCatching { row(screenId) }.getOrNull() }
+
+    /** The page clock as the surface runs it: the Choreographer time of the last frame that stepped this page's player. */
+    private suspend fun ExperienceSurfaceHost.lastSteppedFrame(): Long = onLane { it.privateField("lastFrameNanos") as Long }
+
+    private fun ExperienceSurfaceHost.isRunning(): Boolean = privateField("running") as Boolean
+
+    private fun Map<String, NuxieViewModelScalarValue>.text(key: String) = (getValue(key) as NuxieViewModelScalarValue.StringValue).value
+    private fun Map<String, NuxieViewModelScalarValue>.phase() = text("screen/phase")
+    private fun Map<String, NuxieViewModelScalarValue>.exitReason() = text("screen/exitReason")
+    private fun Map<String, NuxieViewModelScalarValue>.appearances() =
+        (getValue("screen/appearances") as NuxieViewModelScalarValue.NumberValue).value.toDouble()
+
+    private fun ExperienceMoveQueue.waitingCount(): Int =
+        synchronized(checkNotNull(privateField("lock"))) { (privateField("waiting") as Collection<*>).size }
+
+    private fun ExperienceAuthoredTime.openSpans(): Int =
+        synchronized(checkNotNull(privateField("lock"))) { privateField("running") as Int }
+
+    private fun <T> onMain(block: () -> T): T {
+        val result = AtomicReference<Any?>()
+        instrumentation.runOnMainSync { result.set(block()) }
+        @Suppress("UNCHECKED_CAST")
+        return result.get() as T
+    }
+
+    private suspend fun until(message: String = "Condition before deadline", condition: suspend () -> Boolean) {
+        assertTrue(message, withTimeoutOrNull(15_000) { while (!condition()) delay(20); true } == true)
     }
 
     private fun eventually(condition: () -> Boolean) {
