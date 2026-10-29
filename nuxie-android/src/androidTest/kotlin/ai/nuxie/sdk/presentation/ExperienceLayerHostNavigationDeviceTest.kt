@@ -640,7 +640,9 @@ class ExperienceLayerHostNavigationDeviceTest {
      * The live page under a sheet (pr1-port section 3): "A page under a sheet or modal stays active with input off.
      * It keeps playing and drawing, and comes back announced, without replaying its entrance." Before PR 1 the page
      * played its exit, was hidden and stopped, and replayed its entrance on return: its phase would leave active,
-     * its clock would stand still under the sheet, and its appearances would grow.
+     * its player and its texture would stand still under the sheet, and its appearances would grow. "Announced" is
+     * the content gate of "Covering a page": the covered page's content leaves the accessibility tree and comes
+     * back at the first semantic publication after the reveal returns input.
      */
     @Test fun aPageUnderASheetKeepsPlayingWithInputOffAndReturnsWithoutItsEntrance() { runBlocking {
         val directory = directory()
@@ -648,8 +650,13 @@ class ExperienceLayerHostNavigationDeviceTest {
             val a = hostedLiveMoveFixture(directory).copy(pageHistory = listOf("A"))
             Harness(a).use { harness ->
                 val stack = CopyOnWriteArrayList(listOf(harness.id))
-                val base = harness.mounted().surface
+                val mounted = harness.mounted()
+                val base = mounted.surface
+                val content = mounted.privateField("content") as View
                 until { base.row("A").phase() == "active" }
+                until("The page is in the accessibility tree before the sheet") {
+                    onMain { content.importantForAccessibility } == View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
+                }
                 assertTrue(onMain { base.isEnabled })
                 val appearances = base.row("A").appearances()
                 val phases = CopyOnWriteArrayList<String>()
@@ -657,13 +664,22 @@ class ExperienceLayerHostNavigationDeviceTest {
                 val sheet = harness.move(harness.sheet(a, "B", stack)).also { stack += harness.id }
                 assertNotSame(base, sheet)
                 until("Input is off under the sheet") { !onMain { base.isEnabled } }
+                assertEquals("The covered page leaves the accessibility tree",
+                    View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS, onMain { content.importantForAccessibility })
                 val covered = base.lastSteppedFrame()
+                val drawn = base.composedFrames()
                 until("The page under the sheet keeps stepping its player") { base.lastSteppedFrame() - covered >= 300_000_000L }
+                until("The page under the sheet keeps drawing: its texture takes new frames") { base.composedFrames() - drawn >= 10 }
                 assertTrue(base.isRunning())
                 assertFalse("Input stays off while the sheet is up", onMain { base.isEnabled })
+                assertEquals("Still out of the accessibility tree under the sheet",
+                    View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS, onMain { content.importantForAccessibility })
                 assertTrue(checkNotNull(PresentationRegistry.currentScreen(harness.id)).dismissLayerFromJourney())
                 assertEquals(stack.single(), harness.id)
                 until("Input returns") { onMain { base.isEnabled } }
+                until("The page comes back announced: its content returns to the accessibility tree") {
+                    onMain { content.importantForAccessibility } == View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
+                }
                 val revealed = base.lastSteppedFrame()
                 until("The page keeps playing after the sheet") { base.lastSteppedFrame() > revealed }
                 sampler.cancelAndJoin()
@@ -719,13 +735,18 @@ class ExperienceLayerHostNavigationDeviceTest {
                 assertEquals("dismissed", samples[middleExit].middle!!.exitReason())
                 assertTrue("The top's exit ran to its end before the middle's began",
                     samples[middleExit].at - samples[topExit].at >= 400_000_000L)
-                val drawn = samples.filter { it.middle?.phase() == "exiting" }.mapNotNull { it.middleFrame }
-                assertTrue("The middle page stays live through its exit: $drawn",
-                    (drawn.maxOrNull() ?: 0L) - (drawn.minOrNull() ?: 0L) >= 200_000_000L)
+                // Each page beneath stays live: its player keeps stepping through every exit above it.
+                fun List<Long>.span() = (maxOrNull() ?: 0L) - (minOrNull() ?: 0L)
+                val duringTop = samples.filter { it.top?.phase() == "exiting" }
+                val duringMiddle = samples.filter { it.middle?.phase() == "exiting" }
+                assertTrue("The middle page steps during the top's exit",
+                    duringTop.mapNotNull { it.middleFrame }.span() >= 200_000_000L)
+                assertTrue("The base page steps during the top's exit", duringTop.map { it.baseFrame }.span() >= 200_000_000L)
+                assertTrue("The middle page steps through its own exit",
+                    duringMiddle.mapNotNull { it.middleFrame }.span() >= 200_000_000L)
+                assertTrue("The base page steps during the middle's exit", duringMiddle.map { it.baseFrame }.span() >= 200_000_000L)
                 assertEquals("The base page stays active", setOf("active"), samples.map { it.base.phase() }.toSet())
                 assertTrue("No entrance replayed", samples.all { it.base.appearances() == appearances })
-                assertTrue("The base page's clock runs through the close",
-                    samples.last().baseFrame > samples[middleExit].baseFrame)
                 assertEquals(listOf(baseId), stack.toList())
                 assertEquals(baseId, harness.id)
                 assertSame(base, harness.mounted().surface)
@@ -774,11 +795,15 @@ class ExperienceLayerHostNavigationDeviceTest {
                 assertEquals(CloseReason.HostDismissed, harness.outcomes[id])
                 assertEquals("The Journey hears one dismissal", listOf(id to CloseReason.HostDismissed), harness.dismissals.toList())
                 assertNull(PresentationRegistry.currentScreen(id))
-                val (finished, attached) = onMain {
-                    (harness.activity.isFinishing || harness.activity.isDestroyed) to harness.activity.privateField("currentScreen")
+                // Teardown can't undo these two: the registry observation is set only by observing an id, and the
+                // content root only by mounting a Screen. Both stay unset when onCreate finishes before either.
+                val (finished, observed, root) = onMain {
+                    Triple(harness.activity.isFinishing || harness.activity.isDestroyed,
+                        harness.activity.privateField("registryObservation"), harness.activity.privateField("contentRoot"))
                 }
                 assertTrue("The rebuilt Activity finishes", finished)
-                assertNull("The rebuilt Activity never attaches", attached)
+                assertNull("The rebuilt Activity never reads the registry", observed)
+                assertNull("The rebuilt Activity never mounts a Screen", root)
             }
         } finally { directory.deleteRecursively() }
     } } }
@@ -883,6 +908,9 @@ class ExperienceLayerHostNavigationDeviceTest {
     private suspend fun ExperienceSurfaceHost.lastSteppedFrame(): Long = onLane { it.privateField("lastFrameNanos") as Long }
 
     private fun ExperienceSurfaceHost.isRunning(): Boolean = privateField("running") as Boolean
+
+    /** Frames the TextureView took from the renderer (onSurfaceTextureUpdated): what the page has drawn. */
+    private fun ExperienceSurfaceHost.composedFrames(): Long = (privateField("surfaceUpdates") as java.util.concurrent.atomic.AtomicLong).get()
 
     private fun Map<String, NuxieViewModelScalarValue>.text(key: String) = (getValue(key) as NuxieViewModelScalarValue.StringValue).value
     private fun Map<String, NuxieViewModelScalarValue>.phase() = text("screen/phase")
