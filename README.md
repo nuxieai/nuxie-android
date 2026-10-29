@@ -321,6 +321,46 @@ warnings and unchanged stderr. It is a logging qualification fixture, not an
 integration example or a complete release/device qualification. Build logs,
 R8 mapping and device evidence remain under `build/minified-native-logging-consumer`.
 
+### Magic Move step timing
+
+In a debuggable app, each Magic Move step between two Screens of a page logs
+when it starts and when it lands, under the `NuxieMagicMove` tag. The start and
+land lines are `DEBUG`; one `VERBOSE` line follows each player step in between.
+A release (non-debuggable) app logs nothing on this path at any `logLevel`.
+
+```bash
+adb logcat -v monotonic -s NuxieMagicMove:V
+```
+
+```text
+step start id=<n> from=<screen> to=<screen> back=<0|1> frameNanos=<ns>
+frame id=<n> frameNanos=<ns> elapsedMs=<ms>
+step land id=<n> frameNanos=<ns> lengthMs=<ms>
+```
+
+- `id` counts Magic Move steps in the process and pairs a step's lines.
+- `frameNanos` is the Choreographer frame time the page's player step used. It
+  is on the `System.nanoTime()` clock, the monotonic clock that
+  `logcat -v monotonic` prints in seconds, so the lines line up with a screen
+  recording.
+- `step start` is the frame whose player step began the move. `step land` is
+  the frame whose player step reported the step's last completion event. When
+  the step's watchdog ends the wait first, it is the last frame that stepped
+  the move. `lengthMs` is the land frame time minus the start frame time.
+- Each `frame` line is one player step from the start until the step lands.
+  `elapsedMs` is the time that step advanced the player by: `0.0` on the start
+  frame, which applies the move. Milliseconds are rounded to the microsecond.
+- `back` is `1` for a Back step and `0` otherwise.
+- A step that ends without landing (its page closes, or the presentation
+  fails) logs no `step land` line and no further `frame` lines. A step that
+  plays no move in the scene logs nothing: reduced motion, a cut, a page that
+  changes under a sheet, or a page that isn't drawing. Other transition styles
+  are not logged.
+- `logLevel` must be `DEBUG` for the start and land lines and `VERBOSE` for
+  the frame lines. `from` and `to` are Screen ids in sensitive fields, so with
+  `redactSensitiveData = true` they read `<redacted hmac-sha256:...>`. Every
+  other field is a number and stays readable.
+
 ## Startup process-death qualification
 
 Build and install the debug instrumentation APK on a dedicated test device, then

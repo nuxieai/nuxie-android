@@ -31,6 +31,13 @@ internal object ExperiencePageStep {
         fun veil() = Unit
         /** One ordinary step before the incoming row takes over, so step_end commands reach the row they leave (S8). */
         suspend fun drain() = Unit
+        /**
+         * A Magic Move begins in this batch. Debug builds time it from the frame whose player step applies the
+         * batch, and land it at the player step that reports the last of [completions] (README, "Magic Move step timing").
+         */
+        suspend fun timeStart(completions: List<Deferred<Unit>>) = Unit
+        /** The timed Magic Move lands in this batch. */
+        suspend fun timeLand() = Unit
     }
 
     suspend fun perform(source: String, target: String, style: Style, isBack: Boolean,
@@ -82,6 +89,8 @@ internal object ExperiencePageStep {
                     operations.phases(hidden + active, "")
                 }
             } else if (style != Style.NONE && plan != null) {
+                // Of the moves played in the scene, only a Magic Move is timed.
+                val timed = style == Style.MAGIC_MOVE
                 val completions = mutableListOf<Deferred<Unit>>()
                 operations.batch(present = true, watchdogMs = plan.watchdogMs) {
                     incoming()
@@ -89,12 +98,14 @@ internal object ExperiencePageStep {
                     plan.incomingCompletionEvent.takeIf { it.isNotEmpty() }?.let { completions += operations.register(target, it) }
                     operations.phases(exiting + entering, phasesTransition)
                     operations.begin(transition)
+                    if (timed) operations.timeStart(completions.toList())
                 }
                 awaitHalf(completions, plan.watchdogMs)
                 operations.batch {
                     operations.end(transition)
                     operations.retire()
                     operations.phases(hidden + active, "")
+                    if (timed) operations.timeLand()
                 }
             } else {
                 val outgoing = (plan?.outgoingCompletionEvent ?: exit.event)?.takeIf { it.isNotEmpty() }?.let { operations.register(source, it) }

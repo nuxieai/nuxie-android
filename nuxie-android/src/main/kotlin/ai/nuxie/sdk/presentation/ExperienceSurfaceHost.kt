@@ -585,6 +585,15 @@ internal class ExperienceSurfaceHost(
     private val transitionWrites = ArrayDeque<TransitionWrite>()
     private var presentedTransitionWrite: TransitionWrite? = null
 
+    /** Debug builds time each Magic Move step on the lane (README, "Magic Move step timing"); release builds have none. */
+    internal val stepLog = ExperienceStepLog.forApp(context)
+
+    /** A page step that ends without landing logs nothing more. */
+    internal fun closeStepLog(step: ExperienceStepLog.Step) {
+        val log = stepLog ?: return
+        lane.enqueue { log.close(step) }
+    }
+
     /** Match iOS: apply the phase and settle it before the transition watchdog starts. */
     suspend fun applyTransitionValues(values: Map<String, NuxieViewModelScalarValue>) {
         val completion = CompletableDeferred<Unit>()
@@ -655,6 +664,7 @@ internal class ExperienceSurfaceHost(
             checkNotNull(player).stepTyped(elapsedSeconds = 0.0, correlationId = correlationId,
                 textRunNames = emptyList())
         }
+        stepLog?.unframed()
         captureStepSnapshot(outcome, correlationId)?.let(::retainScreenValues)
         publishSteps()
     }
@@ -1747,6 +1757,8 @@ internal class ExperienceSurfaceHost(
                         null
                     }
                     viewModelSnapshot?.let { retainScreenValues(it) }
+                    // After the capture, which resolves the step's completion waiters.
+                    stepLog?.stepped(frameTimeNanos, elapsedSeconds)
                     submittedCaptions = SubmittedCaptions(videoPlayback?.captionSnapshot().orEmpty(), generation, epoch)
                     submittedSnapshot = viewModelSnapshot?.let { SubmittedTextSnapshot(it, outcome.textGeometry, generation, epoch) }
                     if (!firstFramePresented) firstFrameUpdateBaseline = surfaceUpdates.get()
