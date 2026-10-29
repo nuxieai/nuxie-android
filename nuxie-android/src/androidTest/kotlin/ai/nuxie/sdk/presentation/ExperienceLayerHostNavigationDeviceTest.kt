@@ -94,6 +94,8 @@ class ExperienceLayerHostNavigationDeviceTest {
         val outcomes = java.util.concurrent.ConcurrentHashMap<String, CloseReason>()
         /** Every dismissal the registry reports, in order: what the Journey hears. */
         val dismissals = CopyOnWriteArrayList<Pair<String, CloseReason>>()
+        /** Every outcome the registry reports, in order: what the service turns into its close fact. */
+        val outcomeLog = CopyOnWriteArrayList<Pair<String, CloseReason>>()
         val monitor = Instrumentation.ActivityMonitor(NuxieExperienceActivity::class.java.name, null, false)
         lateinit var activity: Activity
             private set
@@ -153,7 +155,7 @@ class ExperienceLayerHostNavigationDeviceTest {
                 },
                 onFailure = { failures.compareAndSet(null, it); ready.countDown() },
                 onDismissed = { reason -> dismissals += id to reason; retired.countDown() },
-                onOutcome = { outcomes[id] = it }, onRuntimeStep = { outcome, _, _, _, _ ->
+                onOutcome = { outcomes[id] = it; outcomeLog += id to it }, onRuntimeStep = { outcome, _, _, _, _ ->
                     outcome.events.forEach { events += checkNotNull(prepared.screenId) to it.name }
                 })
             return ready
@@ -691,8 +693,9 @@ class ExperienceLayerHostNavigationDeviceTest {
         } finally { directory.deleteRecursively() }
     } }
 
+    /** One look at the three pages. [topRunning] is read after [middle], so it says what was true by then. */
     private class Sample(val at: Long, val top: Map<String, NuxieViewModelScalarValue>?,
-        val middle: Map<String, NuxieViewModelScalarValue>?, val middleFrame: Long?,
+        val middle: Map<String, NuxieViewModelScalarValue>?, val topRunning: Boolean, val middleFrame: Long?,
         val base: Map<String, NuxieViewModelScalarValue>, val baseFrame: Long)
 
     /**
@@ -719,7 +722,7 @@ class ExperienceLayerHostNavigationDeviceTest {
                 val samples = CopyOnWriteArrayList<Sample>()
                 val sampler = launch(Dispatchers.Default) {
                     while (isActive) {
-                        samples += Sample(System.nanoTime(), top.rowOrNull("A"), middle.rowOrNull("B"),
+                        samples += Sample(System.nanoTime(), top.rowOrNull("A"), middle.rowOrNull("B"), top.isRunning(),
                             withTimeoutOrNull(100) { runCatching { middle.lastSteppedFrame() }.getOrNull() },
                             base.row("A"), base.lastSteppedFrame())
                         delay(5)
@@ -733,8 +736,11 @@ class ExperienceLayerHostNavigationDeviceTest {
                 assertEquals("dismissed", samples[topExit].top!!.exitReason())
                 assertTrue("Then the middle sheet plays its own exit: top $topExit, middle $middleExit", middleExit > topExit)
                 assertEquals("dismissed", samples[middleExit].middle!!.exitReason())
-                assertTrue("The top's exit ran to its end before the middle's began",
-                    samples[middleExit].at - samples[topExit].at >= 400_000_000L)
+                // The top page is hidden, which stops its surface, only once its exit has returned. Each look at the
+                // middle exiting is followed by a look at the top's surface, so a middle exit that began while the
+                // top was still exiting would show the top still running.
+                assertTrue("The top's exit had ended before the middle's began",
+                    samples.filter { it.middle?.phase() == "exiting" }.none { it.topRunning })
                 // Each page beneath stays live: its player keeps stepping through every exit above it.
                 fun List<Long>.span() = (maxOrNull() ?: 0L) - (minOrNull() ?: 0L)
                 val duringTop = samples.filter { it.top?.phase() == "exiting" }
@@ -792,7 +798,8 @@ class ExperienceLayerHostNavigationDeviceTest {
                 assertFalse("No slot stays held", a.moves.isBusy)
                 assertTrue(a.moves.isRevoked)
                 assertEquals("No span stays open", 0, a.moves.authoredTime.openSpans())
-                assertEquals(CloseReason.HostDismissed, harness.outcomes[id])
+                assertEquals("One outcome, the host's: the one the service sends as its close fact",
+                    listOf(id to CloseReason.HostDismissed), harness.outcomeLog.toList())
                 assertEquals("The Journey hears one dismissal", listOf(id to CloseReason.HostDismissed), harness.dismissals.toList())
                 assertNull(PresentationRegistry.currentScreen(id))
                 // Teardown can't undo these two: the registry observation is set only by observing an id, and the
