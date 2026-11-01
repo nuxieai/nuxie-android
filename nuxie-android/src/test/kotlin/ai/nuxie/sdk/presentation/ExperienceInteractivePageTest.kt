@@ -39,6 +39,36 @@ class ExperienceInteractivePageTest {
         }
     }
 
+    @Test fun `a row placed below its source ends under it whether new or kept, and above as before`() = runBlocking {
+        suspend fun placed(rows: List<String>, incoming: String, source: String, below: Boolean,
+            expected: List<String>, writes: List<String>) = withLayer { page, native ->
+            rows.forEach { page.insertIncoming(it, Style.NONE, false) }
+            page.prepare(incoming)
+            native.traceListMutations = true
+            native.trace.clear()
+            page.takeIncoming(incoming, source, below = below)
+            assertEquals(expected, page.mountedScreenIds())
+            assertEquals(writes, native.trace)
+        }
+        placed(listOf("a"), "b", "a", true, listOf("b", "a"), listOf("insert:1", "move:1:0"))
+        placed(listOf("a", "b"), "b", "a", true, listOf("b", "a"), listOf("move:1:0"))
+        placed(listOf("c", "a", "b"), "c", "a", true, listOf("c", "a", "b"), emptyList())
+        placed(listOf("a"), "b", "a", false, listOf("a", "b"), listOf("insert:1"))
+        placed(listOf("a", "b"), "a", "b", false, listOf("b", "a"), listOf("move:0:1"))
+        placed(listOf("a", "b", "c"), "a", "c", false, listOf("b", "c", "a"), listOf("move:0:2"))
+    }
+
+    @Test fun `a brand new row inserted below ends under its source`() = runBlocking {
+        withLayer { page, native ->
+            page.insertIncoming("a", Style.NONE, false)
+            native.traceListMutations = true
+            native.trace.clear()
+            page.insertIncoming("b", Style.MAGIC_MOVE, below = true, source = "a")
+            assertEquals(listOf("b", "a"), page.mountedScreenIds())
+            assertEquals(listOf("insert:1", "move:1:0"), native.trace)
+        }
+    }
+
     @Test fun `Back removes unreachable rows after end and remaining indexes follow list removals`() = runBlocking {
         withLayer { page, native ->
             page.insertIncoming("a", Style.NONE, false)
