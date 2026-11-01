@@ -94,6 +94,25 @@ class ExperiencePageHostContractTest {
         assertEquals("Every imported defaultPairs vector must be exercised", outcomes.map { it.first }, outcomes.map { it.second })
     }
 
+    // Built directly: pageDescriptorFixture strips incomingOnTop, so it would hide the marker.
+    @Test fun `only a false incomingOnTop is published, on the forward half, and it reaches the transition`() {
+        val baseline = render()
+        fun withTransition(edit: (JsonObject) -> JsonObject): JsonObject = JsonObject(baseline + ("transitions" to
+            JsonArray(baseline.getValue("transitions").jsonArray.map { edit(it.jsonObject) })))
+        fun marked(value: JsonElement) = withTransition { JsonObject(it + ("incomingOnTop" to value)) }
+        val leavingOnTop = marked(JsonPrimitive(false))
+        JourneyRenderSchema.validate(leavingOnTop)
+        assertFalse(ExperiencePageHostContract.transitions(leavingOnTop).single().forward.incomingOnTop)
+        for (refused in listOf(JsonPrimitive(true), JsonPrimitive(0))) assertThrows(JourneyReleaseAuthenticationException::class.java) {
+            JourneyRenderSchema.validate(marked(refused))
+        }
+        assertThrows(JourneyReleaseAuthenticationException::class.java) {
+            JourneyRenderSchema.validate(withTransition {
+                JsonObject(it + ("reverse" to JsonObject(it.getValue("reverse").jsonObject + ("incomingOnTop" to JsonPrimitive(false)))))
+            })
+        }
+    }
+
     @Test fun `published transition forms are strict and custom is refused`() {
         for (json in listOf("{\"type\":\"none\"}", "{\"type\":\"fade\"}", "{\"type\":\"push\"}",
             "{\"type\":\"modal\",\"height\":\"fit-content\"}",

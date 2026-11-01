@@ -537,6 +537,89 @@ class ExperienceLayerSurfaceFailureTest {
         }
     }
 
+    @Test fun `a forward step whose plan has the leaving Screen on top places a new row below it before the step begins`() = runTest {
+        val placed = stepToNewRow(pair("a", "b", """"incomingOnTop":false,"""), isBack = false)
+        assertEquals(false, placed.incomingOnTop)
+        assertEquals(listOf("insert:1", "move:1:0"), placed.listWrites)
+        assertEquals(listOf("b", "a"), placed.rows)
+    }
+
+    @Test fun `a normal Back still places a new row below, though its plan's flag falls back to true`() = runTest {
+        // Declared b to a, so a step from a to b plays the reverse half, which carries no flag of its own.
+        val placed = stepToNewRow(pair("b", "a"), isBack = true)
+        assertEquals(true, placed.incomingOnTop)
+        assertEquals(listOf("insert:1", "move:1:0"), placed.listWrites)
+        assertEquals(listOf("b"), placed.rows)
+    }
+
+    @Test fun `a normal forward step and a step with no plan leave a new row on top`() = runTest {
+        val normal = stepToNewRow(pair("a", "b"), isBack = false)
+        assertEquals(true, normal.incomingOnTop)
+        assertEquals(listOf("insert:1"), normal.listWrites)
+        assertEquals(listOf("a", "b"), normal.rows)
+        val planless = stepToNewRow(null, isBack = false)
+        assertNull(planless.incomingOnTop)
+        assertEquals(listOf("insert:1"), planless.listWrites)
+        assertEquals(listOf("a", "b"), planless.rows)
+    }
+
+    private data class Placement(val incomingOnTop: Boolean?, val listWrites: List<String>, val rows: List<String>)
+
+    private fun pair(source: String, destination: String, marker: String = "") = Json.parseToJsonElement(
+        """{"id":"pair","kind":"page","sourceScreenId":"$source","destinationScreenId":"$destination","durationMs":100,$marker
+        "source":{"completeEventName":"leave"},"destination":{"completeEventName":"arrive"},"reverse":{"durationMs":100,
+        "source":{"completeEventName":"leave.reverse"},"destination":{"completeEventName":"arrive.reverse"}}}""").jsonObject
+
+    /** Plays one mounted step from a to b, a row not yet in the list, through its watchdogs with no frame supplied. */
+    private suspend fun TestScope.stepToNewRow(declaration: JsonObject?, isBack: Boolean): Placement {
+        var placement: Placement? = null
+        withSurface { surface, page, native, lane ->
+            val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
+            val scene = java.io.File.createTempFile("page-row-placement", ".riv").apply { writeBytes(byteArrayOf(1)) }
+            val baseline = field(page, "descriptor") as JsonObject
+            val descriptor = JsonObject(baseline + ("render" to JsonObject(baseline.getValue("render").jsonObject +
+                ("transitions" to JsonArray(listOfNotNull(declaration))))))
+            // Back retires the Screen it leaves. A forward step keeps it in history.
+            val source = PreparedPresentation(scene, "A", 0, PresentationShell.FullScreen(), "a", descriptor,
+                pageHistory = if (isBack) listOf("b", "a") else listOf("a"))
+            val target = source.copy(screenId = "b", artboardName = "B", pageHistory = if (isBack) listOf("b") else listOf("a", "b"),
+                transition = declaration?.let { Json.parseToJsonElement("""{"type":"magic-move","transitionId":"pair"}""").jsonObject })
+            val flag = ExperienceScreenTransitionPlan.resolveLayer(target.transition, descriptor, "a", "b")?.incomingOnTop
+            val listener = object : ExperienceSurfaceHost.Listener {
+                override fun onFirstFrame() = Unit
+                override fun onFailure(error: ExperiencePresentationException) { throw AssertionError(error) }
+            }
+            val mounted = ExperienceMountedScreen(activity.get(), source, listener, { throw AssertionError(it) })
+            val ownedLane = field(mounted, "lane") as NuxieRuntimeLane
+            set(mounted, "surface", surface)
+            var navigation: Deferred<Unit>? = null
+            try {
+                runBlocking { mounted.prepareRow(target, listener) }
+                lane.blockingCall {
+                    set(surface, "running", true)
+                    native.traceListMutations = true
+                    native.trace.clear()
+                }
+                navigation = async { mounted.navigateLayer(target, isBack) }
+                repeat(32) {
+                    repeat(4) { runCurrent(); lane.blockingCall {} }
+                    advanceTimeBy(25)
+                }
+                repeat(4) { runCurrent(); lane.blockingCall {} }
+                assertTrue("The step must land", navigation.isCompleted)
+                navigation.await()
+                placement = Placement(flag, native.trace.takeWhile { !it.startsWith("begin:") }
+                    .filter { it.startsWith("insert:") || it.startsWith("move:") }, page.mountedScreenIds())
+            } finally {
+                navigation?.cancelAndJoin()
+                mounted.close(false) {}
+                assertTrue(ownedLane.awaitQuiescence(5_000))
+                activity.pause().stop().destroy(); scene.delete()
+            }
+        }
+        return checkNotNull(placement)
+    }
+
     @Test fun `covered skipping Back stays hidden until one reveal and ordinary pop enters once`() = runBlocking {
         for (skip in listOf(false, true)) withSurface { surface, page, native, lane ->
             val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
