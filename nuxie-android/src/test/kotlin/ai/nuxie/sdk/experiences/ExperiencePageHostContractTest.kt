@@ -94,6 +94,19 @@ class ExperiencePageHostContractTest {
         assertEquals("Every imported defaultPairs vector must be exercised", outcomes.map { it.first }, outcomes.map { it.second })
     }
 
+    @Test fun `incomingOnTop fixture vectors accept only an omitted or false marker`() {
+        val baseline = render()
+        for (vector in cases.getValue("incomingOnTop").jsonArray) {
+            val case = vector.jsonObject
+            val transitions = baseline.getValue("transitions").jsonArray.map {
+                JsonObject(it.jsonObject + if (case["omit"] == JsonPrimitive(true)) emptyMap()
+                    else mapOf("incomingOnTop" to case.getValue("value")))
+            }
+            val changed = JsonObject(baseline + ("transitions" to JsonArray(transitions)))
+            assertAccepted(case) { JourneyRenderSchema.validate(changed); ExperiencePageHostContract.transitions(changed) }
+        }
+    }
+
     // Built directly: pageDescriptorFixture strips incomingOnTop, so it would hide the marker.
     @Test fun `only a false incomingOnTop is published, on the forward half, and it reaches the transition`() {
         val baseline = render()
