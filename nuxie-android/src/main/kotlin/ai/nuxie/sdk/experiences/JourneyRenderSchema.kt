@@ -64,12 +64,14 @@ internal object JourneyRenderSchema {
         val defaultPairs = mutableSetOf<Pair<String, String>>()
         for (input in array(render["transitions"], 1024)) {
             val transition = exact(input, setOf("id", "kind", "sourceScreenId", "destinationScreenId", "durationMs",
-                "source", "destination"), setOf("reverse", "defaultPair"))
+                "source", "destination"), setOf("reverse", "defaultPair", "incomingOnTop"))
             releaseId(transition["id"]); oneOf(transition["kind"], "page")
             if (!transitionIds.add(releaseId(transition["id"]))) fail("duplicate transition id")
             if (transition["defaultPair"]?.let { boolean(it) } == true &&
                 !defaultPairs.add(text(transition["sourceScreenId"]) to text(transition["destinationScreenId"])))
                 fail("duplicate default pair")
+            // Only the exception is published: false when the Screen being left draws on top going forward.
+            if (transition["incomingOnTop"]?.let { boolean(it) } == true) fail("transition incomingOnTop")
             for (key in listOf("sourceScreenId", "destinationScreenId")) if (releaseId(transition[key]) !in screens) fail("transition screen")
             integer(transition["durationMs"], maximum = 60_000)
             endpoints(transition)
