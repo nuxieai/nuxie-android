@@ -57,15 +57,15 @@ internal class ExperienceInteractivePage private constructor(
     internal fun mountedScreenIdsOnLane(): List<String> = checked { mounted.toList() }
 
     suspend fun insertIncoming(screenId: String, style: ExperiencePageHostContract.Style,
-        isBack: Boolean, products: List<StoreProduct> = emptyList(),
+        below: Boolean, products: List<StoreProduct> = emptyList(),
         routing: JourneyRuntimeEmissionCoordinator? = null, source: String? = null) =
-        lane.call { insertIncomingOnLane(screenId, style, isBack, products, routing, source) }
+        lane.call { insertIncomingOnLane(screenId, style, below, products, routing, source) }
 
     internal fun insertIncomingOnLane(screenId: String, style: ExperiencePageHostContract.Style,
-        isBack: Boolean, products: List<StoreProduct> = emptyList(),
+        below: Boolean, products: List<StoreProduct> = emptyList(),
         routing: JourneyRuntimeEmissionCoordinator? = null, source: String? = null) = checked {
         prepareOnLane(screenId, products, routing)
-        takeIncomingOnLane(screenId, source, isBack)
+        takeIncomingOnLane(screenId, source, below)
     }
 
     suspend fun prepare(screenId: String, products: List<StoreProduct> = emptyList(),
@@ -109,19 +109,19 @@ internal class ExperienceInteractivePage private constructor(
         activeRow = screenId
     }
 
-    suspend fun takeIncoming(screenId: String, source: String, isBack: Boolean) =
-        lane.call { takeIncomingOnLane(screenId, source, isBack) }
+    suspend fun takeIncoming(screenId: String, source: String, below: Boolean) =
+        lane.call { takeIncomingOnLane(screenId, source, below) }
 
-    internal fun takeIncomingOnLane(screenId: String, source: String? = null, isBack: Boolean = false) = checked {
+    internal fun takeIncomingOnLane(screenId: String, source: String? = null, below: Boolean = false) = checked {
         val isNew = screenId !in mounted
         if (isNew) insertOnLane(screenId, mounted.size)
-        // New forward rows stay on top; every Back uses the outgoing row's position.
-        if ((!isNew || isBack) && source != null && source != screenId) {
+        // A new row going above is already on top; every other row takes the outgoing row's position.
+        if ((!isNew || below) && source != null && source != screenId) {
             val from = mounted.indexOf(screenId)
             val remaining = mounted.filter { it != screenId }
             val sourceIndex = remaining.indexOf(source)
             require(sourceIndex >= 0) { "Outgoing row is absent" }
-            val to = sourceIndex + if (isBack) 0 else 1
+            val to = sourceIndex + if (below) 0 else 1
             if (from != to) {
                 artboard.moveDefaultListItem(contract.listPath, from, to)
                 mounted.removeAt(from)
