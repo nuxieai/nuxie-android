@@ -639,6 +639,12 @@ internal class NuxieExperienceActivity : Activity() {
             finish()
             return
         }
+        // A full-screen Experience opens and closes with Android's own slide for a see-through screen:
+        // with the platform's activity style on this translucent window, the system plays its translucent
+        // open and close (UNIV-5967, decision 283). A sheet keeps the theme's still window: its dialog slides itself.
+        if (state.value.baseShell is PresentationShell.FullScreen) {
+            window.setWindowAnimations(android.R.style.Animation_Activity)
+        }
         registerPredictiveBack()
         observePresentation(id, state)
     }
