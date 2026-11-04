@@ -1,17 +1,21 @@
 package ai.nuxie.sdk.presentation
 
+import ai.nuxie.sdk.runtime.TestRuntimeLane
 import android.content.Intent
 import android.content.res.Resources
 import android.graphics.Matrix
 import android.os.Looper
 import android.view.animation.AnimationUtils
 import android.view.animation.Transformation
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -24,6 +28,9 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.android.controller.ActivityController
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
+import org.robolectric.annotation.Implementation
+import org.robolectric.annotation.Implements
+import org.robolectric.shadow.api.Shadow
 import org.robolectric.util.ReflectionHelpers
 
 /**
@@ -94,6 +101,40 @@ class ExperienceFullScreenSlideTest {
         assertEquals("The window's style names no open", 0, styleAnim(activity, style, android.R.attr.activityOpenEnterAnimation))
     }
 
+    /** The oracle is the iPhone's order for the same closes: the Screen's Exit, then the dismissal's slide. */
+    @Config(sdk = [28, 36], shadows = [HeldExitShadow::class],
+        instrumentedPackages = ["ai.nuxie.sdk.presentation.ExperienceMountedScreen"])
+    @Test fun `a full-screen close plays the Screen's Exit before finish, for the person's close and an identity change`() {
+        for (identityChange in listOf(false, true)) {
+            val close = if (identityChange) "The identity change" else "The person's close"
+            val presented = present(PresentationShell.fromTransition(null))
+            val activity = presented.activity
+            val screen = checkNotNull(ReflectionHelpers.getField<Any?>(activity, "currentScreen"))
+            // The real reveal: the Screen's first frame, then the registry admits it, as the service does.
+            (screen as ExperienceSurfaceHost.Listener).onFirstFrame()
+            assertTrue(runBlocking { PresentationRegistry.reveal(presented.id) })
+            assertTrue("$close: the Screen is revealed", ReflectionHelpers.callInstanceMethod<Boolean>(screen, "hasRevealed"))
+            // A real mounted Screen on a test lane, whose Exit is held until the test lets it finish.
+            val mounted = ExperienceMountedScreen(activity, ReflectionHelpers.getField(screen, "prepared"), screen, {},
+                createLane = ::TestRuntimeLane)
+            ReflectionHelpers.setField(screen, "mounted", mounted)
+            val exit = Shadow.extract<HeldExitShadow>(mounted)
+
+            if (identityChange) PresentationRegistry.dismiss(presented.id, CloseReason.IdentityChanged)
+            else ReflectionHelpers.callInstanceMethod<Any?>(activity, "finishTerminal",
+                ReflectionHelpers.ClassParameter.from(CloseReason::class.java, CloseReason.UserDismissed))
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals("$close plays the Screen's Exit", listOf(ExperienceScreenLifecycle.ExitReason.DISMISSED), exit.exits)
+            assertFalse("$close: the Activity is not finishing while the Exit plays", activity.isFinishing)
+
+            exit.held.complete(Unit)
+            shadowOf(Looper.getMainLooper()).idle()
+            assertTrue("$close: the Activity finishes once the Exit completes", activity.isFinishing)
+            assertEquals("$close: the window still slides with Android's own motion",
+                android.R.style.Animation_Activity, activity.window.attributes.windowAnimations)
+        }
+    }
+
     @Config(sdk = [23])
     @Test fun `on the lowest level the window gets that version's ordinary screen motion`() {
         val activity = present(PresentationShell.fromTransition(null)).activity
@@ -158,5 +199,20 @@ class ExperienceFullScreenSlideTest {
         // The bench phone's screen, in pixels.
         const val WIDTH = 1206
         const val HEIGHT = 2622
+    }
+}
+
+/**
+ * Holds a mounted Screen's Exit until the test completes [held]. The Exit's own playback has its tests beside
+ * ExperienceMountedScreen; this keeps the Activity's close around it real, so the test sees when finish() comes.
+ */
+@Implements(className = "ai.nuxie.sdk.presentation.ExperienceMountedScreen", isInAndroidSdk = false)
+internal class HeldExitShadow {
+    val exits = mutableListOf<ExperienceScreenLifecycle.ExitReason>()
+    val held = CompletableDeferred<Unit>()
+
+    @Implementation suspend fun awaitExit(reason: ExperienceScreenLifecycle.ExitReason) {
+        exits += reason
+        held.await()
     }
 }

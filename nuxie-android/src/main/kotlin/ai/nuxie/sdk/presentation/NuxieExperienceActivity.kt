@@ -200,9 +200,11 @@ internal class NuxieExperienceActivity : Activity() {
                 } else if (revealed && currentScreen === this && closingLayer?.screen !== this && !baseWindowDismissed &&
                         (closeState.reason == CloseReason.UserDismissed ||
                             closeState.reason == CloseReason.HostDismissed ||
-                            closeState.reason == CloseReason.JourneyDismissed)) {
-                    // Only the revealed current screen plays its compiled exit. A sheet the
-                    // platform already dismissed has no window left, so it finishes at once.
+                            closeState.reason == CloseReason.JourneyDismissed ||
+                            closeState.reason == CloseReason.IdentityChanged)) {
+                    // Only the revealed current screen plays its compiled exit, then the window's own
+                    // slide, as the iPhone does for the same closes. A sheet the platform already
+                    // dismissed has no window left, so it finishes at once.
                     finishingAfterExit = true
                     layers.forEach { it.sheet?.setInputEnabled(false); it.screen.mounted?.setInputEnabled(false) }
                     registryScope.launch {
