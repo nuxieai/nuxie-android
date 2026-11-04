@@ -215,6 +215,13 @@ internal sealed interface PresentationContentState {
     data class Closed(val reason: CloseReason) : PresentationContentState
 }
 
+/** The Experience's first layer, which the Activity's own window presents. */
+internal val PresentationContentState.baseShell: PresentationShell? get() = when (this) {
+    is PresentationContentState.Acquiring -> screen.shell
+    is PresentationContentState.Ready -> content.shell
+    is PresentationContentState.Closed -> null
+}
+
 internal object PresentationRegistry {
     private class Callbacks(
         val onFirstFrame: () -> Unit,
