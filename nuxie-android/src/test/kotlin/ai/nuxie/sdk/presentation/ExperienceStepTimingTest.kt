@@ -21,8 +21,9 @@ import org.robolectric.shadows.ShadowLog
 /**
  * Magic Move step timing (README, "Magic Move step timing"): a debug build logs each step's start and
  * landing, with the Choreographer frame time of the player step that started it and of the one in which
- * its last completion event arrived, plus one verbose line per player step in between (UNIV-5724). The
- * frames here are driven by hand, so every expected time is known before the step runs.
+ * its last completion event arrived, plus one verbose line per player step in between (UNIV-5724), at
+ * DEBUG while the tag's switch is on (UNIV-6104). The frames here are driven by hand, so every expected
+ * time is known before the step runs.
  */
 @RunWith(RobolectricTestRunner::class)
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -76,6 +77,55 @@ class ExperienceStepTimingTest {
                 "V frame id=$backId frameNanos=$t4 elapsedMs=0.0",
                 "V frame id=$backId frameNanos=$t5 elapsedMs=16.667",
                 "D step land id=$backId frameNanos=$t5 lengthMs=16.667",
+            ), lines)
+        }
+    }
+
+    @Test fun `an app logging at DEBUG with the tag's switch off logs a step's start and landing but no frame lines`() = runTest {
+        debuggable(true)
+        NuxieLog.configure(LogLevel.DEBUG, redactSensitiveData = false)
+        // Pinned rather than left to Robolectric's default answer: the switch is off.
+        ShadowLog.setLoggable(TAG, Log.INFO)
+        withPage { page ->
+            val step = page.begin(page.toB, back = false)
+            val t0 = page.frame()
+            page.pump()
+            page.frame()
+            page.events("leave" to A_OWNER, "arrive" to B_OWNER)
+            val t2 = page.frame()
+            page.land(step)
+            val lines = lines()
+            assertTrue("Lines were logged", lines.isNotEmpty())
+            val id = idOf(lines.first())
+            assertEquals(listOf(
+                "D step start id=$id from=a to=b back=0 frameNanos=$t0",
+                "D step land id=$id frameNanos=$t2 lengthMs=33.333",
+            ), lines)
+        }
+    }
+
+    @Test fun `with the tag's switch on, an app logging at DEBUG gets each frame line at DEBUG with the same text`() = runTest {
+        debuggable(true)
+        NuxieLog.configure(LogLevel.DEBUG, redactSensitiveData = false)
+        // The bench's `adb shell setprop log.tag.NuxieMagicMove VERBOSE`.
+        ShadowLog.setLoggable(TAG, Log.VERBOSE)
+        withPage { page ->
+            val step = page.begin(page.toB, back = false)
+            val t0 = page.frame()
+            page.pump()
+            val t1 = page.frame()
+            page.events("leave" to A_OWNER, "arrive" to B_OWNER)
+            val t2 = page.frame()
+            page.land(step)
+            val lines = lines()
+            assertTrue("Lines were logged", lines.isNotEmpty())
+            val id = idOf(lines.first())
+            assertEquals(listOf(
+                "D step start id=$id from=a to=b back=0 frameNanos=$t0",
+                "D frame id=$id frameNanos=$t0 elapsedMs=0.0",
+                "D frame id=$id frameNanos=$t1 elapsedMs=16.667",
+                "D frame id=$id frameNanos=$t2 elapsedMs=16.667",
+                "D step land id=$id frameNanos=$t2 lengthMs=33.333",
             ), lines)
         }
     }
