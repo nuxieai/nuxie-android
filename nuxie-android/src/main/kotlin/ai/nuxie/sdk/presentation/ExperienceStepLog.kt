@@ -3,6 +3,7 @@ package ai.nuxie.sdk.presentation
 import ai.nuxie.sdk.logging.NuxieLog
 import android.content.Context
 import android.content.pm.ApplicationInfo
+import android.util.Log
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.Deferred
 
@@ -21,6 +22,8 @@ internal class ExperienceStepLog {
         internal var startNanos = 0L
         internal var lastNanos = 0L
         internal var arrivedNanos: Long? = null
+        /** The tag's switch, read when the step starts: its frame lines print at DEBUG while it is on. */
+        internal var frameLines = false
     }
 
     private var beginning: Step? = null
@@ -38,6 +41,7 @@ internal class ExperienceStepLog {
             beginning = null
             step.id = ids.incrementAndGet()
             step.startNanos = frameNanos
+            step.frameLines = switchedOn()
             moving = step
             NuxieLog.d(TAG, "step start", null, NuxieLog.status("id", step.id), NuxieLog.sensitive("from", step.from),
                 NuxieLog.sensitive("to", step.to), NuxieLog.status("back", if (step.back) 1 else 0),
@@ -49,8 +53,10 @@ internal class ExperienceStepLog {
         if (step.arrivedNanos == null && step.completions.all { it.isCompleted && !it.isCancelled }) {
             step.arrivedNanos = frameNanos
         }
-        NuxieLog.v(TAG, "frame", null, NuxieLog.status("id", step.id), NuxieLog.status("frameNanos", frameNanos),
+        val fields = arrayOf(NuxieLog.status("id", step.id), NuxieLog.status("frameNanos", frameNanos),
             NuxieLog.status("elapsedMs", milliseconds(elapsedSeconds * 1_000_000_000.0)))
+        // With the switch on, the line prints in an app whose logLevel is DEBUG (UNIV-6104).
+        if (step.frameLines) NuxieLog.d(TAG, "frame", null, *fields) else NuxieLog.v(TAG, "frame", null, *fields)
     }
 
     /** After a player step outside a frame. A move begun in it has no frame time, so its step logs nothing. */
@@ -86,6 +92,9 @@ internal class ExperienceStepLog {
         /** A debuggable app's step log; a release app has none. */
         fun forApp(context: Context): ExperienceStepLog? =
             if (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) ExperienceStepLog() else null
+
+        /** The switch a bench turns on with `adb shell setprop log.tag.NuxieMagicMove VERBOSE`. */
+        private fun switchedOn(): Boolean = Log.isLoggable(TAG, Log.VERBOSE)
 
         /** Nanoseconds as milliseconds, rounded to the microsecond. */
         private fun milliseconds(nanos: Double): Double = Math.round(nanos / 1_000.0) / 1_000.0

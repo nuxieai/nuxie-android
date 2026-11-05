@@ -357,7 +357,11 @@ step land id=<n> frameNanos=<ns> lengthMs=<ms>
   changes under a sheet, or a page that isn't drawing. Other transition styles
   are not logged.
 - `logLevel` must be `DEBUG` for the start and land lines and `VERBOSE` for
-  the frame lines. `from` and `to` are Screen ids in sensitive fields, so with
+  the frame lines. To get the frame lines from an app at `DEBUG`, turn the
+  tag's switch on before the app starts:
+  `adb shell setprop log.tag.NuxieMagicMove VERBOSE`. A step that starts while
+  the switch is on writes its frame lines at `DEBUG`, with the same text.
+  `from` and `to` are Screen ids in sensitive fields, so with
   `redactSensitiveData = true` they read `<redacted hmac-sha256:...>`. Every
   other field is a number and stays readable.
 
