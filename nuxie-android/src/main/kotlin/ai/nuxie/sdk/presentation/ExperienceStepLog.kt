@@ -74,6 +74,16 @@ internal class ExperienceStepLog {
             NuxieLog.status("nanos", nanos))
     }
 
+    /**
+     * When a present call attached this surface's window, while the tag's switch is on (UNIV-6019): [path] is
+     * "swapchain" when the runtime presents through a Vulkan swapchain, "copy" when it copies each frame into the window.
+     */
+    fun attached(path: String) {
+        val nanos = System.nanoTime()
+        if (!switchedOn()) return
+        NuxieLog.d(TAG, "attach", null, NuxieLogger.Field.publicValue("path", path), NuxieLog.status("nanos", nanos))
+    }
+
     /** After a player step outside a frame. A move begun in it has no frame time, so its step logs nothing. */
     fun unframed() {
         beginning = null

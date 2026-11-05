@@ -369,8 +369,14 @@ While the switch is on, a debuggable app also logs each frame tick's present
 call, at `DEBUG`, whether or not a step is moving:
 
 ```text
+attach path=<swapchain|copy> nanos=<ns>
 present tick=<step|poll> result=<code|video> frameNanos=<ns> nanos=<ns>
 ```
+
+- `attach` prints once each time a present call attaches the surface's
+  window, just before that tick's `present` line. `path` is `swapchain` when
+  the runtime presents through a Vulkan swapchain and `copy` when it refused
+  one and each frame is copied into the window instead.
 
 - `tick` is `poll` when the tick only polled the frame submitted before it,
   and `step` when it stepped the player and drew a new frame.
