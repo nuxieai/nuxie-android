@@ -154,6 +154,40 @@ class ExperienceStepTimingTest {
         }
     }
 
+    @Test fun `with the tag's switch on, the window's attach logs its present path once, before that tick's present`() = runTest {
+        debuggable(true)
+        NuxieLog.configure(LogLevel.DEBUG, redactSensitiveData = false)
+        ShadowLog.setLoggable(TAG, Log.VERBOSE)
+        withPage { page ->
+            val t0 = page.frame()
+            page.frame()
+            page.frame()
+            val lines = lines().map { it.substringBefore(" nanos=") }
+            assertEquals(listOf("D attach path=swapchain", "D present tick=step result=1 frameNanos=$t0"), lines.take(2))
+            assertEquals(1, lines.count { it.startsWith("D attach ") })
+        }
+    }
+
+    @Test fun `a window the runtime cannot attach a swapchain to logs the CPU copy path`() = runTest {
+        debuggable(true)
+        NuxieLog.configure(LogLevel.DEBUG, redactSensitiveData = false)
+        ShadowLog.setLoggable(TAG, Log.VERBOSE)
+        // The runtime refuses the swapchain (NUX_SURFACE_ATTACHMENT_UNSUPPORTED), so each frame is copied into the window.
+        withPage(rendererNative = { native ->
+            object : NuxieTypedRuntimeNative by native {
+                override fun attachRendererSurface(rendererHandle: Long, windowHandle: Long) = -1
+                override fun copyPlayerToWindow(rendererHandle: Long, playerHandle: Long, windowHandle: Long,
+                    clearColor: Int, layoutScaleFactor: Float) = 1
+            }
+        }) { page ->
+            val t0 = page.frame()
+            page.frame()
+            val lines = lines().map { it.substringBefore(" nanos=") }
+            assertEquals(listOf("D attach path=copy", "D present tick=step result=1 frameNanos=$t0"), lines.take(2))
+            assertEquals(1, lines.count { it.startsWith("D attach ") })
+        }
+    }
+
     @Test fun `with the tag's switch off, no present is logged, even at the verbose level`() = runTest {
         debuggable(true)
         ShadowLog.setLoggable(TAG, Log.INFO)
@@ -163,7 +197,7 @@ class ExperienceStepTimingTest {
             page.frame()
             page.presentation(1)
             page.frame()
-            assertEquals(emptyList<String>(), lines().filter { it.contains("present") })
+            assertEquals(emptyList<String>(), lines().filter { it.contains("present") || it.contains("attach") })
         }
     }
 
@@ -233,8 +267,8 @@ class ExperienceStepTimingTest {
         "$priority ${it.msg}"
     }
 
-    /** The step's own lines: with the switch on, each tick's present line prints beside them. */
-    private fun stepLines(): List<String> = lines().filterNot { it.startsWith("D present ") }
+    /** The step's own lines: with the switch on, the attach and present lines print beside them. */
+    private fun stepLines(): List<String> = lines().filterNot { it.startsWith("D present ") || it.startsWith("D attach ") }
 
     private fun idOf(line: String): String = checkNotNull(Regex(" id=(\\d+) ").find(line)) { "No id in: $line" }.groupValues[1]
 
@@ -295,7 +329,10 @@ class ExperienceStepTimingTest {
         }
     }
 
-    private suspend fun TestScope.withPage(body: suspend (Page) -> Unit) {
+    private suspend fun TestScope.withPage(
+        rendererNative: (ExperienceInteractivePageTest.RecordingNative) -> NuxieTypedRuntimeNative = { it },
+        body: suspend (Page) -> Unit,
+    ) {
         val native = ExperienceInteractivePageTest.RecordingNative().apply { presentation = 1 }
         val lane = TestRuntimeLane()
         val file = NuxieRuntimeFile(1, native)
@@ -326,7 +363,8 @@ class ExperienceStepTimingTest {
                 retained["a"] = AtomicReference()
                 // A drawing page: an attached window whose frames present at once.
                 val layout = checkNotNull(ExperienceSurfaceLayout.create(100, 100, 1f))
-                set(surface, "renderer", NuxieAndroidVulkanRenderer(900, native)); set(surface, "window", NuxieRuntimeWindow(901, native))
+                set(surface, "renderer", NuxieAndroidVulkanRenderer(900, rendererNative(native)))
+                set(surface, "window", NuxieRuntimeWindow(901, native))
                 set(surface, "surfaceLayout", layout); set(surface, "appliedLayout", layout)
                 set(surface, "attached", true); set(surface, "running", true)
                 set(surface, "firstFramePresented", true); set(surface, "firstFrameComposed", true)

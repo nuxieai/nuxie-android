@@ -1005,6 +1005,13 @@ internal class NuxieAndroidVulkanRenderer internal constructor(
     private var pixelSize: Pair<Int, Int>? = null
     private var pendingWindow: Long? = null
 
+    /** Counts the windows this renderer has attached, so a caller can tell that its own call attached one. */
+    var attachments = 0L
+        private set
+
+    /** How the attached window is presented: "swapchain" (Vulkan) or "copy" (the CPU window copy). */
+    val presentPath: String get() = if (copiesToWindow) "copy" else "swapchain"
+
     fun detachSurface(window: NuxieRuntimeWindow): Int =
         if (attachedWindow == window.requireHandle()) detachSurface() else NUX_STATUS_OK
 
@@ -1080,6 +1087,7 @@ internal class NuxieAndroidVulkanRenderer internal constructor(
             }
             attachedWindow = windowHandle
             copiesToWindow = status == NUX_SURFACE_ATTACHMENT_UNSUPPORTED
+            attachments++
         }
         if (copiesToWindow) {
             val disposition = native.copyPlayerToWindow(

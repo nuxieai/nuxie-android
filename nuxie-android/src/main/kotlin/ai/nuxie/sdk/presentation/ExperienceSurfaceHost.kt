@@ -1777,8 +1777,13 @@ internal class ExperienceSurfaceHost(
                         return@enqueue
                     }
                 }
+                val attachments = renderer.attachments
                 val disposition = renderer.renderAndPresent(player, window, clearColor, layout.density, layout.pixelWidth, layout.pixelHeight)
-                stepLog?.presented(frameTimeNanos, polled, disposition.toString())
+                stepLog?.let { log ->
+                    // The renderer is shared by a Journey's Screens: only an attach made by this call is this window's.
+                    if (renderer.attachments != attachments) log.attached(renderer.presentPath)
+                    log.presented(frameTimeNanos, polled, disposition.toString())
+                }
                 pendingPresentation = disposition == 4
                 if (disposition < 0) {
                     Log.w(LOG_TAG, "render_player failed", null, Log.status("status", -disposition))
