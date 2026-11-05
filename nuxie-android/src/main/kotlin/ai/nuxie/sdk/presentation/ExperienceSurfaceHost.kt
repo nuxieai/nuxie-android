@@ -1650,6 +1650,8 @@ internal class ExperienceSurfaceHost(
                 // Held: no new step and no new frame. A frame already submitted still completes, so the
                 // writes queued behind it are not stalled for the length of the hold.
                 if (timelineHeld && !pendingPresentation) return@enqueue
+                // A tick with a frame still submitted only polls it: no step, no new drawing.
+                val polled = pendingPresentation
                 if (!pendingPresentation) {
                     drainTextWrites()
                     applyNextTransitionWrite()
@@ -1765,7 +1767,10 @@ internal class ExperienceSurfaceHost(
                 }
                 if (!pendingPresentation) {
                     try {
-                        if (videoPlayback?.isReadyForPresentation() == false) return@enqueue
+                        if (videoPlayback?.isReadyForPresentation() == false) {
+                            stepLog?.presented(frameTimeNanos, polled, "video")
+                            return@enqueue
+                        }
                     } catch (error: Throwable) {
                         reportFailure(ExperiencePresentationException.Reason.HOST_FAILED,
                             "Experience video readiness failed", error)
@@ -1773,6 +1778,7 @@ internal class ExperienceSurfaceHost(
                     }
                 }
                 val disposition = renderer.renderAndPresent(player, window, clearColor, layout.density, layout.pixelWidth, layout.pixelHeight)
+                stepLog?.presented(frameTimeNanos, polled, disposition.toString())
                 pendingPresentation = disposition == 4
                 if (disposition < 0) {
                     Log.w(LOG_TAG, "render_player failed", null, Log.status("status", -disposition))

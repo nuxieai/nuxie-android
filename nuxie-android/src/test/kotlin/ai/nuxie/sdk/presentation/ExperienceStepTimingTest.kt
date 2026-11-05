@@ -117,7 +117,7 @@ class ExperienceStepTimingTest {
             page.events("leave" to A_OWNER, "arrive" to B_OWNER)
             val t2 = page.frame()
             page.land(step)
-            val lines = lines()
+            val lines = stepLines()
             assertTrue("Lines were logged", lines.isNotEmpty())
             val id = idOf(lines.first())
             assertEquals(listOf(
@@ -127,6 +127,43 @@ class ExperienceStepTimingTest {
                 "D frame id=$id frameNanos=$t2 elapsedMs=16.667",
                 "D step land id=$id frameNanos=$t2 lengthMs=33.333",
             ), lines)
+        }
+    }
+
+    @Test fun `with the tag's switch on, each tick's present is logged with its result, stepping or polling`() = runTest {
+        debuggable(true)
+        NuxieLog.configure(LogLevel.DEBUG, redactSensitiveData = false)
+        ShadowLog.setLoggable(TAG, Log.VERBOSE)
+        withPage { page ->
+            // At rest: a frame that completes at once, one left submitted, the tick that polls it, then a new step.
+            val t0 = page.frame()
+            page.presentation(4)
+            val t1 = page.frame()
+            page.presentation(1)
+            val t2 = page.frame()
+            val t3 = page.frame()
+            val lines = lines().filter { it.startsWith("D present ") }
+            val nanos = lines.map { checkNotNull(Regex(" nanos=(\\d+)$").find(it)) { "No nanos in: $it" }.groupValues[1].toLong() }
+            assertEquals(listOf(
+                "D present tick=step result=1 frameNanos=$t0",
+                "D present tick=step result=4 frameNanos=$t1",
+                "D present tick=poll result=1 frameNanos=$t2",
+                "D present tick=step result=1 frameNanos=$t3",
+            ), lines.map { it.substringBefore(" nanos=") })
+            assertEquals("The present times run forward", nanos.sorted(), nanos)
+        }
+    }
+
+    @Test fun `with the tag's switch off, no present is logged, even at the verbose level`() = runTest {
+        debuggable(true)
+        ShadowLog.setLoggable(TAG, Log.INFO)
+        withPage { page ->
+            page.frame()
+            page.presentation(4)
+            page.frame()
+            page.presentation(1)
+            page.frame()
+            assertEquals(emptyList<String>(), lines().filter { it.contains("present") })
         }
     }
 
@@ -196,6 +233,9 @@ class ExperienceStepTimingTest {
         "$priority ${it.msg}"
     }
 
+    /** The step's own lines: with the switch on, each tick's present line prints beside them. */
+    private fun stepLines(): List<String> = lines().filterNot { it.startsWith("D present ") }
+
     private fun idOf(line: String): String = checkNotNull(Regex(" id=(\\d+) ").find(line)) { "No id in: $line" }.groupValues[1]
 
     /** One page with Screens a and b, a Magic Move pair between them, and a surface whose frames the test drives. */
@@ -222,6 +262,9 @@ class ExperienceStepTimingTest {
             clock += 16_666_667L
             return time
         }
+
+        /** The code the fake renderer's next presents return: 4 leaves the frame submitted, 1 completes it. */
+        fun presentation(code: Int) = lane.blockingCall { native.presentation = code }
 
         /** Lets the step's coroutine run its lane handoffs, with no frame and no virtual time passing. */
         fun pump() = repeat(8) { scope.runCurrent(); lane.blockingCall {} }

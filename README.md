@@ -365,6 +365,22 @@ step land id=<n> frameNanos=<ns> lengthMs=<ms>
   `redactSensitiveData = true` they read `<redacted hmac-sha256:...>`. Every
   other field is a number and stays readable.
 
+While the switch is on, a debuggable app also logs each frame tick's present
+call, at `DEBUG`, whether or not a step is moving:
+
+```text
+present tick=<step|poll> result=<code|video> frameNanos=<ns> nanos=<ns>
+```
+
+- `tick` is `poll` when the tick only polled the frame submitted before it,
+  and `step` when it stepped the player and drew a new frame.
+- `result` is the renderer's code: `4` submitted and still pending, `1`
+  completed, `2` completed and the surface retired, `0` nothing delivered, a
+  negative number a failure. `video` is a tick that waited for its video and
+  presented nothing.
+- `frameNanos` is the tick's Choreographer frame time. `nanos` is
+  `System.nanoTime()` as the call returned, on the same clock.
+
 ## Startup process-death qualification
 
 Build and install the debug instrumentation APK on a dedicated test device, then

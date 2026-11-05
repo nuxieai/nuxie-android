@@ -1,6 +1,7 @@
 package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.logging.NuxieLog
+import ai.nuxie.sdk.logging.NuxieLogger
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.util.Log
@@ -57,6 +58,20 @@ internal class ExperienceStepLog {
             NuxieLog.status("elapsedMs", milliseconds(elapsedSeconds * 1_000_000_000.0)))
         // With the switch on, the line prints in an app whose logLevel is DEBUG (UNIV-6104).
         if (step.frameLines) NuxieLog.d(TAG, "frame", null, *fields) else NuxieLog.v(TAG, "frame", null, *fields)
+    }
+
+    /**
+     * After each tick's present call, stepping or polling, while the tag's switch is on (UNIV-6019). [result] is the
+     * renderer's code (4 submitted, 1 completed, 2 completed and the surface retired, 0 nothing delivered, negative a
+     * failure), or "video" when the tick waited for its video and presented nothing. `nanos` is the System.nanoTime()
+     * clock as the call returned, so a line can be placed among a recording's frames.
+     */
+    fun presented(frameNanos: Long, polled: Boolean, result: String) {
+        val nanos = System.nanoTime()
+        if (!switchedOn()) return
+        NuxieLog.d(TAG, "present", null, NuxieLogger.Field.publicValue("tick", if (polled) "poll" else "step"),
+            NuxieLogger.Field.publicValue("result", result), NuxieLog.status("frameNanos", frameNanos),
+            NuxieLog.status("nanos", nanos))
     }
 
     /** After a player step outside a frame. A move begun in it has no frame time, so its step logs nothing. */
