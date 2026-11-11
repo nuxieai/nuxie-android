@@ -178,10 +178,12 @@ internal class ExperienceSurfaceHost(
     internal suspend fun applyLayerTransition(presentationTimeoutMs: Long = 250, authoredTime: ExperienceAuthoredTime? = null,
         work: (ExperienceInteractivePage) -> Unit): Boolean {
         val completion = CompletableDeferred<Unit>()
+        // Sent now: time the batch waits behind other lane work still counts toward its first frame.
+        val sent = nanoTime()
         val accepted = lane.enqueue {
             if (released.get() || failureReported.get()) completion.cancel()
             else {
-                transitionWrites.addLast(TransitionWrite(emptyMap(), completion, nanoTime()) { work(checkNotNull(interactiveLayer)) })
+                transitionWrites.addLast(TransitionWrite(emptyMap(), completion, sent) { work(checkNotNull(interactiveLayer)) })
                 settleHiddenTransitions()
             }
         }
