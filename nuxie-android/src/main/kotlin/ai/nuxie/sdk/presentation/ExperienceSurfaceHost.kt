@@ -1795,7 +1795,7 @@ internal class ExperienceSurfaceHost(
                 if (!pendingPresentation) {
                     try {
                         if (videoPlayback?.isReadyForPresentation() == false) {
-                            stepLog?.presented(frameTimeNanos, polled, "video")
+                            stepLog?.presented(frameTimeNanos, polled, null)
                             return@enqueue
                         }
                     } catch (error: Throwable) {
@@ -1809,7 +1809,7 @@ internal class ExperienceSurfaceHost(
                 stepLog?.let { log ->
                     // The renderer is shared by a Journey's Screens: only an attach made by this call is this window's.
                     if (renderer.attachments != attachments) log.attached(renderer.presentPath)
-                    log.presented(frameTimeNanos, polled, disposition.toString())
+                    log.presented(frameTimeNanos, polled, disposition)
                 }
                 pendingPresentation = disposition == 4
                 if (disposition < 0) {

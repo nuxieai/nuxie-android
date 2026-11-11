@@ -1,7 +1,6 @@
 package ai.nuxie.sdk.presentation
 
 import ai.nuxie.sdk.logging.NuxieLog
-import ai.nuxie.sdk.logging.NuxieLogger
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.util.Log
@@ -63,15 +62,20 @@ internal class ExperienceStepLog {
     /**
      * After each tick's present call, stepping or polling, while the tag's switch is on (UNIV-6019). [result] is the
      * renderer's code (4 submitted, 1 completed, 2 completed and the surface retired, 0 nothing delivered, negative a
-     * failure), or "video" when the tick waited for its video and presented nothing. `nanos` is the System.nanoTime()
-     * clock as the call returned, so a line can be placed among a recording's frames.
+     * failure), or null when the tick waited for its video and presented nothing (logged as "video"). `nanos` is the
+     * System.nanoTime() clock as the call returned, so a line can be placed among a recording's frames. Each word comes
+     * from a fixed set, so it is part of a constant message rather than a field (NuxieLoggingPolicy).
      */
-    fun presented(frameNanos: Long, polled: Boolean, result: String) {
+    fun presented(frameNanos: Long, polled: Boolean, result: Int?) {
         val nanos = System.nanoTime()
         if (!switchedOn()) return
-        NuxieLog.d(TAG, "present", null, NuxieLogger.Field.publicValue("tick", if (polled) "poll" else "step"),
-            NuxieLogger.Field.publicValue("result", result), NuxieLog.status("frameNanos", frameNanos),
-            NuxieLog.status("nanos", nanos))
+        val frame = NuxieLog.status("frameNanos", frameNanos)
+        val returned = NuxieLog.status("nanos", nanos)
+        when {
+            result == null -> NuxieLog.d(TAG, "present tick=step result=video", null, frame, returned)
+            polled -> NuxieLog.d(TAG, "present tick=poll", null, NuxieLog.status("result", result), frame, returned)
+            else -> NuxieLog.d(TAG, "present tick=step", null, NuxieLog.status("result", result), frame, returned)
+        }
     }
 
     /**
@@ -81,7 +85,9 @@ internal class ExperienceStepLog {
     fun attached(path: String) {
         val nanos = System.nanoTime()
         if (!switchedOn()) return
-        NuxieLog.d(TAG, "attach", null, NuxieLogger.Field.publicValue("path", path), NuxieLog.status("nanos", nanos))
+        val returned = NuxieLog.status("nanos", nanos)
+        if (path == "copy") NuxieLog.d(TAG, "attach path=copy", null, returned)
+        else NuxieLog.d(TAG, "attach path=swapchain", null, returned)
     }
 
     /** After a player step outside a frame. A move begun in it has no frame time, so its step logs nothing. */
