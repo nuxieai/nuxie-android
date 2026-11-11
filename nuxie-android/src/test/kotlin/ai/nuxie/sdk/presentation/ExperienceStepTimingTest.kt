@@ -74,7 +74,7 @@ class ExperienceStepTimingTest {
                 "V frame id=$forwardId frameNanos=$t3 elapsedMs=16.667",
                 "D step land id=$forwardId frameNanos=$t2 lengthMs=33.333",
                 "D step start id=$backId from=b to=a back=1 frameNanos=$t4",
-                "V frame id=$backId frameNanos=$t4 elapsedMs=0.0",
+                "V frame id=$backId frameNanos=$t4 elapsedMs=11.667",
                 "V frame id=$backId frameNanos=$t5 elapsedMs=16.667",
                 "D step land id=$backId frameNanos=$t5 lengthMs=16.667",
             ), lines)
@@ -243,6 +243,42 @@ class ExperienceStepTimingTest {
         }
     }
 
+    @Test fun `a step's first frame is drawn at its own time, after its phases and begin settle`() = runTest {
+        debuggable(true)
+        withPage { page ->
+            // At rest, so the clock is running when the step is sent 5 ms after t1 (UNIV-6118).
+            page.frame()
+            val t1 = page.frame()
+            val step = page.begin(page.toB, back = false)
+            val sent = t1 + SENT_AFTER_FRAME_NANOS
+            val t2 = page.frame()
+            page.pump()
+            val t3 = page.frame()
+            page.events("leave" to A_OWNER, "arrive" to B_OWNER)
+            val t4 = page.frame()
+            page.land(step)
+
+            // The frame that presents the step first steps by zero, so the batch's phases and begin reach the
+            // state machines, then by the time since the batch was sent: its drawing is already that far along.
+            val trace = page.trace()
+            val begun = trace.indexOfFirst { it.startsWith("begin:") }
+            assertTrue("The step began", begun >= 0)
+            val steps = trace.drop(begun + 1).filter { it.startsWith("step:") }
+            val firstFrame = (t2 - sent) / 1_000_000_000.0
+            assertEquals(listOf("step:0.0", "step:${firstFrame.toFloat()}", "step:${(FRAME_NANOS / 1_000_000_000.0).toFloat()}"),
+                steps.take(3))
+            val lines = lines()
+            val id = idOf(lines.first())
+            assertEquals(listOf(
+                "D step start id=$id from=a to=b back=0 frameNanos=$t2",
+                "V frame id=$id frameNanos=$t2 elapsedMs=11.667",
+                "V frame id=$id frameNanos=$t3 elapsedMs=16.667",
+                "V frame id=$id frameNanos=$t4 elapsedMs=16.667",
+                "D step land id=$id frameNanos=$t4 lengthMs=33.333",
+            ), lines.filter { it.contains(" id=$id ") })
+        }
+    }
+
     @Test fun `a release build logs nothing on this path, even at the verbose level`() = runTest {
         debuggable(false)
         withPage { page ->
@@ -281,8 +317,9 @@ class ExperienceStepTimingTest {
         private val mounted: ExperienceMountedScreen,
         private val listener: ExperienceSurfaceHost.Listener,
         source: PreparedPresentation,
+        /** The next frame's time. The surface's own clock reads 5 ms after the last frame (see [withPage]). */
+        private val clock: java.util.concurrent.atomic.AtomicLong,
     ) {
-        private var clock = 1_000_000_000L
         private val transition = Json.parseToJsonElement("""{"type":"magic-move","transitionId":"pair"}""").jsonObject
         val toB = source.copy(screenId = "b", artboardName = "B", pageHistory = listOf("a", "b"), transition = transition,
             screenLifecycle = ExperienceScreenLifecycle(), retainedViewModel = AtomicReference())
@@ -290,12 +327,15 @@ class ExperienceStepTimingTest {
 
         /** One Choreographer frame at the next 60 Hz frame time, run to its end. Returns its frame time. */
         fun frame(): Long {
-            val time = clock
+            val time = clock.get()
             surface.doFrame(time)
             lane.blockingCall {}
-            clock += 16_666_667L
+            clock.addAndGet(16_666_667L)
             return time
         }
+
+        /** Every native call the fake runtime recorded, in order. */
+        fun trace(): List<String> = lane.blockingCall { native.trace.toList() }
 
         /** The code the fake renderer's next presents return: 4 leaves the frame submitted, 1 completes it. */
         fun presentation(code: Int) = lane.blockingCall { native.presentation = code }
@@ -344,7 +384,10 @@ class ExperienceStepTimingTest {
             "destinationScreenId":"b","durationMs":100,"incomingOnTop":true,"source":{"completeEventName":"leave"},
             "destination":{"completeEventName":"arrive"},"reverse":{"durationMs":100,
             "source":{"completeEventName":"leave.reverse"},"destination":{"completeEventName":"arrive.reverse"}}}]}}""").jsonObject
-        val surface = ExperienceSurfaceHost(app, lane, runtime = NuxieRuntime(native), usesSystemFrameCallbacks = false)
+        val clock = java.util.concurrent.atomic.AtomicLong(1_000_000_000L)
+        // A step's batch is sent between frames: 5 ms after the last frame, 11.667 ms before the next.
+        val surface = ExperienceSurfaceHost(app, lane, runtime = NuxieRuntime(native), usesSystemFrameCallbacks = false,
+            nanoTime = { clock.get() - FRAME_NANOS + SENT_AFTER_FRAME_NANOS })
         val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
         val scene = java.io.File.createTempFile("step-timing", ".riv").apply { writeBytes(byteArrayOf(1)) }
         val listener = object : ExperienceSurfaceHost.Listener {
@@ -371,7 +414,7 @@ class ExperienceStepTimingTest {
             }
             mounted = ExperienceMountedScreen(activity.get(), source, listener, { throw AssertionError(it) })
             set(mounted, "surface", surface)
-            body(Page(this, surface, native, lane, mounted, listener, source))
+            body(Page(this, surface, native, lane, mounted, listener, source, clock))
         } finally {
             mounted?.let {
                 val ownedLane = field(it, "lane") as NuxieRuntimeLane
@@ -389,6 +432,9 @@ class ExperienceStepTimingTest {
         /** The values of Screens a and b in the fake runtime, which own the events each Screen reports. */
         const val A_OWNER = 200L
         const val B_OWNER = 300L
+        const val FRAME_NANOS = 16_666_667L
+        /** When the harness sends a step's batch: this long after the frame before it. */
+        const val SENT_AFTER_FRAME_NANOS = 5_000_000L
 
         fun <T> NuxieRuntimeLane.blockingCall(work: () -> T): T = runBlocking { call(work) }
         fun field(owner: Any, name: String): Any? = owner.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(owner)

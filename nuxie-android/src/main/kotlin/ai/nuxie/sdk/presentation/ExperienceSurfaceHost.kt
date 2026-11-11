@@ -74,6 +74,8 @@ internal class ExperienceSurfaceHost(
     private val runValues: ExperienceRunValues? = null,
     private val fitsContentHeight: Boolean = false,
     private val initialPresentationSize: ExperienceArtboardSize? = null,
+    /** The clock Choreographer frame times are on; a transition write is stamped with it when it is sent. */
+    private val nanoTime: () -> Long = System::nanoTime,
 ) : TextureView(context), TextureView.SurfaceTextureListener, Choreographer.FrameCallback {
     @Volatile private var layoutBounds = artboardSize
     private data class LayoutDelivery(val bounds: ExperienceArtboardSize, val contentHeight: Float?)
@@ -179,7 +181,7 @@ internal class ExperienceSurfaceHost(
         val accepted = lane.enqueue {
             if (released.get() || failureReported.get()) completion.cancel()
             else {
-                transitionWrites.addLast(TransitionWrite(emptyMap(), completion) { work(checkNotNull(interactiveLayer)) })
+                transitionWrites.addLast(TransitionWrite(emptyMap(), completion, nanoTime()) { work(checkNotNull(interactiveLayer)) })
                 settleHiddenTransitions()
             }
         }
@@ -577,9 +579,14 @@ internal class ExperienceSurfaceHost(
         return completion
     }
 
+    /**
+     * One transition's batch. [sentNanos] is when it was sent, on the frame clock: the step's clock starts
+     * there, so the frame that presents it already shows the step that far along (UNIV-6118).
+     */
     private data class TransitionWrite(
         val values: Map<String, NuxieViewModelScalarValue>,
         val completion: CompletableDeferred<Unit>,
+        val sentNanos: Long,
         val apply: (() -> Unit)? = null,
     )
     private val transitionWrites = ArrayDeque<TransitionWrite>()
@@ -597,7 +604,7 @@ internal class ExperienceSurfaceHost(
     /** Match iOS: apply the phase and settle it before the transition watchdog starts. */
     suspend fun applyTransitionValues(values: Map<String, NuxieViewModelScalarValue>) {
         val completion = CompletableDeferred<Unit>()
-        val write = TransitionWrite(values.toMap(), completion)
+        val write = TransitionWrite(values.toMap(), completion, nanoTime())
         val accepted = lane.enqueue {
             if (released.get() || failureReported.get()) {
                 completion.cancel()
@@ -656,15 +663,18 @@ internal class ExperienceSurfaceHost(
         }
     }
 
-    /** One ordinary zero-time step, its result delivered as a frame's would be (R3c, S8). */
-    internal fun stepZeroDeltaOnLane() {
+    /**
+     * One ordinary zero-time step, its result delivered as a frame's would be (R3c, S8). [framed] is a settle
+     * inside a frame that steps again with real time, so a move begun in it is still started by that frame.
+     */
+    internal fun stepZeroDeltaOnLane(framed: Boolean = false) {
         val correlationId = nextCorrelationId
         nextCorrelationId = if (nextCorrelationId == ULong.MAX_VALUE) 1uL else nextCorrelationId + 1uL
         val outcome = stepAndRefreshFocus {
             checkNotNull(player).stepTyped(elapsedSeconds = 0.0, correlationId = correlationId,
                 textRunNames = emptyList())
         }
-        stepLog?.unframed()
+        if (!framed) stepLog?.unframed()
         captureStepSnapshot(outcome, correlationId)?.let(::retainScreenValues)
         publishSteps()
     }
@@ -1654,8 +1664,11 @@ internal class ExperienceSurfaceHost(
                 val polled = pendingPresentation
                 if (!pendingPresentation) {
                     drainTextWrites()
+                    val presentedBefore = presentedTransitionWrite
                     applyNextTransitionWrite()
                     if (failureReported.get()) return@enqueue
+                    // The transition write this tick applied, if any: this frame presents it.
+                    val sent = presentedTransitionWrite?.takeIf { it !== presentedBefore }
                     // A submitted frame owns its model revision through completion and semantic capture.
                     // Coalesce newer environment values and apply them before advancing the next frame.
                     if (runtimeValuesPending) {
@@ -1666,8 +1679,22 @@ internal class ExperienceSurfaceHost(
                     // tick may have retired its pending submission. Polling does
                     // not consume time, and visibility generations reset it.
                     val resumed = timelineResumed.also { timelineResumed = false }
-                    val elapsedSeconds = if (layoutStepPending || presentedTransitionWrite != null || lastSteppedGeneration != generation || resumed) {
+                    val clockReset = layoutStepPending || lastSteppedGeneration != generation || resumed
+                    val elapsedSeconds = if (clockReset) {
                         0.0
+                    } else if (sent != null) {
+                        // A step's clock starts when its batch was sent, and its first frame is drawn at its own
+                        // time, as Hero's first frame is (UNIV-6118). The batch's phases and begin settle first:
+                        // a state entered during an advance starts its timeline at 0 and plays from the next one.
+                        try {
+                            stepZeroDeltaOnLane(framed = true)
+                        } catch (error: Throwable) {
+                            reportFailure(ExperiencePresentationException.Reason.HOST_FAILED,
+                                "Experience transition step failed", error)
+                            return@enqueue
+                        }
+                        // Never time an earlier frame already stepped, nor a batch sent after this frame's time.
+                        (frameTimeNanos - maxOf(sent.sentNanos, lastFrameNanos)).coerceAtLeast(0L) / 1_000_000_000.0
                     } else {
                         (frameTimeNanos - lastFrameNanos) / 1_000_000_000.0
                     }
