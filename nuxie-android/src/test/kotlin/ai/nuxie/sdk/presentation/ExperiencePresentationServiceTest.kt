@@ -30,6 +30,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -184,6 +185,48 @@ class ExperiencePresentationServiceTest {
         assertTrue(service.ownsJourney(owner))
         PresentationRegistry.detach(launched.single(), host)
         service.shutdownOwnedBy("customer-1")
+    }
+
+    @Test
+    fun `an identity change or host dismissal waits out an authored Exit longer than the native limit`() = runTest {
+        for (identity in listOf(true, false)) {
+            val release = renderedJourneyRelease()
+            val launched = mutableListOf<String>()
+            val service = service(this, launch = launched::add)
+            val presentation = async {
+                service.presentJourney(testPresentationFences(), release, "screen_welcome", "journey-1", "customer-1",
+                    service.reserveJourney("customer-1"), acquire = { acquired(release.identity, Lease()) }, onOutcome = {})
+            }
+            runCurrent()
+            val id = launched.single()
+            PresentationRegistry.reportFirstFrame(id)
+            presentation.await()
+            val moves = (checkNotNull(PresentationRegistry.observe(id)).value as PresentationContentState.Ready).content.moves
+            val test = this
+            // As the Activity does for a revealed Screen: its Exit plays as authored time, then the window goes.
+            val host = object : PresentationScreenHandle by AttachedHost() {
+                override fun finishAfterServiceClose() {
+                    val screen = this
+                    test.launch {
+                        moves.authoredTime.during { kotlinx.coroutines.delay(6_000) }
+                        PresentationRegistry.detach(id, screen)
+                    }
+                }
+            }
+            assertTrue(PresentationRegistry.attach(id, host))
+            val teardown = async {
+                runCatching { if (identity) service.shutdownOwnedBy("customer-1") else service.dismissFromHost("customer-1") }
+            }
+            runCurrent()
+            advanceTimeBy(5_500)
+            runCurrent()
+            assertFalse("Six authored seconds don't count against the native limit", teardown.isCompleted)
+            advanceTimeBy(600)
+            runCurrent()
+            assertTrue("The teardown ends once the Exit has played", teardown.isCompleted)
+            assertNull(teardown.await().exceptionOrNull())
+            PresentationRegistry.clearForTesting()
+        }
     }
 
     private fun reportCommerceSnapshot(id: String): NuxieViewModelSnapshot {
