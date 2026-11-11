@@ -1978,11 +1978,14 @@ internal class ExperiencePresentationService(
     }
 
     suspend fun dismissFromHost(initiatingDistinctId: String) {
-        synchronized(stateLock) { current?.moves }?.closeAfterLanding()
-        dismissFromHostNow(initiatingDistinctId)
+        val moves = synchronized(stateLock) { current?.moves }
+        moves?.closeAfterLanding()
+        dismissFromHostNow(initiatingDistinctId, moves?.authoredTime)
     }
 
-    private suspend fun dismissFromHostNow(initiatingDistinctId: String) = awaitPresentationRetirement {
+    /** [authoredTime] keeps the revealed Screen's authored Exit out of the native retirement limit. */
+    private suspend fun dismissFromHostNow(initiatingDistinctId: String, authoredTime: ExperienceAuthoredTime?) =
+        awaitPresentationRetirement(authoredTime) {
         val (active, attempt) = synchronized(stateLock) {
             preparation?.job?.cancel()
             current to preparation
@@ -2013,11 +2016,14 @@ internal class ExperiencePresentationService(
      * an owner-attributed identity terminal transition without a close fact.
      */
     suspend fun shutdownOwnedBy(ownerDistinctId: String) {
-        synchronized(stateLock) { current?.takeIf { it.ownerDistinctId == ownerDistinctId }?.moves }?.closeAfterLanding()
-        shutdownOwnedByNow(ownerDistinctId)
+        val moves = synchronized(stateLock) { current?.takeIf { it.ownerDistinctId == ownerDistinctId }?.moves }
+        moves?.closeAfterLanding()
+        shutdownOwnedByNow(ownerDistinctId, moves?.authoredTime)
     }
 
-    private suspend fun shutdownOwnedByNow(ownerDistinctId: String) = awaitPresentationRetirement {
+    /** [authoredTime] keeps the revealed Screen's authored Exit out of the native retirement limit. */
+    private suspend fun shutdownOwnedByNow(ownerDistinctId: String, authoredTime: ExperienceAuthoredTime?) =
+        awaitPresentationRetirement(authoredTime) {
         val (active, attempt) = synchronized(stateLock) {
             val departing = current?.takeIf { it.ownerDistinctId == ownerDistinctId }
             identityEpochByOwner[ownerDistinctId] =
