@@ -202,7 +202,9 @@ class ExperienceSurfaceHostPointerTest {
     @Test fun `custom watchdog waits for pending frame phase writes and zero delta step`() = kotlinx.coroutines.test.runTest {
         val native = RecordingNative("screen/phase")
         val lane = TestRuntimeLane()
-        val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
+        // The phase is sent at the time of the frame that presents it, so that frame advances by zero after its settle.
+        val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native),
+            nanoTime = { 1_048_000_000L })
         val texture = SurfaceTexture(0)
         val outgoing = ExperienceScreenExitHandshake()
         val incoming = ExperienceScreenExitHandshake()
@@ -267,7 +269,9 @@ class ExperienceSurfaceHostPointerTest {
             var renders = 0
             native.onRender = { renders++ }
             val lane = TestRuntimeLane()
-            val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native))
+            // The phase is sent at the phase frame's own time, so that frame advances by zero after its settle.
+            val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native),
+                nanoTime = { 1_032_000_000L })
             val texture = SurfaceTexture(0)
             try {
                 host.loadArtboard(byteArrayOf(1), null,
@@ -304,7 +308,8 @@ class ExperienceSurfaceHostPointerTest {
                     phase.await()
                     assertEquals(listOf(2f), native.stateWrites)
                     assertEquals(0f, native.elapsedSteps.last())
-                    assertEquals(if (mode == "preceding-frame") 3 else 2, native.elapsedSteps.size)
+                    // A frame that presents the phase settles it with a zero step, then advances (UNIV-6118).
+                    assertEquals(if (mode == "preceding-frame" || mode == "phase-frame") 3 else 2, native.elapsedSteps.size)
                 }
             } finally {
                 host.release()
