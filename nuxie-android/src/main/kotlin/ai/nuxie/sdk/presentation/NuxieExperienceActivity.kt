@@ -207,6 +207,10 @@ internal class NuxieExperienceActivity : Activity() {
                     // dismissed has no window left, so it finishes at once.
                     finishingAfterExit = true
                     layers.forEach { it.sheet?.setInputEnabled(false); it.screen.mounted?.setInputEnabled(false) }
+                    // A page step waiting on its checkpoint holds this page's clock until it returns or the
+                    // page starts its exit. The close cancels that wait, but its own release reaches the main
+                    // thread later, so the exit ends the hold here, before its authored time starts.
+                    mounted?.setCheckpointHold(false)
                     registryScope.launch {
                         try {
                             mounted?.awaitExit(reason)

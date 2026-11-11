@@ -30,6 +30,7 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import org.robolectric.annotation.Implementation
 import org.robolectric.annotation.Implements
+import org.robolectric.annotation.RealObject
 import org.robolectric.shadow.api.Shadow
 import org.robolectric.util.ReflectionHelpers
 
@@ -135,6 +136,32 @@ class ExperienceFullScreenSlideTest {
         }
     }
 
+    @Config(sdk = [36], shadows = [HeldExitShadow::class],
+        instrumentedPackages = ["ai.nuxie.sdk.presentation.ExperienceMountedScreen"])
+    @Test fun `an identity change during a page step's checkpoint plays the Exit on a running clock`() {
+        val presented = present(PresentationShell.fromTransition(null))
+        val activity = presented.activity
+        val screen = checkNotNull(ReflectionHelpers.getField<Any?>(activity, "currentScreen"))
+        (screen as ExperienceSurfaceHost.Listener).onFirstFrame()
+        assertTrue(runBlocking { PresentationRegistry.reveal(presented.id) })
+        val mounted = ExperienceMountedScreen(activity, ReflectionHelpers.getField(screen, "prepared"), screen, {},
+            createLane = ::TestRuntimeLane)
+        ReflectionHelpers.setField(screen, "mounted", mounted)
+        val exit = Shadow.extract<HeldExitShadow>(mounted)
+        // A page step is waiting on its Journey checkpoint, so the page's clock is held. The identity change
+        // cancels that wait, and the wait's own release would reach the main thread only after the close.
+        mounted.setCheckpointHold(true)
+
+        PresentationRegistry.dismiss(presented.id, CloseReason.IdentityChanged)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals("The identity change plays the Screen's Exit", listOf(ExperienceScreenLifecycle.ExitReason.DISMISSED), exit.exits)
+        assertEquals("The Exit starts with the checkpoint hold lifted", listOf(false), exit.heldAtExit)
+
+        exit.held.complete(Unit)
+        shadowOf(Looper.getMainLooper()).idle()
+        assertTrue("The Activity finishes once the Exit completes", activity.isFinishing)
+    }
+
     @Config(sdk = [23])
     @Test fun `on the lowest level the window gets that version's ordinary screen motion`() {
         val activity = present(PresentationShell.fromTransition(null)).activity
@@ -208,11 +235,15 @@ class ExperienceFullScreenSlideTest {
  */
 @Implements(className = "ai.nuxie.sdk.presentation.ExperienceMountedScreen", isInAndroidSdk = false)
 internal class HeldExitShadow {
+    @RealObject private lateinit var real: ExperienceMountedScreen
     val exits = mutableListOf<ExperienceScreenLifecycle.ExitReason>()
+    /** Whether the page's checkpoint hold was still on when each Exit started. */
+    val heldAtExit = mutableListOf<Boolean>()
     val held = CompletableDeferred<Unit>()
 
     @Implementation suspend fun awaitExit(reason: ExperienceScreenLifecycle.ExitReason) {
         exits += reason
+        heldAtExit += ReflectionHelpers.getField<Boolean>(real, "checkpointHold")
         held.await()
     }
 }
