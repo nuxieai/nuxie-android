@@ -676,9 +676,12 @@ internal class ExperienceSurfaceHost(
             checkNotNull(player).stepTyped(elapsedSeconds = 0.0, correlationId = correlationId,
                 textRunNames = emptyList())
         }
-        if (!framed) stepLog?.unframed()
         captureStepSnapshot(outcome, correlationId)?.let(::retainScreenValues)
-        publishSteps()
+        // A frame's own settle keeps its effects with the frame's step, published once the frame presents.
+        if (!framed) {
+            stepLog?.unframed()
+            publishSteps()
+        }
     }
 
     private fun cancelTransitionWrites() {
