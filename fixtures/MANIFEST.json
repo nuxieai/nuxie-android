@@ -1,6 +1,6 @@
 {
   "sourceRepo": "nuxieai/nuxie-ios",
-  "sourceCommit": "19bd41e8557ecaca5b147b0184d0b51e55115f1f",
+  "sourceCommit": "26b229d8c819c527a5800682911324fcba9b9775",
   "files": {
     "README.md": "264418356e4737989b888a6d34ebc0779abfe2eece7de6b37b92916ce43bbcca",
     "accessibility/control-state.json": "6a4e35c6c2f55575344f4a26a2bdb5f22728a41845464c3beeb93251082e97f2",
@@ -509,9 +509,9 @@
     "runtime/nested-values/state.json": "c19d2530b6a973ae89e5ed9c587e8f9f2e4241851c0a8e6135ccf372ee97e255",
     "runtime/page-host-live-moves/lifecycle2.json": "69fcac89b4279a8c57431eb6e656c1552a87fc8040e00d008b5ec9c979fb3149",
     "runtime/page-host-live-moves/lifecycle40.json": "26fc1a565770fdaaefdaa4fd01c5472edcccb1cf1182931a3e6ea7e80e46d781",
-    "runtime/page-host-live-moves/page2.riv": "e41bbb9120436738f6bdbad294ce4a25770bca8380cdc005e7e2a926443114e1",
-    "runtime/page-host-live-moves/page40.riv": "4efcb548f5b1ca6fbdcb2967e9a2105acf13e5721a5bc77fb3a3dc5d44d02e4b",
-    "runtime/page-host-live-moves/provenance.json": "6847366544d1ee18327d393744d22f73e44d043ef9492bdc6418507401f740d7",
+    "runtime/page-host-live-moves/page2.riv": "17ed05b8710b50bacef3f0ef0446b84a23e0fe48a711b366eea529c87684bf95",
+    "runtime/page-host-live-moves/page40.riv": "2a36daa6574f3815cc101056f22dae42050854215f017b52f81dae8bf3b7f4f8",
+    "runtime/page-host-live-moves/provenance.json": "a0885d306edff655b7960ab06b9fa63230504dd9959ff18e7d55dee7a034b361",
     "runtime/page-host-live-moves/video-inventory2.json": "62f920138a558e77e77c215f6dd0d35274ea32cdef479db5c52bc143064f39da",
     "runtime/page-host-text-fields/descriptor.json": "85e762e0d4fc3e50b8e8fd096c17dfbccdd4a9f5b35be44bf947f6334426f262",
     "runtime/page-host-text-fields/provenance.json": "b5270d09f66db76055314e34b67a03e69c39d30d1e6c18be6a4936216449abc1",
