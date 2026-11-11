@@ -1009,8 +1009,12 @@ internal class NuxieAndroidVulkanRenderer internal constructor(
     var attachments = 0L
         private set
 
-    /** How the attached window is presented: "swapchain" (Vulkan) or "copy" (the CPU window copy). */
-    val presentPath: String get() = if (copiesToWindow) "copy" else "swapchain"
+    /**
+     * How the most recent attach presents: "swapchain" (Vulkan) or "copy" (the CPU window copy). It outlives a
+     * detach, so a present that failed and detached still names the path it tried.
+     */
+    var presentPath = "swapchain"
+        private set
 
     fun detachSurface(window: NuxieRuntimeWindow): Int =
         if (attachedWindow == window.requireHandle()) detachSurface() else NUX_STATUS_OK
@@ -1087,6 +1091,7 @@ internal class NuxieAndroidVulkanRenderer internal constructor(
             }
             attachedWindow = windowHandle
             copiesToWindow = status == NUX_SURFACE_ATTACHMENT_UNSUPPORTED
+            presentPath = if (copiesToWindow) "copy" else "swapchain"
             attachments++
         }
         if (copiesToWindow) {

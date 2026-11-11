@@ -352,12 +352,15 @@ class NuxieOwnedRuntimeTest {
         assertEquals(2, native.copyCalls)
         assertEquals(0, native.presentCalls)
         assertEquals(listOf("attach:40"), native.surfaceCalls)
+        assertEquals("copy", renderer.presentPath)
         native.copyDisposition = contract.getValue("copyFailure").jsonPrimitive.int
         assertEquals(native.copyDisposition, renderer.renderAndPresent(player, window, 0, 1f))
+        assertEquals("A failed copy detaches, but still names the path it tried", "copy", renderer.presentPath)
         window.close()
         val replacement = NuxieRuntimeWindow(41L, native)
         native.attachStatus = contract.getValue("attached").jsonPrimitive.int
         assertEquals(1, renderer.renderAndPresent(player, replacement, 0, 1f))
+        assertEquals("swapchain", renderer.presentPath)
         assertEquals(1, native.presentCalls)
         renderer.resize(300, 400)
         native.attachStatus = contract.getValue("unsupportedAttachment").jsonPrimitive.int
