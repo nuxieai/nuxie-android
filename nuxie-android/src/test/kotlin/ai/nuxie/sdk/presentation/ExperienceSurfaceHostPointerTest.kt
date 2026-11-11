@@ -383,6 +383,57 @@ class ExperienceSurfaceHostPointerTest {
         }
     }
 
+    @Test fun `a step's first-frame settle publishes its effects only once that frame presents`() = kotlinx.coroutines.test.runTest {
+        val native = RecordingNative("screen/phase")
+        val lane = TestRuntimeLane()
+        val published = mutableListOf<ULong>()
+        val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native),
+            nanoTime = { 1_020_000_000L }, listener = object : ExperienceSurfaceHost.Listener {
+                override fun onFirstFrame() = Unit
+                override fun onFailure(error: ExperiencePresentationException) { throw error }
+                override fun onRuntimeStep(
+                    outcome: ai.nuxie.sdk.runtime.NuxiePlayerStepOutcome,
+                    correlationId: ULong,
+                    viewModelSnapshot: ai.nuxie.sdk.runtime.NuxieViewModelSnapshot?, saves: List<ExperienceResponseSaveRequest>,
+                ) { published += correlationId }
+            })
+        val texture = SurfaceTexture(0)
+        try {
+            host.loadArtboard(byteArrayOf(1), null,
+                viewModelProjection = NuxieViewModelListProjection("Root", "products", null, "Product", emptyList()))
+            host.onSurfaceTextureAvailable(texture, 100, 100)
+            drain(lane)
+            host.doFrame(1_000_000_000L)
+            drain(lane)
+            host.onSurfaceTextureUpdated(texture)
+            drain(lane)
+            host.doFrame(1_016_000_000L)
+            drain(lane)
+            published.clear()
+            val write = async { host.applyTransitionValues(mapOf("screen/phase" to NuxieViewModelScalarValue.NumberValue(2.0))) }
+            testScheduler.runCurrent()
+            // The settle that the step's first frame runs first emits an event; that frame stays pending.
+            native.events = arrayOf(ai.nuxie.sdk.runtime.NativeRuntimeEvent(
+                0, 0, "nx_exit_done:settle", "", "", 0f, emptyArray()))
+            native.presentation = 4
+            host.doFrame(1_032_000_000L)
+            drain(lane)
+            assertEquals("The frame settles, then advances from the send", listOf(0f, 0.012f), native.elapsedSteps.takeLast(2))
+            assertTrue("A pending frame publishes none of its settle's effects", published.isEmpty())
+            native.presentation = 1
+            host.doFrame(1_048_000_000L)
+            drain(lane)
+            testScheduler.runCurrent()
+            assertEquals("The settle's effects publish once the frame presents", 1, published.size)
+            write.await()
+        } finally {
+            host.release()
+            lane.shutdown()
+            assertTrue(lane.awaitQuiescence(2_000))
+            texture.release()
+        }
+    }
+
     @Test
     fun `pending surface submission polls without stepping or publishing effects`() {
         val native = RecordingNative()
