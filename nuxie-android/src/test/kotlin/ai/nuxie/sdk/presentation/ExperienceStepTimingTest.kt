@@ -279,6 +279,23 @@ class ExperienceStepTimingTest {
         }
     }
 
+    @Test fun `a batch that waits behind other lane work still counts that wait toward its first frame`() = runTest {
+        debuggable(true)
+        withPage { page ->
+            page.frame()
+            val t1 = page.frame()
+            // Sent 2 ms after t1; the lane is busy until 12 ms after t1, so it takes the batch 10 ms late.
+            val sent = t1 + 2_000_000L
+            val before = page.trace().size
+            val write = page.sendWhileLaneBusy(sent = sent, taken = t1 + 12_000_000L)
+            val t2 = page.frame()
+            val steps = page.trace().drop(before).filter { it.startsWith("step:") }
+            assertEquals(listOf("step:0.0", "step:${((t2 - sent) / 1_000_000_000.0).toFloat()}"), steps)
+            page.pump()
+            assertTrue("The batch's frame was presented", write.await())
+        }
+    }
+
     @Test fun `a release build logs nothing on this path, even at the verbose level`() = runTest {
         debuggable(false)
         withPage { page ->
@@ -319,6 +336,8 @@ class ExperienceStepTimingTest {
         source: PreparedPresentation,
         /** The next frame's time. The surface's own clock reads 5 ms after the last frame (see [withPage]). */
         private val clock: java.util.concurrent.atomic.AtomicLong,
+        /** The surface's own clock, when a test sets it. */
+        private val now: java.util.concurrent.atomic.AtomicLong,
     ) {
         private val transition = Json.parseToJsonElement("""{"type":"magic-move","transitionId":"pair"}""").jsonObject
         val toB = source.copy(screenId = "b", artboardName = "B", pageHistory = listOf("a", "b"), transition = transition,
@@ -336,6 +355,21 @@ class ExperienceStepTimingTest {
 
         /** Every native call the fake runtime recorded, in order. */
         fun trace(): List<String> = lane.blockingCall { native.trace.toList() }
+
+        /** Sends a transition batch at [sent] while the lane is busy with other work, which ends at [taken]. */
+        fun sendWhileLaneBusy(sent: Long, taken: Long): Deferred<Boolean> {
+            val entered = java.util.concurrent.CountDownLatch(1)
+            val release = java.util.concurrent.CountDownLatch(1)
+            lane.enqueue { entered.countDown(); release.await(5, java.util.concurrent.TimeUnit.SECONDS) }
+            assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            now.set(sent)
+            val write = scope.async { surface.applyLayerTransition(250) { } }
+            scope.runCurrent()
+            now.set(taken)
+            release.countDown()
+            lane.blockingCall {}
+            return write
+        }
 
         /** The code the fake renderer's next presents return: 4 leaves the frame submitted, 1 completes it. */
         fun presentation(code: Int) = lane.blockingCall { native.presentation = code }
@@ -385,9 +419,11 @@ class ExperienceStepTimingTest {
             "destination":{"completeEventName":"arrive"},"reverse":{"durationMs":100,
             "source":{"completeEventName":"leave.reverse"},"destination":{"completeEventName":"arrive.reverse"}}}]}}""").jsonObject
         val clock = java.util.concurrent.atomic.AtomicLong(1_000_000_000L)
-        // A step's batch is sent between frames: 5 ms after the last frame, 11.667 ms before the next.
+        // A test that sets [now] reads that; otherwise a step's batch is sent between frames: 5 ms after the last
+        // frame, 11.667 ms before the next.
+        val now = java.util.concurrent.atomic.AtomicLong(0L)
         val surface = ExperienceSurfaceHost(app, lane, runtime = NuxieRuntime(native), usesSystemFrameCallbacks = false,
-            nanoTime = { clock.get() - FRAME_NANOS + SENT_AFTER_FRAME_NANOS })
+            nanoTime = { now.get().takeIf { it != 0L } ?: (clock.get() - FRAME_NANOS + SENT_AFTER_FRAME_NANOS) })
         val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
         val scene = java.io.File.createTempFile("step-timing", ".riv").apply { writeBytes(byteArrayOf(1)) }
         val listener = object : ExperienceSurfaceHost.Listener {
@@ -414,7 +450,7 @@ class ExperienceStepTimingTest {
             }
             mounted = ExperienceMountedScreen(activity.get(), source, listener, { throw AssertionError(it) })
             set(mounted, "surface", surface)
-            body(Page(this, surface, native, lane, mounted, listener, source, clock))
+            body(Page(this, surface, native, lane, mounted, listener, source, clock, now))
         } finally {
             mounted?.let {
                 val ownedLane = field(it, "lane") as NuxieRuntimeLane
