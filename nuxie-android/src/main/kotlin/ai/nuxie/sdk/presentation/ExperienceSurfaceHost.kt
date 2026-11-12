@@ -753,13 +753,11 @@ internal class ExperienceSurfaceHost(
     // while captions, semantics, native fields and the drawn frame stay exactly as they are.
     @Volatile private var timelineHeld = false
     private var timelineResumed = false
-    private var lastFrameNanos = 0L
     /**
-     * How far past one refresh after its vsync the last stepped frame's picture is shown. Every frame is timed at
-     * its display time, its vsync plus one refresh plus this (UNIV-6118); it grows only when a step's first frame
-     * is drawn so late that its picture can only reach a later refresh, and a clock reset clears it.
+     * When the last stepped frame's picture is shown, on the frame clock. Every frame is timed at its display time
+     * and steps from this one (UNIV-6118), so a picture that missed its refresh is not counted again by the next.
      */
-    private var displayLagNanos = 0L
+    private var lastShownNanos = 0L
     private var lastSteppedGeneration = -1L
     private val pointerInput = ExperienceRuntimePointerInput(artboardSize)
     private val focusInput = ExperienceFocusInputQueue()
@@ -1699,8 +1697,11 @@ internal class ExperienceSurfaceHost(
                     // not consume time, and visibility generations reset it.
                     val resumed = timelineResumed.also { timelineResumed = false }
                     val clockReset = layoutStepPending || lastSteppedGeneration != generation || resumed
-                    if (clockReset) displayLagNanos = 0L
+                    // Every frame is timed when its picture is shown, as Core Animation times a layer animation: one
+                    // refresh after its vsync, or a later refresh if it is drawn too late for that one.
+                    val shownNanos: Long
                     val elapsedSeconds = if (clockReset) {
+                        shownNanos = frameTimeNanos + refreshNanos
                         0.0
                     } else if (sent != null) {
                         // A step's clock starts when its batch was sent, and its first frame is drawn at its own
@@ -1713,21 +1714,18 @@ internal class ExperienceSurfaceHost(
                                 "Experience transition step failed", error)
                             return@enqueue
                         }
-                        // Every frame is timed when its picture is shown, as Core Animation times a layer animation:
-                        // one refresh after its vsync. This one was drawn after the batch was sent, so its picture
-                        // is shown at a refresh still ahead of now. The step begins when its batch was sent, or
-                        // when the last stepped picture was shown if that is later, so time already stepped is
-                        // never stepped again. Either is before this picture is shown: the first frame moves.
-                        val lastShown = lastFrameNanos + refreshNanos + displayLagNanos
-                        val shown = displayTimeNanos(frameTimeNanos + refreshNanos + displayLagNanos, refreshNanos, nanoTime())
-                        displayLagNanos = shown - frameTimeNanos - refreshNanos
-                        (shown - maxOf(sent.sentNanos, lastShown)).coerceAtLeast(0L) / 1_000_000_000.0
+                        // This frame is drawn after the batch was sent, so its picture is shown at a refresh still
+                        // ahead of now. The step begins when its batch was sent, or when the last stepped picture
+                        // was shown if that is later, so time already stepped is never stepped again. Either is
+                        // before this picture is shown: the first frame moves.
+                        shownNanos = displayTimeNanos(frameTimeNanos + refreshNanos, refreshNanos, nanoTime())
+                        (shownNanos - maxOf(sent.sentNanos, lastShownNanos)).coerceAtLeast(0L) / 1_000_000_000.0
                     } else {
-                        // Each picture is shown one vsync spacing after the last, so the display times differ by it.
-                        (frameTimeNanos - lastFrameNanos) / 1_000_000_000.0
+                        shownNanos = frameTimeNanos + refreshNanos
+                        (shownNanos - lastShownNanos).coerceAtLeast(0L) / 1_000_000_000.0
                     }
                     if (!layoutStepPending || lastSteppedGeneration != generation || resumed) {
-                        lastFrameNanos = frameTimeNanos
+                        lastShownNanos = if (clockReset) shownNanos else maxOf(lastShownNanos, shownNanos)
                     }
                     lastSteppedGeneration = generation
                     val correlationId = nextCorrelationId
