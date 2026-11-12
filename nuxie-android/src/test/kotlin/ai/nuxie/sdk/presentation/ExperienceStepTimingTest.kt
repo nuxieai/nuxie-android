@@ -329,6 +329,45 @@ class ExperienceStepTimingTest {
         }
     }
 
+    @Test fun `everything a step starts shares one start, both Screens' phases and the begin entering on one zero step`() = runTest {
+        debuggable(true)
+        withPage { page ->
+            page.frame()
+            val t1 = page.frame()
+            val t2 = t1 + FRAME_NANOS
+            val sent = t2 + SENT_AFTER_FRAME_NANOS
+            page.tracePhases()
+            page.at(sent)
+            val step = page.begin(page.toB, back = false)
+            assertEquals(t2, page.frame())
+            page.at(0L)
+            page.pump()
+            page.frame()
+            page.events("leave" to A_OWNER, "arrive" to B_OWNER)
+            page.frame()
+            page.land(step)
+
+            // A Screen's fade plays from its phase, a flight from the begin. Both Screens' phase writes and the
+            // begin reach the runtime before one zero step, which enters every state they start; the frame's first
+            // real-time step then moves them all by the same time, so a Screen's fade starts on the flight's frame.
+            val trace = page.trace()
+            val begun = trace.indexOfFirst { it.startsWith("begin:") }
+            val settle = trace.withIndex().first { it.index > begun && it.value.startsWith("step:") }.index
+            val starting = trace.subList(0, begun).filter { it.startsWith("phase:") }.takeLast(2)
+            assertEquals("Both Screens' phases are written in the step's batch, before its begin: $trace",
+                2, starting.map { it.split(":")[1] }.toSet().size)
+            assertEquals("The begin is followed by the zero step: $trace", "step:0.0", trace[settle])
+            assertTrue("Nothing is written between the begin and its zero step: $trace",
+                trace.subList(begun + 1, settle).none { it.startsWith("phase:") || it.startsWith("begin:") })
+            val first = trace[trace.withIndex().first { it.index > settle && it.value.startsWith("step:") }.index]
+            assertEquals("step:${((t2 + REFRESH_NANOS - sent) / 1_000_000_000.0).toFloat()}", first)
+            val firstStep = trace.indexOf(first)
+            val landing = trace.indexOfFirst { it.startsWith("end:") }
+            assertTrue("No phase is written while the step plays, before its landing: $trace",
+                trace.subList(firstStep, landing).none { it.startsWith("phase:") })
+        }
+    }
+
     @Test fun `a step sent before the last picture is shown counts from that picture, one refresh before its own`() = runTest {
         debuggable(true)
         withPage { page ->
@@ -432,6 +471,9 @@ class ExperienceStepTimingTest {
             clock.addAndGet(16_666_667L)
             return time
         }
+
+        /** Records each Screen's phase write in [trace]. */
+        fun tracePhases() = lane.blockingCall { native.tracePhases = true }
 
         /** Sets the display's refresh interval, as a change of refresh rate does. */
         fun refresh(nanos: Long) = refreshNanos.set(nanos)
