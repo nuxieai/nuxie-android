@@ -202,7 +202,8 @@ class ExperienceSurfaceHostPointerTest {
     @Test fun `custom watchdog waits for pending frame phase writes and zero delta step`() = kotlinx.coroutines.test.runTest {
         val native = RecordingNative("screen/phase")
         val lane = TestRuntimeLane()
-        // The phase is sent at the time of the frame that presents it, so that frame advances by zero after its settle.
+        // The phase is sent at the time of the frame that presents it; that frame settles with a zero step, then advances
+        // by one refresh, the time from the send until the frame is shown (UNIV-6118).
         val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native),
             nanoTime = { 1_048_000_000L })
         val texture = SurfaceTexture(0)
@@ -240,7 +241,8 @@ class ExperienceSurfaceHostPointerTest {
             drain(lane)
             testScheduler.runCurrent()
             assertEquals(listOf(2f), native.stateWrites)
-            assertEquals("Phase application includes a zero-delta step", 0f, native.elapsedSteps.last())
+            assertEquals("Phase application settles with a zero-delta step, then steps to its display time",
+                listOf(0f, 0.016666666f), native.elapsedSteps.takeLast(2))
             testScheduler.advanceTimeBy(plan.watchdogMs + 1)
             testScheduler.runCurrent()
             assertTrue("The phase frame must complete before the watchdog starts", transition.isActive)
@@ -269,7 +271,8 @@ class ExperienceSurfaceHostPointerTest {
             var renders = 0
             native.onRender = { renders++ }
             val lane = TestRuntimeLane()
-            // The phase is sent at the phase frame's own time, so that frame advances by zero after its settle.
+            // The phase is sent at the phase frame's own time; that frame settles with a zero step, then advances by one
+            // refresh, the time from the send until the frame is shown (UNIV-6118).
             val host = ExperienceSurfaceHost(RuntimeEnvironment.getApplication(), lane, runtime = NuxieRuntime(native),
                 nanoTime = { 1_032_000_000L })
             val texture = SurfaceTexture(0)
@@ -307,8 +310,12 @@ class ExperienceSurfaceHostPointerTest {
                 } else {
                     phase.await()
                     assertEquals(listOf(2f), native.stateWrites)
-                    assertEquals(0f, native.elapsedSteps.last())
-                    // A frame that presents the phase settles it with a zero step, then advances (UNIV-6118).
+                    // A frame that presents the phase settles it with a zero step, then advances to its display time (UNIV-6118).
+                    if (mode == "phase-frame") {
+                        assertEquals(listOf(0f, 0.016666666f), native.elapsedSteps.takeLast(2))
+                    } else {
+                        assertEquals(0f, native.elapsedSteps.last())
+                    }
                     assertEquals(if (mode == "preceding-frame" || mode == "phase-frame") 3 else 2, native.elapsedSteps.size)
                 }
             } finally {
@@ -418,7 +425,9 @@ class ExperienceSurfaceHostPointerTest {
             native.presentation = 4
             host.doFrame(1_032_000_000L)
             drain(lane)
-            assertEquals("The frame settles, then advances from the send", listOf(0f, 0.012f), native.elapsedSteps.takeLast(2))
+            // Sent at 1.020, before the previous frame (vsync 1.016) is shown at 1.016 plus a refresh: the step counts from
+            // that picture to this frame's display, 1.032 plus a refresh, so one frame-time apart.
+            assertEquals("The frame settles, then advances to its display time", listOf(0f, 0.016f), native.elapsedSteps.takeLast(2))
             assertTrue("A pending frame publishes none of its settle's effects", published.isEmpty())
             native.presentation = 1
             host.doFrame(1_048_000_000L)

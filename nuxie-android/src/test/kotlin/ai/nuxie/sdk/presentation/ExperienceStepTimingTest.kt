@@ -74,7 +74,8 @@ class ExperienceStepTimingTest {
                 "V frame id=$forwardId frameNanos=$t3 elapsedMs=16.667",
                 "D step land id=$forwardId frameNanos=$t2 lengthMs=33.333",
                 "D step start id=$backId from=b to=a back=1 frameNanos=$t4",
-                "V frame id=$backId frameNanos=$t4 elapsedMs=11.667",
+                // The Back was sent before the forward's last picture was shown (at t4), so it counts from there.
+                "V frame id=$backId frameNanos=$t4 elapsedMs=16.667",
                 "V frame id=$backId frameNanos=$t5 elapsedMs=16.667",
                 "D step land id=$backId frameNanos=$t5 lengthMs=16.667",
             ), lines)
@@ -243,15 +244,19 @@ class ExperienceStepTimingTest {
         }
     }
 
-    @Test fun `a step's first frame is drawn at its own time, after its phases and begin settle`() = runTest {
+    @Test fun `a step sent after its frame's vsync draws its first frame already moved, timed when it is shown`() = runTest {
         debuggable(true)
         withPage { page ->
-            // At rest, so the clock is running when the step is sent 5 ms after t1 (UNIV-6118).
+            // At rest, so the clock is running. The phone's order (UNIV-6118): the step's batch is sent 5 ms after
+            // the vsync of the frame that then presents it, which is shown one refresh after that vsync.
             page.frame()
             val t1 = page.frame()
+            val t2 = t1 + FRAME_NANOS
+            val sent = t2 + SENT_AFTER_FRAME_NANOS
+            page.at(sent)
             val step = page.begin(page.toB, back = false)
-            val sent = t1 + SENT_AFTER_FRAME_NANOS
-            val t2 = page.frame()
+            assertEquals(t2, page.frame())
+            page.at(0L)
             page.pump()
             val t3 = page.frame()
             page.events("leave" to A_OWNER, "arrive" to B_OWNER)
@@ -259,14 +264,18 @@ class ExperienceStepTimingTest {
             page.land(step)
 
             // The frame that presents the step first steps by zero, so the batch's phases and begin reach the
-            // state machines, then by the time since the batch was sent: its drawing is already that far along.
+            // state machines, then by the time from the send to when that frame's picture is shown, t2 plus one
+            // refresh. Each later frame steps by one refresh, on the same display-time base: no jump, no zero.
             val trace = page.trace()
             val begun = trace.indexOfFirst { it.startsWith("begin:") }
             assertTrue("The step began", begun >= 0)
             val steps = trace.drop(begun + 1).filter { it.startsWith("step:") }
-            val firstFrame = (t2 - sent) / 1_000_000_000.0
-            assertEquals(listOf("step:0.0", "step:${firstFrame.toFloat()}", "step:${(FRAME_NANOS / 1_000_000_000.0).toFloat()}"),
-                steps.take(3))
+            val firstFrame = (t2 + REFRESH_NANOS - sent) / 1_000_000_000.0
+            // Frames come one vsync apart, so each later picture is shown one vsync after the one before.
+            val refresh = (FRAME_NANOS / 1_000_000_000.0).toFloat()
+            assertTrue("The first frame moves", firstFrame > 0)
+            assertEquals(listOf("step:0.0", "step:${firstFrame.toFloat()}", "step:$refresh", "step:$refresh"),
+                steps.take(4))
             val lines = lines()
             val id = idOf(lines.first())
             assertEquals(listOf(
@@ -279,18 +288,43 @@ class ExperienceStepTimingTest {
         }
     }
 
+    @Test fun `a step sent before the last picture is shown counts from that picture, one refresh before its own`() = runTest {
+        debuggable(true)
+        withPage { page ->
+            page.frame()
+            val t1 = page.frame()
+            // Sent 5 ms after t1's vsync, before t1's picture is shown at t2: the time to t2 was already stepped.
+            val step = page.begin(page.toB, back = false)
+            val t2 = page.frame()
+            page.pump()
+            val t3 = page.frame()
+            page.events("leave" to A_OWNER, "arrive" to B_OWNER)
+            page.frame()
+            page.land(step)
+
+            val trace = page.trace()
+            val begun = trace.indexOfFirst { it.startsWith("begin:") }
+            val steps = trace.drop(begun + 1).filter { it.startsWith("step:") }
+            val refresh = (FRAME_NANOS / 1_000_000_000.0).toFloat()
+            assertEquals(listOf("step:0.0", "step:$refresh", "step:$refresh"), steps.take(3))
+            assertTrue(t3 > t2 && t2 > t1)
+        }
+    }
+
     @Test fun `a batch that waits behind other lane work still counts that wait toward its first frame`() = runTest {
         debuggable(true)
         withPage { page ->
             page.frame()
             val t1 = page.frame()
-            // Sent 2 ms after t1; the lane is busy until 12 ms after t1, so it takes the batch 10 ms late.
-            val sent = t1 + 2_000_000L
+            val t2 = t1 + FRAME_NANOS
+            // Sent 2 ms after t2's vsync; the lane is busy until 12 ms after it, so it takes the batch 10 ms late.
+            // That frame's picture is shown at t2 plus one refresh, and the step counts from the send.
+            val sent = t2 + 2_000_000L
             val before = page.trace().size
-            val write = page.sendWhileLaneBusy(sent = sent, taken = t1 + 12_000_000L)
-            val t2 = page.frame()
+            val write = page.sendWhileLaneBusy(sent = sent, taken = t2 + 12_000_000L)
+            assertEquals(t2, page.frame())
             val steps = page.trace().drop(before).filter { it.startsWith("step:") }
-            assertEquals(listOf("step:0.0", "step:${((t2 - sent) / 1_000_000_000.0).toFloat()}"), steps)
+            assertEquals(listOf("step:0.0", "step:${((t2 + REFRESH_NANOS - sent) / 1_000_000_000.0).toFloat()}"), steps)
             page.pump()
             assertTrue("The batch's frame was presented", write.await())
         }
@@ -339,6 +373,9 @@ class ExperienceStepTimingTest {
         /** The surface's own clock, when a test sets it. */
         private val now: java.util.concurrent.atomic.AtomicLong,
     ) {
+        /** Sets the surface's own clock; 0 goes back to 5 ms after the last frame. */
+        fun at(nanos: Long) = now.set(nanos)
+
         private val transition = Json.parseToJsonElement("""{"type":"magic-move","transitionId":"pair"}""").jsonObject
         val toB = source.copy(screenId = "b", artboardName = "B", pageHistory = listOf("a", "b"), transition = transition,
             screenLifecycle = ExperienceScreenLifecycle(), retainedViewModel = AtomicReference())
@@ -471,6 +508,8 @@ class ExperienceStepTimingTest {
         const val FRAME_NANOS = 16_666_667L
         /** When the harness sends a step's batch: this long after the frame before it. */
         const val SENT_AFTER_FRAME_NANOS = 5_000_000L
+        /** The test display's refresh interval (60 Hz), as the surface reads it. */
+        const val REFRESH_NANOS = 16_666_666L
 
         fun <T> NuxieRuntimeLane.blockingCall(work: () -> T): T = runBlocking { call(work) }
         fun field(owner: Any, name: String): Any? = owner.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(owner)

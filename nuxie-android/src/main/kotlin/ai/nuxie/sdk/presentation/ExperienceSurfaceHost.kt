@@ -754,6 +754,12 @@ internal class ExperienceSurfaceHost(
     @Volatile private var timelineHeld = false
     private var timelineResumed = false
     private var lastFrameNanos = 0L
+    /**
+     * How far past one refresh after its vsync the last stepped frame's picture is shown. Every frame is timed at
+     * its display time, its vsync plus one refresh plus this (UNIV-6118); it grows only when a step's first frame
+     * is drawn so late that its picture can only reach a later refresh, and a clock reset clears it.
+     */
+    private var displayLagNanos = 0L
     private var lastSteppedGeneration = -1L
     private val pointerInput = ExperienceRuntimePointerInput(artboardSize)
     private val focusInput = ExperienceFocusInputQueue()
@@ -1628,11 +1634,19 @@ internal class ExperienceSurfaceHost(
         }
     }
 
+    /** The display's refresh interval; 60 Hz when the view has no display yet. */
+    private fun refreshIntervalNanos(): Long {
+        val rate = display?.refreshRate?.takeIf { it.isFinite() && it >= 1f } ?: 60f
+        return (1_000_000_000.0 / rate).toLong()
+    }
+
     override fun doFrame(frameTimeNanos: Long) {
         if (!running || failureReported.get()) return
         refreshLayoutDensity()
         if (usesSystemFrameCallbacks) Choreographer.getInstance().postFrameCallback(this)
         if (!framePending.compareAndSet(false, true)) return
+        // The display's refresh interval, read on the main thread for the lane's frame timing.
+        val refreshNanos = refreshIntervalNanos()
         // The preceding native frame can finish while this tick acquires the
         // slot. Wait for composition and the owner's preparation handoff before
         // submitting another frame that could delay its transition state writes.
@@ -1685,6 +1699,7 @@ internal class ExperienceSurfaceHost(
                     // not consume time, and visibility generations reset it.
                     val resumed = timelineResumed.also { timelineResumed = false }
                     val clockReset = layoutStepPending || lastSteppedGeneration != generation || resumed
+                    if (clockReset) displayLagNanos = 0L
                     val elapsedSeconds = if (clockReset) {
                         0.0
                     } else if (sent != null) {
@@ -1698,9 +1713,17 @@ internal class ExperienceSurfaceHost(
                                 "Experience transition step failed", error)
                             return@enqueue
                         }
-                        // Never time an earlier frame already stepped, nor a batch sent after this frame's time.
-                        (frameTimeNanos - maxOf(sent.sentNanos, lastFrameNanos)).coerceAtLeast(0L) / 1_000_000_000.0
+                        // Every frame is timed when its picture is shown, as Core Animation times a layer animation:
+                        // one refresh after its vsync. This one was drawn after the batch was sent, so its picture
+                        // is shown at a refresh still ahead of now. The step begins when its batch was sent, or
+                        // when the last stepped picture was shown if that is later, so time already stepped is
+                        // never stepped again. Either is before this picture is shown: the first frame moves.
+                        val lastShown = lastFrameNanos + refreshNanos + displayLagNanos
+                        val shown = displayTimeNanos(frameTimeNanos + refreshNanos + displayLagNanos, refreshNanos, nanoTime())
+                        displayLagNanos = shown - frameTimeNanos - refreshNanos
+                        (shown - maxOf(sent.sentNanos, lastShown)).coerceAtLeast(0L) / 1_000_000_000.0
                     } else {
+                        // Each picture is shown one vsync spacing after the last, so the display times differ by it.
                         (frameTimeNanos - lastFrameNanos) / 1_000_000_000.0
                     }
                     if (!layoutStepPending || lastSteppedGeneration != generation || resumed) {
@@ -2082,4 +2105,13 @@ internal class ExperienceSurfaceHost(
         const val NUX_STATUS_OK = 0
 
     }
+}
+
+/**
+ * When a picture due at [displayNanos] is shown if it is drawn at [nowNanos]: then, or the first refresh on its grid
+ * that is still ahead of now.
+ */
+internal fun displayTimeNanos(displayNanos: Long, refreshNanos: Long, nowNanos: Long): Long {
+    if (refreshNanos <= 0L || nowNanos < displayNanos) return displayNanos
+    return displayNanos + ((nowNanos - displayNanos) / refreshNanos + 1L) * refreshNanos
 }
