@@ -288,6 +288,32 @@ class ExperienceStepTimingTest {
         }
     }
 
+    @Test fun `a step's first frame drawn too late for its refresh is shown a refresh later, and the next frame does not count that refresh again`() = runTest {
+        debuggable(true)
+        withPage { page ->
+            page.frame()
+            val t1 = page.frame()
+            val t2 = t1 + FRAME_NANOS
+            val sent = t2 + SENT_AFTER_FRAME_NANOS
+            page.at(sent)
+            page.begin(page.toB, back = false)
+            // The frame is drawn 2 ms after its refresh (t2 plus one), so its picture can only reach the next one.
+            page.at(t2 + REFRESH_NANOS + 2_000_000L)
+            assertEquals(t2, page.frame())
+            page.at(0L)
+            // Busy past its refresh, the lane misses one vsync; the next frame is shown one refresh after the late one.
+            page.skipFrame()
+            val t4 = page.frame()
+            val trace = page.trace()
+            val steps = trace.drop(trace.indexOfFirst { it.startsWith("begin:") } + 1).filter { it.startsWith("step:") }
+            val shown = t2 + 2 * REFRESH_NANOS
+            val first = ((shown - sent) / 1_000_000_000.0).toFloat()
+            val next = ((t4 + REFRESH_NANOS - shown) / 1_000_000_000.0).toFloat()
+            assertEquals(listOf("step:0.0", "step:$first", "step:$next"), steps.take(3))
+            assertEquals("One refresh, not two", REFRESH_NANOS / 1_000_000_000.0, next.toDouble(), 0.000_01)
+        }
+    }
+
     @Test fun `a step sent before the last picture is shown counts from that picture, one refresh before its own`() = runTest {
         debuggable(true)
         withPage { page ->
@@ -389,6 +415,9 @@ class ExperienceStepTimingTest {
             clock.addAndGet(16_666_667L)
             return time
         }
+
+        /** A vsync whose frame callback never runs, as when the lane is still busy with the frame before. */
+        fun skipFrame() { clock.addAndGet(16_666_667L) }
 
         /** Every native call the fake runtime recorded, in order. */
         fun trace(): List<String> = lane.blockingCall { native.trace.toList() }
