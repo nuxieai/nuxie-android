@@ -76,6 +76,8 @@ internal class ExperienceSurfaceHost(
     private val initialPresentationSize: ExperienceArtboardSize? = null,
     /** The clock Choreographer frame times are on; a transition write is stamped with it when it is sent. */
     private val nanoTime: () -> Long = System::nanoTime,
+    /** The display's refresh interval; null reads it from the view's display. */
+    private val refreshNanos: (() -> Long)? = null,
 ) : TextureView(context), TextureView.SurfaceTextureListener, Choreographer.FrameCallback {
     @Volatile private var layoutBounds = artboardSize
     private data class LayoutDelivery(val bounds: ExperienceArtboardSize, val contentHeight: Float?)
@@ -758,6 +760,8 @@ internal class ExperienceSurfaceHost(
      * and steps from this one (UNIV-6118), so a picture that missed its refresh is not counted again by the next.
      */
     private var lastShownNanos = 0L
+    /** The refresh interval [lastShownNanos] was timed with. */
+    private var lastShownRefreshNanos = 0L
     private var lastSteppedGeneration = -1L
     private val pointerInput = ExperienceRuntimePointerInput(artboardSize)
     private val focusInput = ExperienceFocusInputQueue()
@@ -1634,6 +1638,7 @@ internal class ExperienceSurfaceHost(
 
     /** The display's refresh interval; 60 Hz when the view has no display yet. */
     private fun refreshIntervalNanos(): Long {
+        refreshNanos?.let { return it() }
         val rate = display?.refreshRate?.takeIf { it.isFinite() && it >= 1f } ?: 60f
         return (1_000_000_000.0 / rate).toLong()
     }
@@ -1700,6 +1705,12 @@ internal class ExperienceSurfaceHost(
                     // Every frame is timed when its picture is shown, as Core Animation times a layer animation: one
                     // refresh after its vsync, or a later refresh if it is drawn too late for that one.
                     val shownNanos: Long
+                    // A changed refresh rate moves when a picture is shown after its vsync; the last picture is
+                    // retimed by the same, so the vsync spacing alone steps the next frame.
+                    if (lastShownRefreshNanos != 0L && refreshNanos != lastShownRefreshNanos) {
+                        lastShownNanos += refreshNanos - lastShownRefreshNanos
+                        lastShownRefreshNanos = refreshNanos
+                    }
                     val elapsedSeconds = if (clockReset) {
                         shownNanos = frameTimeNanos + refreshNanos
                         0.0
@@ -1726,6 +1737,7 @@ internal class ExperienceSurfaceHost(
                     }
                     if (!layoutStepPending || lastSteppedGeneration != generation || resumed) {
                         lastShownNanos = if (clockReset) shownNanos else maxOf(lastShownNanos, shownNanos)
+                        lastShownRefreshNanos = refreshNanos
                     }
                     lastSteppedGeneration = generation
                     val correlationId = nextCorrelationId

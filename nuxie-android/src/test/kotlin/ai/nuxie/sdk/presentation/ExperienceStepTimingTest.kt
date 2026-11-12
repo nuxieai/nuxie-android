@@ -314,6 +314,21 @@ class ExperienceStepTimingTest {
         }
     }
 
+    @Test fun `a change of refresh rate steps each frame by its vsync spacing, with no stall and no jump`() = runTest {
+        debuggable(true)
+        withPage { page ->
+            page.frame()
+            val t1 = page.frame()
+            page.refresh(8_333_333L)
+            val t2 = page.frameAt(t1 + 8_333_333L)
+            page.refresh(REFRESH_NANOS)
+            val t3 = page.frameAt(t2 + FRAME_NANOS)
+            val steps = page.trace().filter { it.startsWith("step:") }.takeLast(2)
+            assertEquals(listOf("step:${((t2 - t1) / 1_000_000_000.0).toFloat()}", "step:${((t3 - t2) / 1_000_000_000.0).toFloat()}"),
+                steps)
+        }
+    }
+
     @Test fun `a step sent before the last picture is shown counts from that picture, one refresh before its own`() = runTest {
         debuggable(true)
         withPage { page ->
@@ -398,6 +413,8 @@ class ExperienceStepTimingTest {
         private val clock: java.util.concurrent.atomic.AtomicLong,
         /** The surface's own clock, when a test sets it. */
         private val now: java.util.concurrent.atomic.AtomicLong,
+        /** The display's refresh interval, as the surface reads it. */
+        private val refreshNanos: java.util.concurrent.atomic.AtomicLong,
     ) {
         /** Sets the surface's own clock; 0 goes back to 5 ms after the last frame. */
         fun at(nanos: Long) = now.set(nanos)
@@ -415,6 +432,12 @@ class ExperienceStepTimingTest {
             clock.addAndGet(16_666_667L)
             return time
         }
+
+        /** Sets the display's refresh interval, as a change of refresh rate does. */
+        fun refresh(nanos: Long) = refreshNanos.set(nanos)
+
+        /** One frame at [time]; the next [frame] follows it by one 60 Hz frame. */
+        fun frameAt(time: Long): Long { clock.set(time); return frame() }
 
         /** A vsync whose frame callback never runs, as when the lane is still busy with the frame before. */
         fun skipFrame() { clock.addAndGet(16_666_667L) }
@@ -488,8 +511,10 @@ class ExperienceStepTimingTest {
         // A test that sets [now] reads that; otherwise a step's batch is sent between frames: 5 ms after the last
         // frame, 11.667 ms before the next.
         val now = java.util.concurrent.atomic.AtomicLong(0L)
+        val refresh = java.util.concurrent.atomic.AtomicLong(REFRESH_NANOS)
         val surface = ExperienceSurfaceHost(app, lane, runtime = NuxieRuntime(native), usesSystemFrameCallbacks = false,
-            nanoTime = { now.get().takeIf { it != 0L } ?: (clock.get() - FRAME_NANOS + SENT_AFTER_FRAME_NANOS) })
+            nanoTime = { now.get().takeIf { it != 0L } ?: (clock.get() - FRAME_NANOS + SENT_AFTER_FRAME_NANOS) },
+            refreshNanos = { refresh.get() })
         val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).setup()
         val scene = java.io.File.createTempFile("step-timing", ".riv").apply { writeBytes(byteArrayOf(1)) }
         val listener = object : ExperienceSurfaceHost.Listener {
@@ -516,7 +541,7 @@ class ExperienceStepTimingTest {
             }
             mounted = ExperienceMountedScreen(activity.get(), source, listener, { throw AssertionError(it) })
             set(mounted, "surface", surface)
-            body(Page(this, surface, native, lane, mounted, listener, source, clock, now))
+            body(Page(this, surface, native, lane, mounted, listener, source, clock, now, refresh))
         } finally {
             mounted?.let {
                 val ownedLane = field(it, "lane") as NuxieRuntimeLane
