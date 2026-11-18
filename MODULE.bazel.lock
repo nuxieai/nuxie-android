@@ -250,8 +250,8 @@
   "moduleExtensions": {
     "//scripts/bazel:repositories.bzl%runtime_artifacts": {
       "general": {
-        "bzlTransitiveDigest": "c90df7C6ArWzfjos3c05uVGyYMxu4gI1zxLXthRpGtU=",
-        "usagesDigest": "cINWm1F6bXpXvhFu69dwhrlh+0D4lxopQru09yjrcdU=",
+        "bzlTransitiveDigest": "kVQ0QufqTqT0RcvGp6PgaEiDzYfhxH08nxtWlRzves4=",
+        "usagesDigest": "QFfwvYMgLAAcY3h3Z8cqaYjaEPimvjuRt2HldBYqprU=",
         "recordedInputs": [],
         "generatedRepoSpecs": {
           "nuxie_runtime_android": {
@@ -268,7 +268,7 @@
     "@@rules_android_ndk+//:extension.bzl%android_ndk_repository_extension": {
       "general": {
         "bzlTransitiveDigest": "j+NMXk5/a1vnDypModKL+ToEo/4o7DJeXSFhTfbJ7rI=",
-        "usagesDigest": "il73RSo92vy4x4cIZRPu1B60G8COHj/2VsUSKeb7sK4=",
+        "usagesDigest": "D5A69MKSfa2UK7S/HRWibS4fYdemEfY8/gP+csTAc0c=",
         "recordedInputs": [],
         "generatedRepoSpecs": {
           "androidndk": {
@@ -284,7 +284,7 @@
     "@@rules_kotlin+//src/main/starlark/core/repositories:bzlmod_setup.bzl%rules_kotlin_extensions": {
       "general": {
         "bzlTransitiveDigest": "1eDDuTFD39r/W+K8QY/4BN9y/SvxQjD9Z0bTSo8NWTM=",
-        "usagesDigest": "QRmeeqleV58NUrsPekDE/i7FXESrIGAp9mami2/kdKY=",
+        "usagesDigest": "BFs/7IJpIyzosYaP6etW4KnVdehS9gYUHyIrg7+txQ8=",
         "recordedInputs": [
           "REPO_MAPPING:rules_kotlin+,bazel_tools bazel_tools"
         ],
