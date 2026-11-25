@@ -913,8 +913,8 @@ class ExperienceLayerHostNavigationDeviceTest {
     private suspend fun ExperienceSurfaceHost.rowOrNull(screenId: String): Map<String, NuxieViewModelScalarValue>? =
         withTimeoutOrNull(100) { runCatching { row(screenId) }.getOrNull() }
 
-    /** The page clock as the surface runs it: the Choreographer time of the last frame that stepped this page's player. */
-    private suspend fun ExperienceSurfaceHost.lastSteppedFrame(): Long = onLane { it.privateField("lastFrameNanos") as Long }
+    /** The page clock as the surface runs it: when the last frame that stepped this page's player is shown. */
+    private suspend fun ExperienceSurfaceHost.lastSteppedFrame(): Long = onLane { it.privateField("lastShownNanos") as Long }
 
     private fun ExperienceSurfaceHost.isRunning(): Boolean = privateField("running") as Boolean
 
