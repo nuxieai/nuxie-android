@@ -85,6 +85,17 @@ jobs:
           scripts/bazel/sdk.sh instrumentation
           scripts/bazel/sdk.sh prepare --output build/maven-repository
 
+      - name: Upload Bazel test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bazel-testlogs
+          path: |
+            bazel-testlogs/**/test.log
+            bazel-testlogs/**/test.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Qualify the prepared Maven SDK
         run: >-
           python3 scripts/test-maven-consumer.py

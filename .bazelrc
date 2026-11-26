@@ -11,4 +11,6 @@ build --experimental_strict_java_deps=off
 # Preserve Gradle's permission inheritance from SDK and dependency manifests.
 build --merge_android_manifest_permissions
 test --test_output=errors
+# Print a failing test's whole log; the default 1 MiB cap cut CI logs before the failing test's name.
+test --experimental_ui_max_stdouterr_bytes=16777216
 test --test_env=NUXIE_HOST_CAPI_LIB=
