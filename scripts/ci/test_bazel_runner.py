@@ -69,6 +69,21 @@ else: sys.exit(99)
         self.assertTrue(any(argument.startswith('--build_event_json_file=') for argument in received))
         self.assertIn('--disk_cache=' + self.environment['OWNED_CACHE'] + '/actions', received)
 
+    def test_batch_commands_use_singleplex_workers(self):
+        # A batch JVM exits after each command; multiplex workers crash that exit.
+        result = self.run_wrapper(['build', '//fixture'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        received = json.loads(self.calls.read_text())
+        self.assertIn('--batch', received[:received.index('build')])
+        self.assertIn('--noworker_multiplex', received[received.index('build'):])
+        self.environment.update(NUXIE_CI_RUNNER_POLICY_VERSION='1', NUXIE_BAZEL_BATCH='0',
+                                NUXIE_BAZEL_REMOTE_CACHE_MODE='off')
+        result = self.run_wrapper(['build', '//fixture'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        received = json.loads(self.calls.read_text())
+        self.assertNotIn('--batch', received)
+        self.assertNotIn('--noworker_multiplex', received)
+
     def test_caller_cannot_replace_budgets_outputs_or_evidence(self):
         for option in ('--jobs=100', '-j100', '--local_resources=memory=65536', '--disk_cache=/other',
                        '--repo_env=NUXIE_BAZEL_BOOTSTRAP_JOBS=100', '--profile=/other'):

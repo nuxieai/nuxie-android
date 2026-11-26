@@ -100,9 +100,21 @@ def bazel_command(workspace=None, output_base_variable="NUXIE_ANDROID_BAZEL_OUTP
             if not Path(value).is_absolute():
                 raise ValueError(variable + " must be absolute")
             startup.append(option + "=" + value)
-    if os.environ.get("NUXIE_BAZEL_BATCH", os.environ.get("CI", "0")) == "1":
+    if batch_mode():
         startup.append("--batch")
     return [*executable, *startup]
+
+
+def batch_mode():
+    return os.environ.get("NUXIE_BAZEL_BATCH", os.environ.get("CI", "0")) == "1"
+
+
+# A batch-mode JVM exits at the end of every command. A multiplex worker's
+# reader thread that sees its worker die during that exit calls
+# Runtime.removeShutdownHook, which throws "Shutdown in progress" and turns a
+# completed build into a crash (exit 37). Multiplex workers cannot outlive a
+# batch command anyway, so batch commands use singleplex workers.
+BATCH_COMMAND_OPTIONS = ("--noworker_multiplex",)
 
 
 def bazel(command, *args, capture=False, workspace=None, output_base_variable="NUXIE_ANDROID_BAZEL_OUTPUT_BASE"):
@@ -118,6 +130,8 @@ def bazel(command, *args, capture=False, workspace=None, output_base_variable="N
         if not re.fullmatch(r"[1-9][0-9]*", jobs):
             raise ValueError("NUXIE_BAZEL_JOBS must be a positive integer")
         options = ["--jobs=" + jobs]
+    if command in {"build", "test", "run", "cquery", "aquery"} and batch_mode():
+        options += BATCH_COMMAND_OPTIONS
     argv = executable + [command] + options + list(args)
     if capture:
         return subprocess.check_output(argv, cwd=workspace, env=environment, text=True).strip()
