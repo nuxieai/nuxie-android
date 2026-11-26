@@ -218,6 +218,12 @@ class BazelSdkPackagingTests(unittest.TestCase):
                 self.assertIn("--output_user_root=" + variables["NUXIE_BAZEL_OUTPUT_USER_ROOT"], command)
             with patch.dict("os.environ", {"NUXIE_BAZEL_BATCH": "0"}):
                 self.assertNotIn("--batch", sdk.bazel_command())
+            with patch.object(sdk, "require_space"), patch.object(sdk.subprocess, "run") as run:
+                sdk.bazel("build", "//:nuxie_android_aar")
+                self.assertIn("--noworker_multiplex", run.call_args.args[0])
+                with patch.dict("os.environ", {"NUXIE_BAZEL_BATCH": "0"}):
+                    sdk.bazel("build", "//:nuxie_android_aar")
+                    self.assertNotIn("--noworker_multiplex", run.call_args.args[0])
         self.assertEqual((sdk_root / ".bazel-cache.local.bazelrc").read_bytes(),
                          (fixture_root / ".bazel-cache.local.bazelrc").read_bytes())
 

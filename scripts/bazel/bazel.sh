@@ -34,7 +34,9 @@ if [[ -n "${NUXIE_BAZEL_CACHE_DIR+x}" ]]; then
   cache_options="$(python3 "$ROOT_DIR/scripts/bazel/cache.py")"
   startup_args+=("$cache_options")
 fi
+batch=0
 if [[ "${NUXIE_BAZEL_BATCH:-${CI:-0}}" == "1" ]]; then
+  batch=1
   startup_args+=("--batch")
 fi
 if [[ -n "${NUXIE_BAZEL_OUTPUT_USER_ROOT:-}" ]]; then
@@ -55,6 +57,12 @@ fi
 command_args=()
 case "$command" in
   build|test|run|cquery|aquery)
+    # A batch-mode JVM exits after every command; a multiplex worker's reader
+    # thread that sees its worker die during that exit throws "Shutdown in
+    # progress" and crashes a completed build (exit 37). See sdk.py.
+    if [[ "${batch}" == 1 ]]; then
+      command_args+=("--noworker_multiplex")
+    fi
     if [[ -n "${NUXIE_BAZEL_JOBS:-}" ]]; then
       if [[ ! "$NUXIE_BAZEL_JOBS" =~ ^[1-9][0-9]*$ ]]; then
         echo "NUXIE_BAZEL_JOBS must be a positive integer" >&2
